@@ -24,5 +24,6 @@ class AppError:
     category: ErrorCategory
     message: str
     user_message: str = ""
+    user_message_key: str = ""
+    user_message_params: dict[str, Any] = field(default_factory=dict)
     details: dict[str, Any] = field(default_factory=dict)
-

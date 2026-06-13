@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from v3.core.routing import WorkflowTarget
+from core.routing import WorkflowTarget
 
 
 class TraceLevel(StrEnum):
@@ -25,4 +25,3 @@ class TraceEvent:
     message: str
     payload: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-

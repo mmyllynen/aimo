@@ -14,13 +14,14 @@ The goal is to build Aimo from these local specifications:
 - `VISUALIZATION_SPEC.md`
 - `LLM_CONTRACTS.md`
 - `OPERATIONS_SPEC.md`
+- `I18N_SPEC.md`
 - `REWRITE_FOUNDATION.md`
 - `REWRITE_PLAN.md`
 - `V3_ROADMAP.md`
 
 ## Product Intent
 
-Aimo is a Finnish-speaking Discord bot for:
+Aimo is a multilingual Discord bot for:
 
 - concise public chat replies
 - workout coaching conversation
@@ -29,6 +30,8 @@ Aimo is a Finnish-speaking Discord bot for:
 - heart-rate zone configuration
 - natural-language workout visualizations
 - structured debug traces
+
+Initial supported languages are Finnish and English. The configured language comes from `aimo.conf`; deterministic bot-owned messages must use translation keys rather than hard-coded response text.
 
 The bot should be dependable and workflow-driven. LLMs may interpret language and draft text, but deterministic application code owns state transitions, data access, validation, rendering, permissions, and error handling.
 
@@ -52,7 +55,7 @@ It is not yet wired into production and must remain independent until an explici
 - Use SQLite through the storage helpers/repositories defined here.
 - Keep Discord-specific objects at the adapter boundary.
 - Make workflow code operate on canonical events and workflow results.
-- Fail with typed error categories and stable Finnish user-facing responses.
+- Fail with typed error categories and stable localized user-facing responses.
 
 ## Roadmap
 
@@ -72,6 +75,7 @@ When changing Aimo:
 
 - run Python syntax checks for touched modules
 - run tests once they exist
+- validate internationalization catalogs when user-facing text changes
 - verify SQLite schema loading when schema changes
 
 ## Non-Goals

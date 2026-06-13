@@ -1,0 +1,3 @@
+[bot]
+# Supported values: fi, en
+language = fi

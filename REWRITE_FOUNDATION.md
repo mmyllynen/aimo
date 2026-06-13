@@ -11,6 +11,7 @@ The foundation contains:
 - workflow result model
 - application error categories
 - trace event model
+- internationalization contract and initial catalogs
 - initial SQLite schema
 - lightweight Python skeleton for these contracts
 
@@ -103,7 +104,36 @@ All user-visible failures should map to stable categories:
 - `storage_error`
 - `unexpected`
 
-Each category should have a Finnish response template later. The foundation only defines the categories.
+Each category should have a stable response template in every supported language. The foundation defines the categories and the initial `fi`/`en` translation keys.
+
+## Internationalization Model
+
+Bot-owned user-facing text must be localizable.
+
+Initial supported languages:
+
+- `fi`
+- `en`
+
+Runtime config is read from `aimo.conf`:
+
+```ini
+[bot]
+language = fi
+```
+
+Missing config defaults to `fi`. Explicit unsupported language values fail during config validation.
+
+The skeleton includes:
+
+- `SupportedLanguage`
+- `TranslationKey`
+- `Translator`
+- `LocalizedText`
+- `load_localization_config`
+- `validate_catalogs`
+
+Workflow and error contracts can carry translation keys and parameters so the adapter/application layer can render messages in the configured language.
 
 ## Trace Model
 
@@ -152,8 +182,11 @@ core/
   workflows.py
   errors.py
   trace.py
+  i18n.py
 storage/
   schema.sql
+tests/
+  test_i18n.py
 ```
 
 This layout is intentionally small. It defines contracts only.
@@ -164,5 +197,6 @@ The foundation task is complete when:
 
 - all skeleton modules import cleanly
 - dataclasses/enums model the contracts above
+- translation catalogs validate for both supported languages
 - schema.sql can be read as the initial v3 storage draft
 - no production behavior changes until the cutover phase explicitly wires the runtime

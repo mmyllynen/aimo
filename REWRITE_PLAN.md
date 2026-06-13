@@ -4,7 +4,7 @@
 
 Aimo is a Discord-native personal training assistant. It should feel like one coherent bot that can:
 
-- answer normal conversational messages in Finnish
+- answer normal conversational messages in the configured language
 - understand workout-related questions and answer as a concise, credible coach
 - ingest GPX attachments from Discord and store them as user-owned workout records
 - maintain lightweight user profile data, including heart-rate zones
@@ -334,7 +334,7 @@ User-visible errors should be categorized:
 - temporary model/API failure
 - permission denied
 
-Each category should have a stable Finnish response template.
+Each category should have a stable localized response template.
 
 ### Observability
 
