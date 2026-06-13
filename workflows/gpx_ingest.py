@@ -5,6 +5,7 @@ from core.errors import AppError, ErrorCategory
 from core.i18n import LocalizedText, TranslationKey
 from core.routing import RouteDecision
 from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
+from pathlib import Path
 from storage.unit_of_work import RepositoryBundle
 from workout.ingest import (
     GpxIngestRequest,
@@ -23,6 +24,7 @@ class GpxIngestWorkflow:
         repositories: RepositoryBundle,
         *,
         max_attachment_size_bytes: int,
+        raw_storage_root: Path | None = None,
     ) -> WorkflowResult:
         attachment = _first_supported_attachment(event.attachments)
         if attachment is None:
@@ -54,6 +56,7 @@ class GpxIngestWorkflow:
                     content=content,
                     created_at=event.created_at,
                     max_size_bytes=max_attachment_size_bytes,
+                    raw_storage_root=raw_storage_root,
                 ),
                 repositories,
             )

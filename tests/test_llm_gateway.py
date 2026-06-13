@@ -131,10 +131,9 @@ class LLMGatewayTests(unittest.TestCase):
                 {
                     LLMOperation.VISUALIZATION_INTENT: {
                         "workout_selector": {"type": "latest"},
-                        "chart_family": "line",
                         "x_metric": "elapsed_s",
-                        "y_metrics": ["heart_rate_bpm"],
-                        "transforms": [],
+                        "requested_metrics": ["heart_rate_bpm"],
+                        "transform_hints": [],
                         "date_range": {},
                         "comparison_mode": "",
                     }
@@ -178,6 +177,40 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertEqual(reply.reply_text, "Good aerobic run.")
         self.assertIn("Respond in en", client.requests[0].system_prompt)
         self.assertNotIn("workout_points", client.requests[0].user_payload)
+
+    def test_gateway_observer_receives_success_and_error_traces(self) -> None:
+        traces = []
+        gateway = LLMGateway(
+            FakeLLMClient(
+                {
+                    LLMOperation.CHAT_REPLY: {
+                        "reply_text": "Sure.",
+                        "tone": "concise",
+                        "should_update_summary": False,
+                    }
+                }
+            ),
+            observer=traces.append,
+        )
+
+        write_chat_reply(gateway, ChatReplyInput(user_text="hello"), language=SupportedLanguage.EN)
+        with self.assertRaises(LLMGatewayError):
+            gateway.run(
+                LLMRequest(
+                    operation=LLMOperation.CHAT_REPLY,
+                    system_prompt="bad",
+                    user_payload={"raw_points": []},
+                    response_schema={"required": [], "properties": {}},
+                    max_tokens=100,
+                )
+            )
+
+        self.assertEqual(traces[0].operation, LLMOperation.CHAT_REPLY)
+        self.assertEqual(traces[0].status, "success")
+        self.assertEqual(traces[0].response_keys, ("reply_text", "should_update_summary", "tone"))
+        self.assertGreaterEqual(traces[0].duration_ms, 0)
+        self.assertEqual(traces[1].status, "error")
+        self.assertEqual(traces[1].error_type, "LLMGatewayError")
 
 
 if __name__ == "__main__":

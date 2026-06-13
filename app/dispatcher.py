@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 from app.policy import AdminPolicy
@@ -9,7 +10,8 @@ from core.events import CanonicalEvent, EventKind
 from core.i18n import DEFAULT_LANGUAGE, SupportedLanguage
 from core.routing import RouteConfidence, RouteDecision, WorkflowTarget
 from core.workflows import WorkflowResult
-from llm.gateway import LLMGateway
+from llm.gateway import LLMCallTrace, LLMGateway, LLMGatewayError
+from llm.operations import IntentClassificationInput, classify_intent
 from storage.repositories import DebugTraceEventRecord, HistoryEventRecord
 from storage.unit_of_work import UnitOfWork
 from workflows.chat import ChatWorkflow
@@ -29,6 +31,8 @@ class DispatchContext:
     language: SupportedLanguage = DEFAULT_LANGUAGE
     llm_gateway: LLMGateway | None = None
     max_attachment_size_bytes: int = 25 * 1024 * 1024
+    raw_gpx_path: Path | None = None
+    artifact_path: Path | None = None
     trace_keep_limit: int = 1000
 
 
@@ -69,7 +73,7 @@ class Dispatcher:
             )
             repositories.history.add(_history_record(event))
 
-            route = route_event(event)
+            route = route_event(event, llm_gateway=context.llm_gateway)
             trace_id = _trace_id(event)
             repositories.debug_traces.create(
                 trace_id=trace_id,
@@ -99,6 +103,7 @@ class Dispatcher:
                     created_at=event.created_at.isoformat(),
                 )
             )
+            llm_gateway = _trace_llm_gateway(context.llm_gateway, repositories.debug_traces, trace_id, event)
 
             if route.target == WorkflowTarget.HELP:
                 result = self.help_workflow.handle(event, route)
@@ -118,21 +123,23 @@ class Dispatcher:
                     route,
                     repositories,
                     max_attachment_size_bytes=context.max_attachment_size_bytes,
+                    raw_storage_root=context.raw_gpx_path,
                 )
             elif route.target == WorkflowTarget.VISUALIZATION:
                 result = self.visualization_workflow.handle(
                     event,
                     route,
                     repositories,
-                    gateway=context.llm_gateway,
+                    gateway=llm_gateway,
                     language=context.language,
+                    artifact_root=context.artifact_path,
                 )
             elif route.target == WorkflowTarget.WORKOUT_CHAT:
                 result = self.workout_chat_workflow.handle(
                     event,
                     route,
                     repositories,
-                    gateway=context.llm_gateway,
+                    gateway=llm_gateway,
                     language=context.language,
                 )
             elif route.target == WorkflowTarget.CHAT:
@@ -140,7 +147,7 @@ class Dispatcher:
                     event,
                     route,
                     repositories,
-                    gateway=context.llm_gateway,
+                    gateway=llm_gateway,
                     language=context.language,
                 )
             else:
@@ -170,7 +177,7 @@ class Dispatcher:
             return result
 
 
-def route_event(event: CanonicalEvent) -> RouteDecision:
+def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None) -> RouteDecision:
     if event.kind == EventKind.MESSAGE:
         return RouteDecision(
             target=WorkflowTarget.CHAT,
@@ -180,21 +187,6 @@ def route_event(event: CanonicalEvent) -> RouteDecision:
 
     command_name = str(event.metadata.get("command_name", "")).lower()
     text = event.text.strip().lower()
-    if event.attachments and _has_gpx_attachment(event):
-        return RouteDecision(
-            target=WorkflowTarget.GPX_INGEST,
-            confidence=RouteConfidence.HIGH,
-            slots={
-                "attachment_ids": [attachment.attachment_id for attachment in event.attachments],
-            },
-            reason="Supported GPX attachment present.",
-        )
-    if _is_visualization_request(event):
-        return RouteDecision(
-            target=WorkflowTarget.VISUALIZATION,
-            confidence=RouteConfidence.MEDIUM,
-            reason="Visualization request skeleton matched chart language.",
-        )
     if command_name == "debug" or text in {"/debug", "debug"}:
         return RouteDecision(
             target=WorkflowTarget.DEBUG,
@@ -218,6 +210,38 @@ def route_event(event: CanonicalEvent) -> RouteDecision:
             confidence=RouteConfidence.HIGH,
             reason="Explicit help request.",
         )
+    if event.attachments and _has_gpx_attachment(event):
+        return RouteDecision(
+            target=WorkflowTarget.GPX_INGEST,
+            confidence=RouteConfidence.HIGH,
+            slots={
+                "attachment_ids": [attachment.attachment_id for attachment in event.attachments],
+            },
+            reason="Supported GPX attachment present.",
+        )
+    if _should_use_llm_routing(event, command_name, llm_gateway):
+        try:
+            return classify_intent(
+                llm_gateway,
+                IntentClassificationInput(
+                    event_kind=event.kind.value,
+                    user_text=event.text,
+                    has_attachments=bool(event.attachments),
+                    compact_channel_state={
+                        "guild_id_present": event.guild_id is not None,
+                        "source": event.source.value,
+                        "command_name": command_name,
+                    },
+                ),
+            )
+        except LLMGatewayError:
+            pass
+    if _is_visualization_request(event):
+        return RouteDecision(
+            target=WorkflowTarget.VISUALIZATION,
+            confidence=RouteConfidence.MEDIUM,
+            reason="Visualization request skeleton matched chart language.",
+        )
     if _is_workout_chat_request(event):
         return RouteDecision(
             target=WorkflowTarget.WORKOUT_CHAT,
@@ -238,6 +262,20 @@ def _is_help_request(event: CanonicalEvent) -> bool:
         return True
     text = event.text.strip().lower()
     return command_name in {"help"} or text in {"apua", "help", "/help", "/aimo"}
+
+
+def _should_use_llm_routing(
+    event: CanonicalEvent,
+    command_name: str,
+    llm_gateway: LLMGateway | None,
+) -> bool:
+    if llm_gateway is None:
+        return False
+    if event.kind == EventKind.MENTION:
+        return True
+    if event.kind == EventKind.SLASH_COMMAND and command_name == "aimo" and event.text.strip():
+        return True
+    return False
 
 
 def _has_gpx_attachment(event: CanonicalEvent) -> bool:
@@ -297,3 +335,37 @@ def _history_record(event: CanonicalEvent) -> HistoryEventRecord:
 
 def _trace_id(event: CanonicalEvent) -> str:
     return f"trace:{event.event_id}:{uuid4().hex[:12]}"
+
+
+def _trace_llm_gateway(
+    gateway: LLMGateway | None,
+    debug_traces,
+    trace_id: str,
+    event: CanonicalEvent,
+) -> LLMGateway | None:
+    if gateway is None:
+        return None
+
+    def observe(call: LLMCallTrace) -> None:
+        debug_traces.add_event(
+            DebugTraceEventRecord(
+                trace_event_id=f"{trace_id}:llm:{uuid4().hex[:12]}",
+                trace_id=trace_id,
+                stage="llm",
+                level="info" if call.status == "success" else "error",
+                message=call.operation.value,
+                payload=redact_payload(
+                    {
+                        "operation": call.operation.value,
+                        "status": call.status,
+                        "duration_ms": round(call.duration_ms, 3),
+                        "max_tokens": call.max_tokens,
+                        "response_keys": list(call.response_keys),
+                        "error_type": call.error_type,
+                    }
+                ),
+                created_at=event.created_at.isoformat(),
+            )
+        )
+
+    return LLMGateway(gateway.client, observer=observe)

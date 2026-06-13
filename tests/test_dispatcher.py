@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 
 from adapters.discord.normalization import DiscordMessageSnapshot, DiscordSlashSnapshot, DiscordUserSnapshot, message_to_event, slash_to_event
 from app.dispatcher import DispatchContext, Dispatcher
 from app.policy import AdminPolicy
-from core.events import CanonicalEvent, EventKind, EventSource
+from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
 from core.workflows import OutgoingKind, WorkflowStatus
+from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
 from storage.repositories import DebugTraceEventRecord
 from storage.unit_of_work import UnitOfWork, open_database
 
@@ -83,6 +85,115 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(latest.source_event_id, "event-2")
         self.assertEqual(len(events), 2)
 
+    def test_dispatcher_records_llm_call_trace_event_without_prompt_payload(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.INTENT_CLASSIFICATION: {
+                    "workflow": "chat",
+                    "confidence": "high",
+                    "slots": {},
+                    "clarification": "",
+                    "reason": "General chat.",
+                },
+                LLMOperation.CHAT_REPLY: {
+                    "reply_text": "Moi.",
+                    "tone": "concise",
+                    "should_update_summary": False,
+                }
+            }
+        )
+        event = CanonicalEvent(
+            event_id="event-1",
+            source=EventSource.DISCORD_MESSAGE,
+            kind=EventKind.MENTION,
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user_id="user-1",
+            user_name="runner",
+            text="mitä kuuluu?",
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        with UnitOfWork(self.connection) as repositories:
+            trace = repositories.debug_traces.latest_for_user("user-1")
+            events = repositories.debug_traces.list_events(trace.trace_id)
+        llm_event = next(event for event in events if event.stage == "llm" and event.message == "chat_reply")
+        self.assertEqual(llm_event.message, "chat_reply")
+        self.assertEqual(llm_event.payload["status"], "success")
+        self.assertEqual(llm_event.payload["response_keys"], ["reply_text", "should_update_summary", "tone"])
+        self.assertNotIn("user_text", llm_event.payload)
+        self.assertNotIn("system_prompt", llm_event.payload)
+
+    def test_llm_routing_can_route_mention_without_keyword_markers(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.INTENT_CLASSIFICATION: {
+                    "workflow": "visualization",
+                    "confidence": "high",
+                    "slots": {"workout_selector": {"type": "latest"}},
+                    "clarification": "",
+                    "reason": "User wants a chart.",
+                },
+                LLMOperation.VISUALIZATION_INTENT: {
+                    "workout_selector": {"type": "latest"},
+                    "x_metric": "elapsed_s",
+                    "requested_metrics": ["heart_rate_bpm"],
+                    "transform_hints": [],
+                    "date_range": {},
+                    "comparison_mode": "",
+                },
+            }
+        )
+        event = CanonicalEvent(
+            event_id="event-1",
+            source=EventSource.DISCORD_MESSAGE,
+            kind=EventKind.MENTION,
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user_id="user-1",
+            user_name="runner",
+            text="tee se sama juttu viimeisestä lenkistä",
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(result.error.category.value, "no_matching_workout")
+        self.assertEqual(client.requests[0].operation, LLMOperation.INTENT_CLASSIFICATION)
+        self.assertEqual(client.requests[0].user_payload["user_text"], "tee se sama juttu viimeisestä lenkistä")
+        self.assertNotIn("workout_points", client.requests[0].user_payload)
+
+    def test_llm_routing_failure_falls_back_to_deterministic_chat_route(self) -> None:
+        client = FakeLLMClient({})
+        event = CanonicalEvent(
+            event_id="event-1",
+            source=EventSource.DISCORD_MESSAGE,
+            kind=EventKind.MENTION,
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user_id="user-1",
+            user_name="runner",
+            text="mitä kuuluu?",
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SYSTEM_ERROR)
+        with UnitOfWork(self.connection) as repositories:
+            trace = repositories.debug_traces.latest_for_user("user-1")
+        self.assertEqual(trace.workflow, "chat")
+
     def test_mention_help_routes_to_public_help(self) -> None:
         message = DiscordMessageSnapshot(
             message_id="event-1",
@@ -115,6 +226,32 @@ class DispatcherTests(unittest.TestCase):
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
         self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
+
+    def test_slash_aimo_help_takes_priority_over_attachment_ingest(self) -> None:
+        slash = DiscordSlashSnapshot(
+            interaction_id="interaction-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            command_name="aimo",
+            options={"apua": True},
+        )
+        event = slash_to_event(slash)
+        event = replace(
+            event,
+            attachments=(
+                AttachmentRef(
+                    attachment_id="attachment-1",
+                    filename="run.gpx",
+                    content_type="application/gpx+xml",
+                ),
+            ),
+        )
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 5)
 
     def test_debug_workflow_returns_requesters_latest_trace_as_json_file(self) -> None:
         with UnitOfWork(self.connection) as repositories:

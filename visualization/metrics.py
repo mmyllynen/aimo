@@ -2,6 +2,11 @@ from __future__ import annotations
 
 
 METRIC_ALIASES = {
+    "sykealue": "heart_rate_zone_seconds",
+    "sykealuejakauma": "heart_rate_zone_seconds",
+    "sykevyöhyke": "heart_rate_zone_seconds",
+    "heart_rate_zone": "heart_rate_zone_seconds",
+    "hr_zone": "heart_rate_zone_seconds",
     "syke": "heart_rate_bpm",
     "heart_rate": "heart_rate_bpm",
     "hr": "heart_rate_bpm",
@@ -21,6 +26,18 @@ METRIC_ALIASES = {
 
 DEFAULT_X_METRIC = "elapsed_s"
 DEFAULT_Y_METRICS = ("heart_rate_bpm",)
+CANONICAL_POINT_METRICS = {
+    "elapsed_s",
+    "distance_m",
+    "distance_km",
+    "latitude",
+    "longitude",
+    "elevation_m",
+    "heart_rate_bpm",
+    "cadence_spm",
+    "pace_s_per_km",
+    "heart_rate_zone_seconds",
+}
 
 
 def canonical_metric(value: str) -> str:
@@ -30,9 +47,19 @@ def canonical_metric(value: str) -> str:
 
 def infer_metrics_from_text(text: str) -> tuple[str, ...]:
     normalized = text.lower()
-    metrics: list[str] = []
+    matches: list[tuple[int, int, str]] = []
     for alias, metric in METRIC_ALIASES.items():
-        if alias in normalized and metric not in metrics and metric != DEFAULT_X_METRIC:
+        start = normalized.find(alias)
+        if start >= 0 and metric != DEFAULT_X_METRIC:
+            matches.append((start, -len(alias), metric))
+    occupied: set[int] = set()
+    metrics: list[str] = []
+    for start, negative_length, metric in sorted(matches):
+        span = set(range(start, start - negative_length))
+        if occupied & span:
+            continue
+        occupied.update(span)
+        if metric not in metrics:
             metrics.append(metric)
     return tuple(metrics or DEFAULT_Y_METRICS)
 
@@ -49,4 +76,3 @@ def infer_transforms_from_text(text: str) -> tuple[str, ...]:
     if "skaal" in normalized or "same range" in normalized or "normalize" in normalized:
         return ("normalize_to_primary_range",)
     return ()
-

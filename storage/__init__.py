@@ -24,6 +24,7 @@ from storage.repositories import (
     WorkoutsRepository,
 )
 from storage.sqlite import StorageError, load_schema, open_connection, transaction
+from storage.migrations import Migration, MigrationResult, load_migrations, migrate, open_migrated_database
 from storage.unit_of_work import RepositoryBundle, UnitOfWork, build_repositories, open_database
 
 __all__ = [
@@ -39,6 +40,8 @@ __all__ = [
     "HeartRateZonesRepository",
     "HistoryEventRecord",
     "HistoryRepository",
+    "Migration",
+    "MigrationResult",
     "RenderedArtifactRecord",
     "RenderedArtifactsRepository",
     "RepositoryBundle",
@@ -53,7 +56,10 @@ __all__ = [
     "WorkoutsRepository",
     "build_repositories",
     "load_schema",
+    "load_migrations",
+    "migrate",
     "open_database",
     "open_connection",
+    "open_migrated_database",
     "transaction",
 ]

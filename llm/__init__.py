@@ -4,10 +4,12 @@ from llm.gateway import (
     FakeLLMClient,
     LLMGateway,
     LLMGatewayError,
+    LLMCallTrace,
     LLMOperation,
     LLMRequest,
     LLMResponse,
 )
+from llm.factory import build_openai_gateway
 from llm.operations import (
     ChatReply,
     ChatReplyInput,
@@ -24,6 +26,7 @@ from llm.operations import (
     write_chat_reply,
     write_workout_reply,
 )
+from llm.openai_client import OpenAIClientConfig, OpenAIResponsesClient
 
 __all__ = [
     "ChatReply",
@@ -32,9 +35,13 @@ __all__ = [
     "IntentClassificationInput",
     "LLMGateway",
     "LLMGatewayError",
+    "LLMCallTrace",
     "LLMOperation",
     "LLMRequest",
     "LLMResponse",
+    "OpenAIClientConfig",
+    "OpenAIResponsesClient",
+    "build_openai_gateway",
     "VisualizationIntent",
     "VisualizationIntentInput",
     "WorkoutReply",

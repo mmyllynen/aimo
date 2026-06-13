@@ -30,6 +30,20 @@ class LineChart:
     height: int = 520
 
 
+@dataclass(frozen=True)
+class Bar:
+    label: str
+    value: float
+
+
+@dataclass(frozen=True)
+class BarChart:
+    title: str
+    bars: tuple[Bar, ...]
+    width: int = 900
+    height: int = 520
+
+
 def render_line_chart_png(chart: LineChart) -> bytes:
     pixels = _blank(chart.width, chart.height, (255, 255, 255))
     left, top, right, bottom = 70, 35, chart.width - 35, chart.height - 60
@@ -52,6 +66,28 @@ def render_line_chart_png(chart: LineChart) -> bytes:
             if previous is not None:
                 _line(pixels, chart.width, previous[0], previous[1], x, y, color)
             previous = (x, y)
+    return _png(chart.width, chart.height, pixels)
+
+
+def render_bar_chart_png(chart: BarChart) -> bytes:
+    pixels = _blank(chart.width, chart.height, (255, 255, 255))
+    left, top, right, bottom = 70, 35, chart.width - 35, chart.height - 60
+    _line(pixels, chart.width, left, bottom, right, bottom, (30, 30, 30))
+    _line(pixels, chart.width, left, top, left, bottom, (30, 30, 30))
+    if not chart.bars:
+        return _png(chart.width, chart.height, pixels)
+
+    max_value = max((bar.value for bar in chart.bars), default=0.0)
+    y_domain = (0.0, max(max_value, 1.0))
+    slot_width = max(1, (right - left) // len(chart.bars))
+    bar_width = max(8, round(slot_width * 0.65))
+    for index, bar in enumerate(chart.bars):
+        color = COLORS[index % len(COLORS)]
+        center = left + index * slot_width + slot_width // 2
+        x1 = center - bar_width // 2
+        x2 = center + bar_width // 2
+        y1 = _scale(bar.value, y_domain, bottom, top)
+        _rect(pixels, chart.width, x1, y1, x2, bottom - 1, color)
     return _png(chart.width, chart.height, pixels)
 
 
@@ -80,6 +116,12 @@ def _dot(pixels: bytearray, width: int, x: int, y: int, color: tuple[int, int, i
     for dx in range(-2, 3):
         for dy in range(-2, 3):
             _set(pixels, width, x + dx, y + dy, color)
+
+
+def _rect(pixels: bytearray, width: int, x1: int, y1: int, x2: int, y2: int, color: tuple[int, int, int]) -> None:
+    for y in range(min(y1, y2), max(y1, y2) + 1):
+        for x in range(min(x1, x2), max(x1, x2) + 1):
+            _set(pixels, width, x, y, color)
 
 
 def _line(
@@ -135,4 +177,3 @@ def _png(width: int, height: int, pixels: bytearray) -> bytes:
 def _chunk(kind: bytes, data: bytes) -> bytes:
     payload = kind + data
     return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload) & 0xFFFFFFFF)
-

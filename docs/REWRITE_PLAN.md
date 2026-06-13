@@ -249,36 +249,37 @@ Important rule: clarification is a workflow decision. If the user explicitly say
 
 Use two separate specs:
 
-### Chart Intent
+### Visualization Intent
 
 Produced from the user request. Small and semantic.
 
 ```text
 workout_selector
-chart_family
 x_metric
-y_metrics
-transforms
+requested_metrics
+transform_hints
 comparison_mode
 notes_requested
 ```
 
-### Render Plan
+### Visualization Spec
 
 Produced after data is resolved. Fully deterministic and validated.
 
 ```text
 datasets
-series
-axes
+marks
+encodings
+transforms
+filters
+aggregation
 scales
-colors
 annotations
 layout
 output
 ```
 
-The LLM can help create the render plan, but it only sees a dataset manifest. Python owns the final compilation, alias resolution, unit handling, transform application, and render validation.
+The LLM can help propose the visualization spec, but it only sees a dataset manifest. Python owns the final compilation, alias resolution, unit handling, transform application, and render validation.
 
 ## Clarification Policy
 
@@ -362,7 +363,7 @@ Test at four levels:
    - HR zone derivation
    - workout selection
    - chart transforms
-   - render plan validation
+   - visualization spec validation
 
 2. Workflow tests:
    - latest workout visualization does not clarify
@@ -425,7 +426,7 @@ Use fake LLM clients for deterministic tests. Do not make normal tests depend on
 - Implement chart intent extraction.
 - Implement workout and dataset resolution.
 - Implement dataset manifest generation.
-- Implement render plan compilation and validation.
+- Implement visualization spec compilation and validation.
 - Implement renderer and image delivery.
 
 ### Phase 7: Hardening

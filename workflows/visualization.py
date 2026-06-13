@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from core.events import CanonicalEvent
 from core.errors import AppError, ErrorCategory
@@ -10,9 +11,20 @@ from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, Workfl
 from llm.gateway import LLMGateway, LLMGatewayError
 from llm.operations import VisualizationIntent, VisualizationIntentInput, extract_visualization_intent
 from storage.repositories import RenderedArtifactRecord, WorkoutRecord
+from storage.files import write_bytes_under
 from storage.unit_of_work import RepositoryBundle
-from visualization.metrics import infer_metrics_from_text, infer_transforms_from_text, infer_x_metric_from_text
-from visualization.service import MissingPrimaryMetricError, render_workout_visualization
+from visualization.metrics import (
+    infer_metrics_from_text,
+    infer_transforms_from_text,
+    infer_x_metric_from_text,
+)
+from visualization.service import MissingPrimaryMetricError, VisualizationSpecInvalidError, render_workout_visualization
+from workout.references import (
+    WorkoutReferenceResolution,
+    WorkoutReferenceStatus,
+    resolve_workout_reference,
+    resolve_workout_selector,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +42,7 @@ class VisualizationWorkflow:
         *,
         gateway: LLMGateway | None,
         language: SupportedLanguage,
+        artifact_root: Path | None = None,
     ) -> WorkflowResult:
         del language
         try:
@@ -48,10 +61,23 @@ class VisualizationWorkflow:
                 TranslationKey.ERROR_NO_MATCHING_WORKOUT,
                 "No matching workout for visualization",
             )
+        if resolved == "ambiguous":
+            return _error_result(
+                WorkflowStatus.USER_ERROR,
+                ErrorCategory.AMBIGUOUS_WORKOUT,
+                TranslationKey.ERROR_AMBIGUOUS_WORKOUT,
+                "Ambiguous workout for visualization",
+            )
 
         points = repositories.workout_streams.list_points(resolved.workout.workout_id)
+        heart_rate_zones = repositories.heart_rate_zones.list_for_user(event.user_id)
         try:
-            artifact = render_workout_visualization(resolved.workout, points, resolved.intent)
+            artifact = render_workout_visualization(
+                resolved.workout,
+                points,
+                resolved.intent,
+                heart_rate_zones=heart_rate_zones,
+            )
         except MissingPrimaryMetricError as exc:
             return _error_result(
                 WorkflowStatus.USER_ERROR,
@@ -60,7 +86,20 @@ class VisualizationWorkflow:
                 f"Workout is missing primary metric {exc.metric}",
                 params={"metric": exc.metric},
             )
+        except VisualizationSpecInvalidError as exc:
+            return _error_result(
+                WorkflowStatus.USER_ERROR,
+                ErrorCategory.VISUALIZATION_PLAN_INVALID,
+                TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID,
+                f"Invalid visualization spec: {exc.reason}",
+            )
 
+        storage_path = f"artifacts/{artifact.filename}"
+        storage_status = "not_written_in_skeleton"
+        if artifact_root is not None:
+            stored_path = write_bytes_under(artifact_root, artifact.filename, artifact.content)
+            storage_path = str(stored_path)
+            storage_status = "written"
         repositories.rendered_artifacts.add(
             RenderedArtifactRecord(
                 artifact_id=f"{event.event_id}:visualization",
@@ -69,14 +108,14 @@ class VisualizationWorkflow:
                 artifact_type="visualization",
                 filename=artifact.filename,
                 content_type=artifact.content_type,
-                storage_path=f"artifacts/{artifact.filename}",
+                storage_path=storage_path,
                 created_at=event.created_at.isoformat(),
                 metadata={
                     "workout_id": resolved.workout.workout_id,
                     "rendered_metrics": list(artifact.rendered_metrics),
                     "missing_metrics": list(artifact.missing_metrics),
                     "scaled_metrics": list(artifact.scaled_metrics),
-                    "storage_status": "not_written_in_skeleton",
+                    "storage_status": storage_status,
                 },
             )
         )
@@ -109,12 +148,14 @@ def _resolve_request(
     repositories: RepositoryBundle,
     *,
     gateway: LLMGateway | None,
-) -> ResolvedVisualizationRequest | None:
+) -> ResolvedVisualizationRequest | str | None:
     intent = _intent(event, route, gateway)
-    workout = _resolve_workout(event.user_id, intent, repositories)
-    if workout is None:
+    resolved = _resolve_workout(event, intent, repositories)
+    if resolved.status == WorkoutReferenceStatus.AMBIGUOUS:
+        return "ambiguous"
+    if resolved.workout is None:
         return None
-    return ResolvedVisualizationRequest(workout=workout, intent=intent)
+    return ResolvedVisualizationRequest(workout=resolved.workout, intent=intent)
 
 
 def _intent(event: CanonicalEvent, route: RouteDecision, gateway: LLMGateway | None) -> VisualizationIntent:
@@ -132,7 +173,6 @@ def _intent(event: CanonicalEvent, route: RouteDecision, gateway: LLMGateway | N
     selector = "active" if "aktiiv" in event.text.lower() or "active" in event.text.lower() else "latest"
     return VisualizationIntent(
         workout_selector={"type": selector},
-        chart_family="line",
         x_metric=infer_x_metric_from_text(event.text),
         y_metrics=infer_metrics_from_text(event.text),
         transforms=infer_transforms_from_text(event.text),
@@ -142,18 +182,15 @@ def _intent(event: CanonicalEvent, route: RouteDecision, gateway: LLMGateway | N
 
 
 def _resolve_workout(
-    user_id: str,
+    event: CanonicalEvent,
     intent: VisualizationIntent,
     repositories: RepositoryBundle,
-) -> WorkoutRecord | None:
+) -> WorkoutReferenceResolution:
     selector = intent.workout_selector
-    selector_type = str(selector.get("type", "latest")).lower() if isinstance(selector, dict) else "latest"
-    selector_value = str(selector.get("value", "")) if isinstance(selector, dict) else ""
-    if selector_type == "active":
-        return repositories.active_workouts.get(user_id)
-    if selector_type in {"id", "workout_id", "exact"} and selector_value:
-        return repositories.workouts.get_for_user(user_id, selector_value)
-    return repositories.workouts.latest_for_user(user_id)
+    resolved = resolve_workout_selector(repositories, event.user_id, selector, default="latest")
+    if resolved.status == WorkoutReferenceStatus.NOT_FOUND and isinstance(selector, dict) and not selector.get("value"):
+        return resolve_workout_reference(repositories, event.user_id, event.text, default="latest")
+    return resolved
 
 
 def _error_result(

@@ -26,8 +26,22 @@ Done:
 - LLM gateway skeleton exists with typed operations, fake client tests, schema validation, language instruction, and raw workout point guards.
 - Chat workflow skeleton exists for mentioned chat requests, uses the typed LLM gateway, stores assistant replies in history, and keeps normal channel messages persistence-only/noop.
 - GPX ingest foundation parses GPX bytes, derives workout points/streams, stores workouts transactionally, sets active workout, and detects duplicate uploads by owner/hash.
-- Visualization foundation resolves latest/active/id workouts, renders line-chart PNG files from stored point data, supports metric aliases and normalized secondary series, and returns precise missing-primary-metric errors.
-- Workout chat foundation resolves latest/active/id workouts, sends bounded workout facts and stream manifests to the LLM, persists assistant replies, and keeps raw points out of model inputs.
+- Shared workout reference resolver supports latest, active, exact id, list index, date, title/kind/tag text matches, no-match, and ambiguity policy.
+- Visualization foundation resolves shared workout references through a generic dataset request, dataset resolver, dataset manifest, visualization spec, spec validator, and renderer adapter pipeline. Current line and HR-zone distribution behavior now flows through that generic path.
+- Workout chat foundation resolves shared workout references, sends bounded workout facts and stream manifests to the LLM, persists assistant replies, and keeps raw points out of model inputs.
+- OpenAI Responses API compatible `LLMClient` adapter exists behind the typed gateway, with fake HTTP tests and no SDK dependency.
+- Application runtime context wires config, translator, SQLite schema, dispatcher, admin policy, and optional real LLM gateway without starting Discord.
+- `aimo.py --check-services --config aimo.conf.example` validates storage schema and service wiring without production integrations.
+- Discord attachment download boundary hydrates supported GPX attachments with size/type checks before dispatch, using fake HTTP tests and no `discord.py` dependency.
+- Raw GPX and rendered visualization artifacts can be written under configured storage roots with path traversal protection.
+- SQLite migration runner applies the current schema as version 1, supports numbered migration directories, records applied versions, and is used by application service startup.
+- LLM gateway emits bounded model-call trace events into dispatch debug traces without storing prompts or model input payloads.
+- Discord runtime skeleton wires message handling, outgoing text/file sends, attachment hydration, and `--run-discord` startup around the application context with optional `discord.py`.
+- Discord slash command specs and registration skeleton exist for `/aimo`, `/treenit`, and `/debug`, with richer interaction option and attachment extraction tests.
+- Visualization spec compiler validates requested datasets, metric aliases, transforms, encodings, required values, and renderer marks before rendering.
+- LLM intent classification can route mentions and `/aimo syote` with bounded inputs, while deterministic explicit commands and GPX attachments keep priority and fallback remains available.
+- Production preflight checks validate required secrets, storage migrations, storage writeability, LLM gateway configuration, and local `discord.py` package availability without connecting to Discord or OpenAI.
+- Production cutover and manual smoke-test checklist exists in `docs/PRODUCTION_CUTOVER.md`.
 - `aimo.py --check --config aimo.conf.example` validates config and catalogs without Discord/OpenAI startup.
 - `data/`, `logs/`, `artifacts/`, local config, SQLite databases, and IDE files are ignored.
 
@@ -39,7 +53,7 @@ Partly done:
 
 Not done:
 
-- Production startup.
+- Production cutover execution.
 
 ## Latest Verification
 
@@ -49,18 +63,20 @@ Run before handing off:
 python3 -m unittest discover
 python3 -m py_compile aimo.py adapters/*.py adapters/discord/*.py app/*.py core/*.py llm/*.py storage/*.py tests/*.py visualization/*.py workflows/*.py workout/*.py
 python3 aimo.py --check --config aimo.conf.example
+python3 aimo.py --check-services --config aimo.conf.example
 git diff --check
 ```
 
 Latest known result: all pass.
 
+Run `python3 aimo.py --preflight --config aimo.conf` separately before production cutover with real local credentials.
+
 ## Next Step
 
-Continue Phase 6 live LLM adapter, Phase 9 visualization hardening, or production runtime binding:
+Continue Phase 9 by expanding the generic visualizer through reusable dataset/spec capabilities, or continue production cutover execution prep:
 
-- add live OpenAI-compatible `LLMClient`, or
-- harden visualization with render-plan validation, richer chart families, artifact file writing, or HR-zone distribution charts
-- add production Discord runtime binding and attachment download boundary
+- add generic spec support for reusable transforms such as smoothing, aggregation, filtering, comparison datasets, and summary datasets, or
+- add restart/deployment script docs for the actual host and run a real Discord smoke test when credentials are available
 - keep `discord.py` objects outside workflow code
 
 Acceptance for the next completed step:
@@ -70,6 +86,7 @@ Acceptance for the next completed step:
 - LLM inputs stay bounded and schema-validated
 - raw workout points stay out of LLM inputs
 - runtime bootstrap remains integration-free
+- no new visualization feature is implemented as a workflow-specific chart branch
 
 ## Notes
 

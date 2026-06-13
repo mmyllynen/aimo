@@ -11,12 +11,14 @@ from llm.gateway import LLMGateway, LLMGatewayError
 from llm.operations import WorkoutReplyInput, write_workout_reply
 from storage.repositories import HistoryEventRecord, WorkoutRecord, WorkoutStreamRecord
 from storage.unit_of_work import RepositoryBundle
+from workout.references import WorkoutReferenceResolution, WorkoutReferenceStatus, resolve_workout_reference
 
 
 @dataclass(frozen=True)
 class ResolvedWorkoutChat:
     workout: WorkoutRecord | None
     selector_type: str
+    status: WorkoutReferenceStatus = WorkoutReferenceStatus.MATCHED
 
 
 class WorkoutChatWorkflow:
@@ -38,7 +40,14 @@ class WorkoutChatWorkflow:
             )
 
         resolved = _resolve_workout(event, repositories)
-        if resolved.workout is None and resolved.selector_type in {"latest", "active", "id"}:
+        if resolved.status == WorkoutReferenceStatus.AMBIGUOUS:
+            return _error_result(
+                WorkflowStatus.USER_ERROR,
+                ErrorCategory.AMBIGUOUS_WORKOUT,
+                TranslationKey.ERROR_AMBIGUOUS_WORKOUT,
+                "Ambiguous workout reference for workout chat",
+            )
+        if resolved.workout is None and resolved.selector_type != "general":
             return _error_result(
                 WorkflowStatus.USER_ERROR,
                 ErrorCategory.NO_MATCHING_WORKOUT,
@@ -105,15 +114,18 @@ class WorkoutChatWorkflow:
 def _resolve_workout(event: CanonicalEvent, repositories: RepositoryBundle) -> ResolvedWorkoutChat:
     text = event.text.lower()
     if "aktiiv" in text or "active" in text:
-        return ResolvedWorkoutChat(workout=repositories.active_workouts.get(event.user_id), selector_type="active")
+        return _from_reference(resolve_workout_reference(repositories, event.user_id, "active"))
     workout_id = _explicit_workout_id(event.text)
     if workout_id:
-        return ResolvedWorkoutChat(
-            workout=repositories.workouts.get_for_user(event.user_id, workout_id),
-            selector_type="id",
-        )
+        return _from_reference(resolve_workout_reference(repositories, event.user_id, workout_id, default="none"))
+    date_match = _explicit_date(event.text)
+    if date_match:
+        return _from_reference(resolve_workout_reference(repositories, event.user_id, date_match, default="none"))
+    list_index = _explicit_list_index(event.text)
+    if list_index:
+        return _from_reference(resolve_workout_reference(repositories, event.user_id, list_index, default="none"))
     if "viime" in text or "latest" in text or "last" in text or "treeni" in text or "workout" in text:
-        return ResolvedWorkoutChat(workout=repositories.workouts.latest_for_user(event.user_id), selector_type="latest")
+        return _from_reference(resolve_workout_reference(repositories, event.user_id, event.text, default="latest"))
     return ResolvedWorkoutChat(workout=None, selector_type="general")
 
 
@@ -122,6 +134,31 @@ def _explicit_workout_id(text: str) -> str:
         if part.startswith("workout-"):
             return part
     return ""
+
+
+def _explicit_list_index(text: str) -> str:
+    for part in text.replace(",", " ").replace(".", " ").split():
+        cleaned = part.strip().removeprefix("#")
+        if cleaned.isdecimal():
+            return cleaned
+    return ""
+
+
+def _explicit_date(text: str) -> str:
+    for part in text.replace(",", " ").replace(".", " ").split():
+        if len(part) == 10 and part[4] == "-" and part[7] == "-":
+            year, month, day = part.split("-")
+            if year.isdecimal() and month.isdecimal() and day.isdecimal():
+                return part
+    return ""
+
+
+def _from_reference(resolved: WorkoutReferenceResolution) -> ResolvedWorkoutChat:
+    return ResolvedWorkoutChat(
+        workout=resolved.workout,
+        selector_type=resolved.selector_type,
+        status=resolved.status,
+    )
 
 
 def _workout_facts(workout: WorkoutRecord, repositories: RepositoryBundle) -> dict[str, object]:

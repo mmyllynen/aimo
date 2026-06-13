@@ -1,32 +1,28 @@
 # Aimo
 
-Aimo is a planned multilingual Discord bot for chat, workout tracking, GPX-based activity analysis, and workout visualizations.
+Aimo is a multilingual Discord bot rewrite for chat, workout tracking, GPX-based activity analysis, and workout visualizations.
 
-This repository currently contains the clean v3 foundation: product specs, architecture notes, core contracts, and an initial SQLite schema. It is not yet a runnable bot.
+This repository contains the clean v3 implementation. It is still pre-production, but the runtime, storage, workflow, LLM, GPX, visualization, and Discord adapter skeletons are now testable.
 
 ## Current Status
 
-The project is at the foundation stage.
-
 Included:
 
-- product and command specifications
-- workout and visualization specifications
-- LLM operation contracts
-- operations and roadmap documents
-- canonical event, routing, workflow, error, and trace dataclasses
-- internationalization skeleton for Finnish and English bot-owned messages
-- config/runtime bootstrap skeleton without production integrations
-- initial SQLite schema draft
+- product, command, workout, visualization, LLM, and operations specs
+- canonical event, routing, workflow, error, and trace contracts
+- Finnish and English i18n catalogs
+- SQLite schema, migration runner, repositories, and unit-of-work boundaries
+- Discord adapter/runtime skeleton without Discord objects in workflows
+- typed LLM gateway and OpenAI Responses API adapter
+- GPX ingest, workout management, workout chat, debug, and visualization workflow foundations
+- production preflight checks
 
 Not included yet:
 
-- Discord runtime integration
-- OpenAI/model gateway implementation
-- GPX parser implementation
-- workflow handlers
-- chart renderer
-- production startup
+- complete production cutover validation
+- full visualization parity
+- full follow-up context and summary refresh
+- data import from any previous runtime exports
 
 ## Repository Layout
 
@@ -37,9 +33,15 @@ LICENSE.md
 aimo.conf.example
 aimo.py
 core/
+app/
+adapters/
 docs/
+llm/
 storage/
 tests/
+visualization/
+workflows/
+workout/
 ```
 
 ## Configuration
@@ -58,18 +60,25 @@ Supported language values are `fi` and `en`. Missing config defaults to Finnish.
 Validate local config without starting integrations:
 
 ```bash
-python3 aimo.py --check
+python3 aimo.py --check --config aimo.conf.example
+python3 aimo.py --check-services --config aimo.conf.example
+```
+
+Run production readiness checks against a local uncommitted `aimo.conf`:
+
+```bash
+python3 aimo.py --config aimo.conf --preflight
+```
+
+Start Discord runtime:
+
+```bash
+python3 aimo.py --config aimo.conf --run-discord
 ```
 
 ## Development Direction
 
-Follow `docs/V3_ROADMAP.md`. The immediate next milestone is foundation hardening:
-
-- add tests
-- add a minimal SQLite storage helper
-- verify schema loading and basic inserts
-- keep model calls behind typed contracts
-- keep Discord-specific objects at the adapter boundary
+Follow `TODO.md` for current handoff status and `docs/V3_ROADMAP.md` for phase-level scope. Production cutover details live in `docs/PRODUCTION_CUTOVER.md`.
 
 ## Security
 

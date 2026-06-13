@@ -35,7 +35,7 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
         self.assertEqual(result.messages[0].text, "Hyvä aerobinen treeni.")
-        payload = client.requests[0].user_payload
+        payload = _request_payload(client, LLMOperation.WORKOUT_REPLY)
         self.assertEqual(payload["resolved_workout_facts"]["workout_id"], "workout-2")
         self.assertEqual(payload["resolved_workout_facts"]["stream_manifest"][0]["stream_key"], "heart_rate")
         self.assertNotIn("workout_points", payload)
@@ -61,7 +61,32 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
-        self.assertEqual(client.requests[0].user_payload["resolved_workout_facts"]["workout_id"], "workout-1")
+        self.assertEqual(_request_payload(client, LLMOperation.WORKOUT_REPLY)["resolved_workout_facts"]["workout_id"], "workout-1")
+
+    def test_workout_chat_resolves_list_index_reference(self) -> None:
+        self._seed_workouts()
+        client = _workout_client("Listan ensimmäinen treeni.")
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "analysoi treeni #1"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(_request_payload(client, LLMOperation.WORKOUT_REPLY)["resolved_workout_facts"]["workout_id"], "workout-2")
+
+    def test_workout_chat_reports_ambiguous_date_reference(self) -> None:
+        self._seed_workouts()
+        client = _workout_client("Ei käytetä.")
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "analysoi 2026-06-13 treeni"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_AMBIGUOUS_WORKOUT)
+        self.assertFalse([request for request in client.requests if request.operation == LLMOperation.WORKOUT_REPLY])
 
     def test_missing_summary_facts_are_explicit_in_llm_input(self) -> None:
         self._seed_workouts(avg_hr=None)
@@ -73,7 +98,7 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
-        self.assertIn("avg_hr_bpm", client.requests[0].user_payload["missing_data_facts"])
+        self.assertIn("avg_hr_bpm", _request_payload(client, LLMOperation.WORKOUT_REPLY)["missing_data_facts"])
 
     def test_workout_chat_without_gateway_returns_model_error(self) -> None:
         self._seed_workouts()
@@ -169,6 +194,10 @@ def _workout_client(reply_text: str) -> FakeLLMClient:
             }
         }
     )
+
+
+def _request_payload(client: FakeLLMClient, operation: LLMOperation):
+    return next(request.user_payload for request in client.requests if request.operation == operation)
 
 
 def _mention(event_id: str, text: str) -> CanonicalEvent:

@@ -77,7 +77,6 @@ class VisualizationIntentInput:
 @dataclass(frozen=True)
 class VisualizationIntent:
     workout_selector: JsonObject
-    chart_family: str
     x_metric: str
     y_metrics: tuple[str, ...]
     transforms: tuple[str, ...]
@@ -194,10 +193,9 @@ def extract_visualization_intent(gateway: LLMGateway, data: VisualizationIntentI
     )
     return VisualizationIntent(
         workout_selector=payload["workout_selector"],
-        chart_family=payload["chart_family"],
         x_metric=payload["x_metric"],
-        y_metrics=tuple(payload["y_metrics"]),
-        transforms=tuple(payload.get("transforms", ())),
+        y_metrics=tuple(payload.get("requested_metrics", payload.get("y_metrics", ()))),
+        transforms=tuple(payload.get("transform_hints", payload.get("transforms", ()))),
         date_range=payload.get("date_range", {}),
         comparison_mode=payload.get("comparison_mode", ""),
     )
@@ -253,13 +251,12 @@ def _workout_reply_schema() -> JsonObject:
 
 def _visualization_intent_schema() -> JsonObject:
     return {
-        "required": ["workout_selector", "chart_family", "x_metric", "y_metrics", "transforms", "date_range", "comparison_mode"],
+        "required": ["workout_selector", "x_metric", "requested_metrics", "transform_hints", "date_range", "comparison_mode"],
         "properties": {
             "workout_selector": {"type": "object"},
-            "chart_family": {"type": "string"},
             "x_metric": {"type": "string"},
-            "y_metrics": {"type": "array"},
-            "transforms": {"type": "array"},
+            "requested_metrics": {"type": "array"},
+            "transform_hints": {"type": "array"},
             "date_range": {"type": "object"},
             "comparison_mode": {"type": "string"},
         },

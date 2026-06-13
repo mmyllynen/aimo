@@ -51,9 +51,9 @@ class ChatWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
         self.assertEqual(result.messages[0].kind, OutgoingKind.TEXT)
         self.assertEqual(result.messages[0].text, "Tuo kuulostaa hyvältä suunnalta.")
-        self.assertEqual(client.requests[0].operation, LLMOperation.CHAT_REPLY)
-        self.assertIn("Respond in fi", client.requests[0].system_prompt)
-        self.assertEqual(client.requests[0].user_payload["user_text"], "mitä kuuluu?")
+        chat_request = next(request for request in client.requests if request.operation == LLMOperation.CHAT_REPLY)
+        self.assertIn("Respond in fi", chat_request.system_prompt)
+        self.assertEqual(chat_request.user_payload["user_text"], "mitä kuuluu?")
 
         with UnitOfWork(self.connection) as repositories:
             history = repositories.history.list_recent_for_channel("channel-1")

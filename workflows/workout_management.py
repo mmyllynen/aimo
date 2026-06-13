@@ -10,6 +10,7 @@ from core.routing import RouteDecision
 from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
 from storage.repositories import HeartRateZoneRecord, WorkoutRecord
 from storage.unit_of_work import RepositoryBundle
+from workout.references import WorkoutReferenceResolution, WorkoutReferenceStatus, resolve_workout_reference
 
 
 SUPPORTED_ACTIONS = {
@@ -64,10 +65,11 @@ class WorkoutManagementWorkflow:
         )
 
     def _show(self, event: CanonicalEvent, repositories: RepositoryBundle, workout_id: str) -> WorkflowResult:
-        workout = repositories.workouts.get_for_user(event.user_id, workout_id)
-        if workout is None:
-            return _user_error(TranslationKey.ERROR_NO_MATCHING_WORKOUT, ErrorCategory.NO_MATCHING_WORKOUT)
-        return _workout_details(workout)
+        resolved = resolve_workout_reference(repositories, event.user_id, workout_id, default="latest")
+        if error := _reference_error(resolved):
+            return error
+        assert resolved.workout is not None
+        return _workout_details(resolved.workout)
 
     def _active(self, event: CanonicalEvent, repositories: RepositoryBundle) -> WorkflowResult:
         workout = repositories.active_workouts.get(event.user_id)
@@ -81,9 +83,11 @@ class WorkoutManagementWorkflow:
         repositories: RepositoryBundle,
         workout_id: str,
     ) -> WorkflowResult:
-        workout = repositories.workouts.get_for_user(event.user_id, workout_id)
-        if workout is None:
-            return _user_error(TranslationKey.ERROR_NO_MATCHING_WORKOUT, ErrorCategory.NO_MATCHING_WORKOUT)
+        resolved = resolve_workout_reference(repositories, event.user_id, workout_id, default="latest")
+        if error := _reference_error(resolved):
+            return error
+        assert resolved.workout is not None
+        workout = resolved.workout
         repositories.active_workouts.set(
             user_id=event.user_id,
             workout_id=workout.workout_id,
@@ -92,9 +96,11 @@ class WorkoutManagementWorkflow:
         return _message(TranslationKey.WORKOUT_ACTIVE_SET, title=workout.title)
 
     def _delete(self, event: CanonicalEvent, repositories: RepositoryBundle, workout_id: str) -> WorkflowResult:
-        workout = repositories.workouts.get_for_user(event.user_id, workout_id)
-        if workout is None:
-            return _user_error(TranslationKey.ERROR_NO_MATCHING_WORKOUT, ErrorCategory.NO_MATCHING_WORKOUT)
+        resolved = resolve_workout_reference(repositories, event.user_id, workout_id, default="latest")
+        if error := _reference_error(resolved):
+            return error
+        assert resolved.workout is not None
+        workout = resolved.workout
         repositories.workouts.delete_for_user(event.user_id, workout.workout_id)
         return _message(TranslationKey.WORKOUT_DELETED, title=workout.title)
 
@@ -155,6 +161,14 @@ def _user_error(key: TranslationKey, category: ErrorCategory) -> WorkflowResult:
             user_message_key=key.value,
         ),
     )
+
+
+def _reference_error(resolved: WorkoutReferenceResolution) -> WorkflowResult | None:
+    if resolved.status == WorkoutReferenceStatus.MATCHED:
+        return None
+    if resolved.status == WorkoutReferenceStatus.AMBIGUOUS:
+        return _user_error(TranslationKey.ERROR_AMBIGUOUS_WORKOUT, ErrorCategory.AMBIGUOUS_WORKOUT)
+    return _user_error(TranslationKey.ERROR_NO_MATCHING_WORKOUT, ErrorCategory.NO_MATCHING_WORKOUT)
 
 
 def _workout_details(workout: WorkoutRecord) -> WorkflowResult:

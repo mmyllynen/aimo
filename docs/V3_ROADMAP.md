@@ -34,14 +34,24 @@ Current project state contains:
 - LLM gateway skeleton with typed operations, fake client tests, schema validation, and raw payload guards
 - chat workflow skeleton for mentioned chat through the typed LLM gateway with assistant reply history writes
 - GPX ingest foundation with parser, derived workout records, point/stream storage, active workout update, and duplicate detection
-- visualization foundation with latest/active/id workout resolution, metric aliases, normalized secondary series, PNG line rendering, and missing-metric errors
-- workout chat foundation with latest/active/id resolution, bounded workout facts, stream manifests, and persisted assistant replies
+- shared workout reference resolver with latest/active/id/list-index/date/title-kind-tag matching and deterministic no-match/ambiguity outcomes
+- visualization foundation with shared workout reference resolution, metric aliases, normalized secondary series, dataset request/resolver/manifest, visualization spec compiler/validator, renderer adapter, current line/HR-zone behavior, and missing-metric errors
+- workout chat foundation with shared workout reference resolution, bounded workout facts, stream manifests, and persisted assistant replies
+- OpenAI Responses API compatible LLM client adapter with fake HTTP tests and no SDK dependency
+- application runtime context wiring config, SQLite schema, dispatcher, admin policy, and optional LLM gateway without starting Discord
+- Discord attachment download boundary with GPX type/size checks and no `discord.py` dependency
+- raw GPX and rendered visualization artifact file writes under configured storage roots with traversal protection
+- SQLite migration runner using current schema as version 1 plus numbered migration directory support
+- bounded LLM model-call trace events in dispatch debug traces without prompts or model input payloads
+- Discord runtime skeleton for message handling, outgoing sends, attachment hydration, and `--run-discord` startup
+- Discord slash command specs and registration skeleton for `/aimo`, `/treenit`, and `/debug`
+- visualization spec compiler and validation for datasets, metrics, transforms, encodings, marks, and required values
+- LLM intent classification routing for mentions and `/aimo syote` with bounded inputs and deterministic fallback
+- production preflight checks and cutover smoke-test documentation
 
 Current project state does not contain:
 
-- numbered migration runner
-- live Discord runtime binding
-- live OpenAI/LLM gateway adapter
+- complete production cutover validation
 - complete workflow handlers
 - complete visualization pipeline
 - data migration
@@ -102,7 +112,7 @@ Goal: build a reliable persistence layer before adding behavior.
 
 Tasks:
 
-- Implement migration runner.
+- Implement migration runner. Done in skeleton.
 - Split initial schema into numbered migrations if needed.
 - Implement repositories:
   - users. Done.
@@ -142,6 +152,7 @@ Tasks:
 - Implement attachment reference normalization. Done in shell.
 - Implement outgoing message/file sender abstraction. Done in shell.
 - Implement broad mention safety. Done in shell.
+- Implement slash command registration. Done in skeleton.
 - Implement basic help response wiring in isolation. Done in shell.
 - Add adapter tests using fake Discord objects. Done.
 
@@ -193,7 +204,7 @@ Goal: make workout data real and reliable.
 
 Tasks:
 
-- Implement attachment download boundary with size/type checks.
+- Implement attachment download boundary with size/type checks. Done in skeleton.
 - Implement GPX parser service or port parser logic into v3 cleanly. Done in skeleton.
 - Build canonical workout record derivation:
   - kind/activity/route detection. Done in skeleton.
@@ -206,7 +217,7 @@ Tasks:
   - HR zones
   - tags and summary metadata
 - Implement duplicate detection by hash. Done in skeleton.
-- Store raw GPX and derived records transactionally. Derived records done; raw file writing remains outside skeleton.
+- Store raw GPX and derived records transactionally. Done in skeleton.
 - Implement active workout update policy. Done in skeleton.
 - Add ingest workflow tests for activity GPX, route GPX, invalid GPX, duplicate GPX, HR data, and missing timestamps. Activity, invalid, duplicate, and HR done in skeleton.
 
@@ -239,10 +250,12 @@ Tasks:
   - history summarization
 - Add token budgets per operation.
 - Add timeout/retry policy.
-- Add model-call trace events.
+- Add HTTP client adapter behind the interface. Done in skeleton.
+- Add model-call trace events. Done in skeleton.
 - Add tests with fake LLM responses. Done in skeleton.
 - Add schema rejection tests. Done in skeleton.
 - Add guard ensuring routing/classification cannot receive large workout point data. Done in skeleton.
+- Use intent classification for natural-language routing. Done in skeleton for mentions and `/aimo syote`.
 
 Exit criteria:
 
@@ -291,14 +304,14 @@ Tasks:
 - Resolve references:
   - active workout. Done in skeleton.
   - latest workout. Done in skeleton.
-  - date
-  - tag/type
-  - numbered list item
-  - explicit id/reference. Exact id done in skeleton.
+  - date. Done in skeleton.
+  - tag/type. Done in skeleton.
+  - numbered list item. Done in skeleton.
+  - explicit id/reference. Done in skeleton.
 - Provide bounded workout facts to the LLM. Done in skeleton.
 - Answer as a concise coach. Done through LLM operation skeleton.
 - Ask clarification only when required by policy.
-- Add tests for active/latest workout, missing data, ambiguous references, and general training advice without data. Active/latest/missing data done in skeleton.
+- Add tests for active/latest workout, missing data, ambiguous references, and general training advice without data. Active/latest/missing data/ambiguous references done in skeleton.
 
 Exit criteria:
 
@@ -311,47 +324,88 @@ Not in this phase:
 
 - chart rendering
 
-## Phase 9: Visualization Pipeline
+## Phase 9: Generic Visualization Pipeline
 
-Goal: rebuild visualization as a reliable compiled artifact pipeline.
+Goal: rebuild visualization as a generic compiled artifact pipeline:
+
+```text
+user text
+-> visualization intent
+-> dataset request
+-> dataset resolver
+-> dataset manifest
+-> visualization spec
+-> spec validator/compiler
+-> renderer adapter
+-> image artifact
+```
+
+The target is a generic visualizer, not a growing list of hard-coded chart workflows. Python owns dataset resolution, alias resolution, manifest building, validation, transform execution, and rendering. The LLM may interpret language and propose a bounded visualization spec, but it must not see raw point rows and must not be trusted as the final validator.
+
+Current behavior:
+
+- latest/active/id/date/tag/list-index workout references resolve through the shared resolver
+- line chart rendering works for point-series requests through the generic spec path
+- HR-zone distribution rendering works through the generic spec path
+- metric aliases, normalization, missing-primary-metric errors, artifact storage, and Discord file response boundary exist
+
+The next visualization work should add reusable dataset/spec capabilities instead of workflow-specific chart branches.
 
 Tasks:
 
-- Implement visualization intent extraction.
-- Implement workout resolver for selectors:
-  - latest. Done in skeleton.
-  - active. Done in skeleton.
-  - explicit id/reference. Exact id done in skeleton.
-  - date/range
-  - tag/type
-- Implement dataset manifest builder.
-- Implement render plan compiler and validator.
-- Implement metric alias resolution. Done in skeleton.
-- Implement transforms:
-  - normalize to primary series range. Done in skeleton.
-  - smoothing
-  - aggregation
-  - filtering
-- Implement renderer for v1 chart families:
-  - line. Done in skeleton.
-  - scatter
-  - bar
-  - area
-  - pie
-  - histogram
-- Add image artifact storage.
-- Add Discord file response integration. Done at workflow-result boundary.
-- Add tests for:
-  - latest workout HR/pace/elevation plot. Done in skeleton.
-  - latest workout missing HR. Done in skeleton.
-  - HR zone distribution
-  - weekly/monthly summary chart
-  - invalid render plan
-  - no unnecessary clarification for latest/active workout. Latest missing metric done in skeleton.
+- Define `DatasetRequest`:
+  - source type, such as workout points, workout summary, HR zones, workout collection
+  - owner and workout selector
+  - requested metrics/dimensions
+  - date range and comparison scope
+  - Done in skeleton for point-series and HR-zone distribution requests.
+- Implement `DatasetResolver`:
+  - resolves user-owned datasets only
+  - fetches raw series internally
+  - produces bounded in-process datasets for Python rendering
+  - produces a compact `DatasetManifest` for planning
+  - Done in skeleton for workout point and HR-zone distribution datasets.
+- Define `DatasetManifest`:
+  - dataset ids
+  - available columns and canonical metric ids
+  - units, dimensions, row counts, null counts, min/max where safe
+  - available grouping dimensions
+  - supported transforms for each column type
+  - Done in skeleton for current datasets.
+- Replace the legacy chart-specific planning model with `VisualizationSpec`:
+  - datasets
+  - marks, such as line, point, bar, area, interval, arc
+  - encodings, such as x, y, color, group, size
+  - transforms, filters, aggregation, sorting, scaling
+  - layout, legend, labels, output filename
+  - Done in skeleton for current line and bar marks.
+- Implement `VisualizationSpecValidator`:
+  - validates every dataset and column against the manifest
+  - rejects unsupported mark/encoding/data-shape combinations
+  - validates transform compatibility
+  - returns precise missing-data or invalid-spec categories
+  - Done in skeleton for current datasets and marks.
+- Implement renderer adapter:
+  - maps validated generic specs to concrete PNG rendering
+  - contains chart drawing primitives but no user intent logic
+  - existing line chart and HR-zone distribution use this adapter in skeleton.
+- Update LLM operation boundaries:
+  - intent extraction may identify requested datasets and chart goal
+  - spec writing receives only `DatasetManifest`, never raw rows
+  - Python compiles/fixes/rejects the spec deterministically
+- Add tests:
+  - user text produces a dataset request for latest workout HR/pace/elevation
+  - dataset resolver produces manifest without raw rows for model input
+  - spec validator rejects invented columns
+  - existing line chart request renders through generic spec path
+  - existing HR-zone distribution renders through generic spec path
+  - missing primary metric still returns a precise error
+  - no unnecessary clarification for latest/active/specific workout
 
 Exit criteria:
 
-- Natural-language visualization requests return image files.
+- Natural-language visualization requests return image files through the generic spec pipeline.
+- No new visualization feature requires a workflow-specific chart branch.
 - Large raw point data never enters routing or planning model input.
 - Missing metrics produce a precise note or error.
 - Rendered images pass basic non-empty validation.
@@ -360,6 +414,7 @@ Not in this phase:
 
 - every possible chart type
 - interactive charts
+- model-visible raw datasets
 
 ## Phase 10: Observability And Debug
 
@@ -454,6 +509,8 @@ Goal: switch Aimo to the new runtime safely.
 Tasks:
 
 - Add runtime enablement flag.
+- Add production preflight checks. Done in skeleton.
+- Add manual smoke-test checklist. Done in skeleton.
 - Run final migration.
 - Start the new bot path.
 - Verify:

@@ -58,6 +58,31 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
             active = repositories.active_workouts.get("user-1")
         self.assertEqual(active.workout_id, "workout-2")
 
+    def test_treenit_aseta_aktiivinen_accepts_list_index_reference(self) -> None:
+        self._seed_workouts()
+        event = self._treenit_event(
+            "event-active-set",
+            "user-1",
+            {"toiminto": "aseta_aktiivinen", "viite": "1"},
+        )
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        with UnitOfWork(self.connection) as repositories:
+            active = repositories.active_workouts.get("user-1")
+        self.assertEqual(active.workout_id, "workout-2")
+
+    def test_treenit_nayta_reports_ambiguous_reference(self) -> None:
+        self._seed_workouts()
+        event = self._treenit_event("event-show", "user-1", {"toiminto": "nayta", "viite": "run"})
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+        text = _render_first(result)
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(text, "Löysin useamman mahdollisen treenin. Tarvitsen tarkemman viitteen.")
+
     def test_treenit_aktiivinen_returns_active_workout_details(self) -> None:
         self._seed_workouts()
         self.dispatcher.dispatch(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid5, NAMESPACE_URL
 
 from storage.repositories import (
@@ -11,6 +12,7 @@ from storage.repositories import (
     WorkoutRecord,
     WorkoutStreamRecord,
 )
+from storage.files import write_bytes_under
 from storage.unit_of_work import RepositoryBundle
 from workout.gpx import GpxParseError, ParsedGpxWorkout, parse_gpx
 
@@ -48,6 +50,7 @@ class GpxIngestRequest:
     created_at: datetime
     max_size_bytes: int
     make_active: bool = True
+    raw_storage_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,13 @@ def ingest_gpx(request: GpxIngestRequest, repositories: RepositoryBundle) -> Gpx
         raise InvalidGpxError(str(exc)) from exc
 
     timestamp = _timestamp(request.created_at)
+    raw_relative_path = Path(f"{sha256}.gpx")
+    raw_path = str(raw_relative_path)
+    metadata = {"storage_status": "not_written_in_skeleton"}
+    if request.raw_storage_root is not None:
+        stored_path = write_bytes_under(request.raw_storage_root, raw_relative_path, request.content)
+        raw_path = str(stored_path)
+        metadata = {"storage_status": "written"}
     attachment = repositories.attachments.add(
         AttachmentRecord(
             attachment_id=request.attachment_id,
@@ -93,9 +103,9 @@ def ingest_gpx(request: GpxIngestRequest, repositories: RepositoryBundle) -> Gpx
             content_type=request.content_type,
             size_bytes=len(request.content),
             sha256=sha256,
-            raw_path=f"data/raw_gpx/{sha256}.gpx",
+            raw_path=raw_path,
             created_at=timestamp,
-            metadata={"storage_status": "not_written_in_skeleton"},
+            metadata=metadata,
         )
     )
     workout = repositories.workouts.add(_workout_record(request, attachment.attachment_id, parsed, timestamp))

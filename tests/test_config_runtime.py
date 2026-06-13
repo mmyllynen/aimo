@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 
+from aimo import main
 from core.config import ConfigError, load_app_config
 from core.i18n import SupportedLanguage, TranslationKey
 from core.runtime import build_runtime
@@ -90,6 +93,104 @@ class ConfigRuntimeTests(unittest.TestCase):
             runtime.translator.text(TranslationKey.ERROR_UNEXPECTED),
             "An unexpected error occurred.",
         )
+
+    def test_cli_check_services_validates_storage_and_service_wiring(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "aimo.conf"
+            path.write_text(
+                "\n".join(
+                    [
+                        "[storage]",
+                        f"database_path = {Path(tmpdir) / 'aimo.sqlite3'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = main(["--config", str(path), "--check-services"])
+
+        self.assertEqual(exit_code, 0)
+
+    def test_cli_run_discord_requires_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "aimo.conf"
+            path.write_text(
+                "\n".join(
+                    [
+                        "[storage]",
+                        f"database_path = {Path(tmpdir) / 'aimo.sqlite3'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                exit_code = main(["--config", str(path), "--run-discord"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("discord.token is required", stderr.getvalue())
+
+    def test_cli_preflight_reports_missing_production_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "aimo.conf"
+            path.write_text(
+                "\n".join(
+                    [
+                        "[storage]",
+                        f"database_path = {Path(tmpdir) / 'aimo.sqlite3'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "--preflight",
+                        "--allow-missing-discord-package",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Aimo production preflight FAILED", stderr.getvalue())
+        self.assertIn("discord.token is required", stderr.getvalue())
+
+    def test_cli_preflight_passes_with_required_local_production_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "aimo.conf"
+            path.write_text(
+                "\n".join(
+                    [
+                        "[discord]",
+                        "token = discord-token",
+                        "[openai]",
+                        "api_key = openai-key",
+                        "[storage]",
+                        f"database_path = {Path(tmpdir) / 'data' / 'aimo.sqlite3'}",
+                        f"artifact_path = {Path(tmpdir) / 'artifacts'}",
+                        f"raw_gpx_path = {Path(tmpdir) / 'raw_gpx'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "--preflight",
+                        "--allow-missing-discord-package",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Aimo production preflight OK", stdout.getvalue())
 
 
 if __name__ == "__main__":

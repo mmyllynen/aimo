@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.dispatcher import DispatchContext, Dispatcher
 from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
@@ -91,6 +93,24 @@ class GpxIngestWorkflowTests(unittest.TestCase):
         self.assertEqual(active.workout_id, workouts[0].workout_id)
         self.assertEqual(len(points), 3)
         self.assertIn("heart_rate", {stream.stream_key for stream in streams})
+
+    def test_gpx_ingest_writes_raw_file_when_storage_root_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = _gpx_event("event-1", "attachment-1", SAMPLE_GPX)
+
+            result = self.dispatcher.dispatch(
+                event,
+                DispatchContext(UnitOfWork(self.connection), raw_gpx_path=Path(tmpdir)),
+            )
+
+            self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+            with UnitOfWork(self.connection) as repositories:
+                attachment = repositories.attachments.find_by_sha256(
+                    "user-1",
+                    hashlib.sha256(SAMPLE_GPX).hexdigest(),
+                )
+            self.assertEqual(Path(attachment.raw_path).read_bytes(), SAMPLE_GPX)
+            self.assertEqual(attachment.metadata["storage_status"], "written")
 
     def test_duplicate_gpx_does_not_create_second_workout(self) -> None:
         first = self.dispatcher.dispatch(

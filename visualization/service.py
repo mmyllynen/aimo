@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from llm.operations import VisualizationIntent
-from storage.repositories import WorkoutPointRecord, WorkoutRecord
-from visualization.metrics import canonical_metric
-from visualization.render import LineChart, RenderSeries, render_line_chart_png
-
-
-SUPPORTED_TRANSFORMS = {"normalize_to_primary_range", "filter_non_null"}
+from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
+from visualization.datasets import Dataset, dataset_request_from_metrics, resolve_datasets
+from visualization.render import Bar, BarChart, LineChart, RenderSeries, render_bar_chart_png, render_line_chart_png
+from visualization.specs import (
+    MissingRenderableDataError,
+    VisualizationSpec,
+    VisualizationSpecError,
+    compile_visualization_spec,
+)
 
 
 @dataclass(frozen=True)
@@ -31,46 +35,87 @@ class MissingPrimaryMetricError(VisualizationError):
         super().__init__(metric)
 
 
+class VisualizationSpecInvalidError(VisualizationError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def render_workout_visualization(
     workout: WorkoutRecord,
     points: tuple[WorkoutPointRecord, ...],
     intent: VisualizationIntent,
+    *,
+    heart_rate_zones: tuple[HeartRateZoneRecord, ...] = (),
 ) -> VisualizationArtifact:
-    x_metric = canonical_metric(intent.x_metric)
-    y_metrics = tuple(canonical_metric(metric) for metric in intent.y_metrics)
-    if not y_metrics:
-        raise MissingPrimaryMetricError("metric")
-    x_values = _values(points, x_metric)
-    raw_series = tuple(RenderSeries(metric=metric, values=_values(points, metric)) for metric in y_metrics)
-    missing = tuple(series.metric for series in raw_series if not any(value is not None for value in series.values))
-    if raw_series[0].metric in missing:
-        raise MissingPrimaryMetricError(raw_series[0].metric)
-    available = tuple(series for series in raw_series if series.metric not in missing)
-    scaled = _apply_normalization(available) if "normalize_to_primary_range" in intent.transforms else available
-    content = render_line_chart_png(
+    request = dataset_request_from_metrics(
+        x_metric=intent.x_metric,
+        y_metrics=intent.y_metrics,
+        transforms=intent.transforms,
+    )
+    manifest = resolve_datasets(request, points=points, heart_rate_zones=heart_rate_zones)
+    try:
+        spec = compile_visualization_spec(request, manifest)
+    except MissingRenderableDataError as exc:
+        raise MissingPrimaryMetricError(exc.column_id) from exc
+    except VisualizationSpecError as exc:
+        raise VisualizationSpecInvalidError(type(exc).__name__) from exc
+
+    dataset = manifest.dataset(spec.x.dataset_id)
+    if dataset is None:
+        raise VisualizationSpecInvalidError("DatasetNotFound")
+    rendered = _render_spec(workout.title, spec, dataset)
+    return VisualizationArtifact(
+        content=rendered,
+        filename=f"{workout.workout_id}-{spec.output_filename_suffix}.png",
+        content_type="image/png",
+        rendered_metrics=tuple(encoding.column_id for encoding in spec.y),
+        missing_metrics=(),
+        scaled_metrics=_scaled_metrics(spec),
+    )
+
+
+def _render_spec(title: str, spec: VisualizationSpec, dataset: Dataset) -> bytes:
+    if spec.mark == "bar":
+        return render_bar_chart_png(
+            BarChart(
+                title=title,
+                bars=tuple(
+                    Bar(label=str(row.get(spec.x.column_id, "")), value=_numeric(row.get(spec.y[0].column_id)))
+                    for row in dataset.rows
+                ),
+            )
+        )
+    series = tuple(
+        RenderSeries(
+            metric=encoding.column_id,
+            values=tuple(_optional_numeric(row.get(encoding.column_id)) for row in dataset.rows),
+        )
+        for encoding in spec.y
+    )
+    if "normalize_to_primary_range" in spec.transforms:
+        series = _apply_normalization(series)
+    return render_line_chart_png(
         LineChart(
-            title=workout.title,
-            x_values=x_values,
-            series=scaled,
+            title=title,
+            x_values=tuple(_optional_numeric(row.get(spec.x.column_id)) for row in dataset.rows),
+            series=series,
         )
     )
-    return VisualizationArtifact(
-        content=content,
-        filename=f"{workout.workout_id}-chart.png",
-        content_type="image/png",
-        rendered_metrics=tuple(series.metric for series in scaled),
-        missing_metrics=missing,
-        scaled_metrics=tuple(series.metric for series in scaled if series.scaled),
-    )
 
 
-def _values(points: tuple[WorkoutPointRecord, ...], metric: str) -> tuple[float | None, ...]:
-    return tuple(_point_value(point, metric) for point in points)
+def _scaled_metrics(spec: VisualizationSpec) -> tuple[str, ...]:
+    if "normalize_to_primary_range" not in spec.transforms:
+        return ()
+    return tuple(encoding.column_id for encoding in spec.y[1:])
 
 
-def _point_value(point: WorkoutPointRecord, metric: str) -> float | None:
-    value = getattr(point, metric, None)
-    return value if isinstance(value, (int, float)) else None
+def _numeric(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _optional_numeric(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _apply_normalization(series: tuple[RenderSeries, ...]) -> tuple[RenderSeries, ...]:

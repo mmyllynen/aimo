@@ -16,6 +16,7 @@ from storage.repositories import (
     WorkoutStreamsRepository,
     WorkoutsRepository,
 )
+from storage.migrations import migrate
 from storage.sqlite import load_schema, open_connection
 
 
@@ -69,9 +70,16 @@ class UnitOfWork:
         return False
 
 
-def open_database(path: str = ":memory:", *, apply_schema: bool = False) -> sqlite3.Connection:
+def open_database(
+    path: str = ":memory:",
+    *,
+    apply_schema: bool = False,
+    apply_migrations: bool = False,
+) -> sqlite3.Connection:
     connection = open_connection(path)
+    if apply_migrations:
+        migrate(connection)
+        return connection
     if apply_schema:
         load_schema(connection)
     return connection
-

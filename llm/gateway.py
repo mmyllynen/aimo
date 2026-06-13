@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from time import perf_counter
 from typing import Any, Protocol
 
 
@@ -37,20 +38,65 @@ class LLMResponse:
     raw_text: str = ""
 
 
+@dataclass(frozen=True)
+class LLMCallTrace:
+    operation: LLMOperation
+    status: str
+    duration_ms: float
+    max_tokens: int
+    response_keys: tuple[str, ...] = ()
+    error_type: str = ""
+
+
 class LLMClient(Protocol):
     def complete_json(self, request: LLMRequest) -> LLMResponse:
         pass
 
 
+class LLMTraceObserver(Protocol):
+    def __call__(self, trace: LLMCallTrace) -> None:
+        pass
+
+
 class LLMGateway:
-    def __init__(self, client: LLMClient) -> None:
+    def __init__(self, client: LLMClient, *, observer: LLMTraceObserver | None = None) -> None:
         self.client = client
+        self.observer = observer
 
     def run(self, request: LLMRequest) -> JsonObject:
-        validate_request(request)
-        response = self.client.complete_json(request)
-        validate_schema(response.payload, request.response_schema)
-        return response.payload
+        started = perf_counter()
+        response_keys: tuple[str, ...] = ()
+        status = "success"
+        error_type = ""
+        try:
+            validate_request(request)
+            response = self.client.complete_json(request)
+            validate_schema(response.payload, request.response_schema)
+            response_keys = tuple(sorted(response.payload.keys()))
+            return response.payload
+        except Exception as exc:
+            status = "error"
+            error_type = type(exc).__name__
+            raise
+        finally:
+            self._observe(
+                LLMCallTrace(
+                    operation=request.operation,
+                    status=status,
+                    duration_ms=(perf_counter() - started) * 1000,
+                    max_tokens=request.max_tokens,
+                    response_keys=response_keys,
+                    error_type=error_type,
+                )
+            )
+
+    def _observe(self, trace: LLMCallTrace) -> None:
+        if self.observer is None:
+            return
+        try:
+            self.observer(trace)
+        except Exception:
+            pass
 
 
 class FakeLLMClient:
@@ -120,4 +166,3 @@ def _reject_forbidden_payload(value: Any, path: str = "$") -> None:
             raise LLMGatewayError(f"Payload list too large for LLM input: {path}")
         for index, item in enumerate(value):
             _reject_forbidden_payload(item, f"{path}[{index}]")
-
