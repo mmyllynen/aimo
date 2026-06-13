@@ -2,7 +2,7 @@
 
 ## Product Definition
 
-Aimo v3 is a Finnish-speaking Discord bot for conversation, workout tracking, GPX-based activity analysis, and workout visualization.
+Aimo v3 is a multilingual Discord bot for conversation, workout tracking, GPX-based activity analysis, and workout visualization.
 
 The bot serves one Discord community at a time but stores user-owned data. Aimo should feel like a practical assistant in the channel, not a dashboard or a generic chatbot.
 
@@ -25,7 +25,7 @@ User mentions Aimo with a normal conversational message.
 Expected behavior:
 
 - Aimo replies publicly in the channel.
-- Reply is Finnish by default.
+- Reply language comes from `aimo.conf`; Finnish is the default when no language is configured.
 - Reply is usually 1-4 sentences.
 - The reply should not mention internal routing, JSON, prompts, models, or traces.
 - The bot should keep follow-up context when recent channel history makes the reference clear.
@@ -105,7 +105,14 @@ Expected behavior:
 
 ## Supported Languages And Tone
 
-Primary language: Finnish.
+Initial supported languages:
+
+- Finnish (`fi`)
+- English (`en`)
+
+The active language is configured in `aimo.conf` under `[bot] language`.
+
+All deterministic bot-owned messages must use translation keys and catalogs. LLM-generated prose must be explicitly instructed to answer in the configured language.
 
 Tone:
 
@@ -178,5 +185,4 @@ Aimo v3 is product-complete when:
 - natural-language visualizations produce images
 - `/debug` returns useful traces
 - all model calls are bounded and validated
-- common failures produce stable Finnish user messages
-
+- common failures produce stable localized user messages

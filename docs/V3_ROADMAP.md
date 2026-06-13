@@ -12,12 +12,16 @@ Current project state contains:
 
 - rewrite plan
 - foundation specification
+- internationalization specification
 - canonical event contracts
 - routing target contracts
 - workflow result contracts
 - error category contracts
 - trace event contracts
+- internationalization contracts and initial catalogs
+- config/runtime bootstrap contracts
 - initial SQLite schema draft
+- unit tests for internationalization and config/runtime bootstrap
 
 Current project state does not contain:
 
@@ -43,7 +47,7 @@ Aimo is feature-complete when it can:
 - keep active workout state
 - store user profile metadata and HR zones
 - store channel history and summaries
-- answer normal chat messages in Finnish
+- answer normal chat messages in the configured language
 - answer workout questions as a concise coach
 - generate workout visualizations from natural-language requests
 - send rendered image files to Discord
@@ -247,7 +251,7 @@ Tasks:
 
 - Implement chat routing to `ChatWorkflow`.
 - Load bounded profile, channel summary, and recent turns.
-- Generate concise Finnish replies through LLM gateway.
+- Generate concise replies in the configured language through LLM gateway.
 - Persist inbound and outbound history.
 - Refresh summaries with bounded input.
 - Add follow-up context handling.

@@ -1,0 +1,32 @@
+[bot]
+# Supported values: fi, en
+language = fi
+enabled = true
+
+[discord]
+# Local production config only. Do not commit real tokens.
+token =
+
+[openai]
+# Local production config only. Do not commit real API keys.
+api_key =
+model = gpt-5.5
+max_tokens = 500
+
+[storage]
+database_path = data/aimo.sqlite3
+artifact_path = artifacts
+raw_gpx_path = data/raw_gpx
+
+[admin]
+# Comma-separated Discord user ids.
+user_ids =
+
+[limits]
+max_attachment_size_bytes = 26214400
+
+[history]
+retention_days = 365
+
+[debug]
+enabled = true

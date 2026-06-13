@@ -4,6 +4,8 @@
 
 Required configuration:
 
+- bot language
+- bot enabled/disabled flag
 - Discord token
 - OpenAI API key or compatible model provider credentials
 - SQLite database path
@@ -17,6 +19,8 @@ Required configuration:
 - debug enablement flags
 
 Configuration should be loaded once at startup and passed as immutable runtime config.
+
+Foundation bootstrap may validate config and catalogs without requiring production secrets. Actual production startup must fail fast when required credentials are missing.
 
 ## Startup
 

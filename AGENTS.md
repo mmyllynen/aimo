@@ -8,19 +8,21 @@ Use the specifications in this directory as the source of truth. Do not use code
 
 The goal is to build Aimo from these local specifications:
 
-- `PRODUCT_SPEC.md`
-- `COMMAND_SPEC.md`
-- `WORKOUT_SPEC.md`
-- `VISUALIZATION_SPEC.md`
-- `LLM_CONTRACTS.md`
-- `OPERATIONS_SPEC.md`
-- `REWRITE_FOUNDATION.md`
-- `REWRITE_PLAN.md`
-- `V3_ROADMAP.md`
+- `docs/PRODUCT_SPEC.md`
+- `docs/COMMAND_SPEC.md`
+- `docs/WORKOUT_SPEC.md`
+- `docs/VISUALIZATION_SPEC.md`
+- `docs/LLM_CONTRACTS.md`
+- `docs/OPERATIONS_SPEC.md`
+- `docs/I18N_SPEC.md`
+- `docs/REWRITE_FOUNDATION.md`
+- `docs/REWRITE_PLAN.md`
+- `docs/V3_ROADMAP.md`
+- `TODO.md`
 
 ## Product Intent
 
-Aimo is a Finnish-speaking Discord bot for:
+Aimo is a multilingual Discord bot for:
 
 - concise public chat replies
 - workout coaching conversation
@@ -30,6 +32,8 @@ Aimo is a Finnish-speaking Discord bot for:
 - natural-language workout visualizations
 - structured debug traces
 
+Initial supported languages are Finnish and English. The configured language comes from `aimo.conf`; deterministic bot-owned messages must use translation keys rather than hard-coded response text.
+
 The bot should be dependable and workflow-driven. LLMs may interpret language and draft text, but deterministic application code owns state transitions, data access, validation, rendering, permissions, and error handling.
 
 ## Current State
@@ -38,6 +42,8 @@ The project currently contains:
 
 - architecture and product specs
 - foundation dataclasses/enums
+- internationalization foundation
+- config/runtime bootstrap foundation
 - initial SQLite schema draft
 
 It is not yet wired into production and must remain independent until an explicit cutover phase.
@@ -52,15 +58,16 @@ It is not yet wired into production and must remain independent until an explici
 - Use SQLite through the storage helpers/repositories defined here.
 - Keep Discord-specific objects at the adapter boundary.
 - Make workflow code operate on canonical events and workflow results.
-- Fail with typed error categories and stable Finnish user-facing responses.
+- Fail with typed error categories and stable localized user-facing responses.
 
 ## Roadmap
 
-Follow `V3_ROADMAP.md`.
+Follow `docs/V3_ROADMAP.md`.
+
+Use `TODO.md` as the short current-status handoff checklist.
 
 The immediate next phase is Phase 1: Foundation Hardening:
 
-- add `tests/`
 - test foundation models
 - add storage helper
 - test `schema.sql`
@@ -72,6 +79,7 @@ When changing Aimo:
 
 - run Python syntax checks for touched modules
 - run tests once they exist
+- validate internationalization catalogs when user-facing text changes
 - verify SQLite schema loading when schema changes
 
 ## Non-Goals

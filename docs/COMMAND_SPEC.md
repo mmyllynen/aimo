@@ -168,7 +168,7 @@ Help text must explain:
 Command errors should be:
 
 - short
-- Finnish
+- in the configured bot language
 - specific
 - non-technical unless debug mode is requested
 
@@ -185,4 +185,3 @@ Tuo liite ei näytä kelvolliselta GPX-tiedostolta.
 ```text
 Viimeisimmässä treenissä ei ole sykedataa, joten en voi piirtää sykekäyrää siitä.
 ```
-

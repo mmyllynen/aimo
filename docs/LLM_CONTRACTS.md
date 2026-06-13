@@ -93,7 +93,7 @@ should_update_summary
 
 Rules:
 
-- Finnish by default
+- the configured bot language from `aimo.conf`
 - concise
 - no internal implementation details
 - no broad mentions
@@ -198,4 +198,3 @@ LLM operation errors map to:
 - timeout -> `model_unavailable`
 - context budget exceeded -> implementation error; must be prevented by input bounding
 - safety refusal -> user-facing inability response when relevant
-

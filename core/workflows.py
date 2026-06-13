@@ -4,8 +4,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from v3.core.errors import AppError
-from v3.core.trace import TraceEvent
+from core.errors import AppError
+from core.i18n import LocalizedText
+from core.trace import TraceEvent
 
 
 class WorkflowStatus(StrEnum):
@@ -28,6 +29,9 @@ class OutgoingKind(StrEnum):
 class OutgoingMessage:
     kind: OutgoingKind
     text: str = ""
+    text_key: str = ""
+    text_params: dict[str, Any] = field(default_factory=dict)
+    localized_text: LocalizedText | None = None
     filename: str = ""
     content_type: str = ""
     content: bytes | None = None
@@ -52,4 +56,3 @@ class WorkflowResult:
     @property
     def ok(self) -> bool:
         return self.status == WorkflowStatus.SUCCESS
-
