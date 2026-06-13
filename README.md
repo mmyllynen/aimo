@@ -16,6 +16,7 @@ Included:
 - operations and roadmap documents
 - canonical event, routing, workflow, error, and trace dataclasses
 - internationalization skeleton for Finnish and English bot-owned messages
+- config/runtime bootstrap skeleton without production integrations
 - initial SQLite schema draft
 
 Not included yet:
@@ -31,18 +32,12 @@ Not included yet:
 
 ```text
 AGENTS.md
-PRODUCT_SPEC.md
-COMMAND_SPEC.md
-WORKOUT_SPEC.md
-VISUALIZATION_SPEC.md
-LLM_CONTRACTS.md
-OPERATIONS_SPEC.md
-I18N_SPEC.md
-REWRITE_FOUNDATION.md
-REWRITE_PLAN.md
-V3_ROADMAP.md
+TODO.md
+LICENSE.md
 aimo.conf.example
+aimo.py
 core/
+docs/
 storage/
 tests/
 ```
@@ -60,9 +55,15 @@ language = fi
 
 Supported language values are `fi` and `en`. Missing config defaults to Finnish.
 
+Validate local config without starting integrations:
+
+```bash
+python3 aimo.py --check
+```
+
 ## Development Direction
 
-Follow `V3_ROADMAP.md`. The immediate next milestone is foundation hardening:
+Follow `docs/V3_ROADMAP.md`. The immediate next milestone is foundation hardening:
 
 - add tests
 - add a minimal SQLite storage helper

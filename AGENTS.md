@@ -8,16 +8,17 @@ Use the specifications in this directory as the source of truth. Do not use code
 
 The goal is to build Aimo from these local specifications:
 
-- `PRODUCT_SPEC.md`
-- `COMMAND_SPEC.md`
-- `WORKOUT_SPEC.md`
-- `VISUALIZATION_SPEC.md`
-- `LLM_CONTRACTS.md`
-- `OPERATIONS_SPEC.md`
-- `I18N_SPEC.md`
-- `REWRITE_FOUNDATION.md`
-- `REWRITE_PLAN.md`
-- `V3_ROADMAP.md`
+- `docs/PRODUCT_SPEC.md`
+- `docs/COMMAND_SPEC.md`
+- `docs/WORKOUT_SPEC.md`
+- `docs/VISUALIZATION_SPEC.md`
+- `docs/LLM_CONTRACTS.md`
+- `docs/OPERATIONS_SPEC.md`
+- `docs/I18N_SPEC.md`
+- `docs/REWRITE_FOUNDATION.md`
+- `docs/REWRITE_PLAN.md`
+- `docs/V3_ROADMAP.md`
+- `TODO.md`
 
 ## Product Intent
 
@@ -41,6 +42,8 @@ The project currently contains:
 
 - architecture and product specs
 - foundation dataclasses/enums
+- internationalization foundation
+- config/runtime bootstrap foundation
 - initial SQLite schema draft
 
 It is not yet wired into production and must remain independent until an explicit cutover phase.
@@ -59,11 +62,12 @@ It is not yet wired into production and must remain independent until an explici
 
 ## Roadmap
 
-Follow `V3_ROADMAP.md`.
+Follow `docs/V3_ROADMAP.md`.
+
+Use `TODO.md` as the short current-status handoff checklist.
 
 The immediate next phase is Phase 1: Foundation Hardening:
 
-- add `tests/`
 - test foundation models
 - add storage helper
 - test `schema.sql`

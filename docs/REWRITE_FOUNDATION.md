@@ -12,6 +12,7 @@ The foundation contains:
 - application error categories
 - trace event model
 - internationalization contract and initial catalogs
+- configuration and runtime bootstrap contracts
 - initial SQLite schema
 - lightweight Python skeleton for these contracts
 
@@ -23,6 +24,8 @@ The foundation does not contain:
 - chart rendering implementation
 - migration/import from documented export data
 - production startup changes
+
+The runtime bootstrap validates config and catalogs only. It does not connect to Discord, OpenAI, or SQLite yet.
 
 ## Canonical Event Model
 
@@ -135,6 +138,29 @@ The skeleton includes:
 
 Workflow and error contracts can carry translation keys and parameters so the adapter/application layer can render messages in the configured language.
 
+## Config And Runtime Model
+
+Configuration is loaded once from `aimo.conf` into immutable dataclasses.
+
+Initial config sections:
+
+- `bot`
+- `discord`
+- `openai`
+- `storage`
+- `admin`
+- `limits`
+- `history`
+- `debug`
+
+The runtime foundation provides a `RuntimeContext` containing:
+
+- validated `AppConfig`
+- configured `Translator`
+- startup timestamp
+
+Foundation-mode config validation does not require Discord/OpenAI secrets. Production-mode validation can require them via `require_secrets=True`.
+
 ## Trace Model
 
 Every request should produce trace events.
@@ -173,8 +199,12 @@ Schema evolution should use numbered migrations later. The foundation includes a
 Initial skeleton:
 
 ```text
-REWRITE_PLAN.md
-REWRITE_FOUNDATION.md
+README.md
+AGENTS.md
+TODO.md
+LICENSE.md
+aimo.conf.example
+aimo.py
 core/
   __init__.py
   events.py
@@ -183,10 +213,16 @@ core/
   errors.py
   trace.py
   i18n.py
+  config.py
+  runtime.py
+docs/
+  REWRITE_PLAN.md
+  REWRITE_FOUNDATION.md
 storage/
   schema.sql
 tests/
   test_i18n.py
+  test_config_runtime.py
 ```
 
 This layout is intentionally small. It defines contracts only.
@@ -198,5 +234,6 @@ The foundation task is complete when:
 - all skeleton modules import cleanly
 - dataclasses/enums model the contracts above
 - translation catalogs validate for both supported languages
+- runtime context can be built without production integrations
 - schema.sql can be read as the initial v3 storage draft
 - no production behavior changes until the cutover phase explicitly wires the runtime

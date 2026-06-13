@@ -12,12 +12,16 @@ Current project state contains:
 
 - rewrite plan
 - foundation specification
+- internationalization specification
 - canonical event contracts
 - routing target contracts
 - workflow result contracts
 - error category contracts
 - trace event contracts
+- internationalization contracts and initial catalogs
+- config/runtime bootstrap contracts
 - initial SQLite schema draft
+- unit tests for internationalization and config/runtime bootstrap
 
 Current project state does not contain:
 
