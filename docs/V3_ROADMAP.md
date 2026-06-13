@@ -22,16 +22,28 @@ Current project state contains:
 - config/runtime bootstrap contracts
 - initial SQLite schema draft
 - unit tests for internationalization and config/runtime bootstrap
+- unit tests for core contracts and import hygiene
+- minimal SQLite helper with schema loading and transaction boundary tests
+- repositories for users, HR zones, channels, history events, attachments, workouts, active workouts, workout streams/points, debug traces, and rendered artifacts
+- repository bundle and unit-of-work wrapper
+- Discord adapter shell for snapshot normalization and outgoing payload rendering
+- dispatcher skeleton with deterministic help, debug, and noop workflows
+- deterministic `/treenit` workflow skeleton for workout management actions
+- bounded dispatch debug traces with requester/admin access policy
+- centralized trace payload redaction and count-based trace pruning
+- LLM gateway skeleton with typed operations, fake client tests, schema validation, and raw payload guards
+- chat workflow skeleton for mentioned chat through the typed LLM gateway with assistant reply history writes
+- GPX ingest foundation with parser, derived workout records, point/stream storage, active workout update, and duplicate detection
+- visualization foundation with latest/active/id workout resolution, metric aliases, normalized secondary series, PNG line rendering, and missing-metric errors
+- workout chat foundation with latest/active/id resolution, bounded workout facts, stream manifests, and persisted assistant replies
 
 Current project state does not contain:
 
-- runtime storage helpers
-- repositories
-- Discord adapter
-- OpenAI/LLM gateway
-- GPX ingest implementation
-- workflow handlers
-- visualization pipeline
+- numbered migration runner
+- live Discord runtime binding
+- live OpenAI/LLM gateway adapter
+- complete workflow handlers
+- complete visualization pipeline
 - data migration
 - production integration
 
@@ -62,20 +74,20 @@ Goal: make the current skeleton testable and stable.
 
 Tasks:
 
-- Add `tests/`.
-- Add tests for canonical event models.
-- Add tests for route decision models.
-- Add tests for workflow result models.
-- Add tests for error and trace models.
-- Add schema load test using in-memory SQLite.
-- Add import hygiene test for package boundaries.
-- Add a minimal `storage` helper that opens SQLite, applies `schema.sql`, and exposes transactions.
+- Add `tests/`. Done.
+- Add tests for canonical event models. Done.
+- Add tests for route decision models. Done.
+- Add tests for workflow result models. Done.
+- Add tests for error and trace models. Done.
+- Add schema load test using in-memory SQLite. Done.
+- Add import hygiene test for package boundaries. Done.
+- Add a minimal `storage` helper that opens SQLite, applies `schema.sql`, and exposes transactions. Done.
 
 Exit criteria:
 
-- All foundation tests pass.
-- `schema.sql` loads cleanly.
-- Package boundary tests pass.
+- All foundation tests pass. Done.
+- `schema.sql` loads cleanly. Done.
+- Package boundary tests pass. Done.
 
 Not in this phase:
 
@@ -93,18 +105,18 @@ Tasks:
 - Implement migration runner.
 - Split initial schema into numbered migrations if needed.
 - Implement repositories:
-  - users
-  - profiles and HR zones
-  - channels and summaries
-  - history events
-  - attachments
-  - workouts
-  - workout points and streams
-  - active workouts
-  - debug traces
-  - rendered artifacts
+  - users. Done.
+  - profiles and HR zones. HR zones done.
+  - channels and summaries. Channels done.
+  - history events. Done.
+  - attachments. Done.
+  - workouts. Done.
+  - workout points and streams. Done.
+  - active workouts. Done.
+  - debug traces. Done.
+  - rendered artifacts. Done.
 - Add transaction boundaries for multi-step updates.
-- Add repository tests with temporary SQLite databases.
+- Add repository tests with temporary SQLite databases. Done.
 
 Exit criteria:
 
@@ -125,19 +137,19 @@ Goal: normalize Discord events without domain behavior.
 
 Tasks:
 
-- Implement message/mention normalization into `CanonicalEvent`.
-- Implement slash command normalization into `CanonicalEvent`.
-- Implement attachment reference normalization.
-- Implement outgoing message/file sender abstraction.
-- Implement broad mention safety.
-- Implement basic help response wiring in isolation.
-- Add adapter tests using fake Discord objects.
+- Implement message/mention normalization into `CanonicalEvent`. Done in shell.
+- Implement slash command normalization into `CanonicalEvent`. Done in shell.
+- Implement attachment reference normalization. Done in shell.
+- Implement outgoing message/file sender abstraction. Done in shell.
+- Implement broad mention safety. Done in shell.
+- Implement basic help response wiring in isolation. Done in shell.
+- Add adapter tests using fake Discord objects. Done.
 
 Exit criteria:
 
-- Discord-like fake events convert into canonical events.
-- Outgoing text/file/ephemeral payloads can be sent through adapter interfaces.
-- No workflow contains Discord.py objects.
+- Discord-like fake events convert into canonical events. Done.
+- Outgoing text/file/ephemeral payloads can be sent through adapter interfaces. Done.
+- No workflow contains Discord.py objects. Done.
 
 Not in this phase:
 
@@ -154,11 +166,11 @@ Tasks:
 - Implement `HelpWorkflow`.
 - Implement `DebugWorkflow` against the trace repository.
 - Implement `WorkoutManagementWorkflow` commands:
-  - list workouts
-  - show workout
-  - set active workout
-  - delete workout with confirmation or safe command semantics
-  - set/show HR zones
+  - list workouts. Done in skeleton.
+  - show workout. Done in skeleton.
+  - set active workout. Done in skeleton.
+  - delete workout with confirmation or safe command semantics. Done in skeleton without confirmation UI.
+  - set/show HR zones. Done in skeleton.
 - Add user/profile touch behavior for slash events.
 - Add tests for each slash workflow.
 
@@ -182,21 +194,21 @@ Goal: make workout data real and reliable.
 Tasks:
 
 - Implement attachment download boundary with size/type checks.
-- Implement GPX parser service or port parser logic into v3 cleanly.
+- Implement GPX parser service or port parser logic into v3 cleanly. Done in skeleton.
 - Build canonical workout record derivation:
-  - kind/activity/route detection
-  - distance
-  - duration
-  - pace
-  - elevation
-  - HR and cadence streams
+  - kind/activity/route detection. Done in skeleton.
+  - distance. Done in skeleton.
+  - duration. Done in skeleton.
+  - pace. Done in skeleton.
+  - elevation. Done in skeleton.
+  - HR and cadence streams. Done in skeleton.
   - splits
   - HR zones
   - tags and summary metadata
-- Implement duplicate detection by hash.
-- Store raw GPX and derived records transactionally.
-- Implement active workout update policy.
-- Add ingest workflow tests for activity GPX, route GPX, invalid GPX, duplicate GPX, HR data, and missing timestamps.
+- Implement duplicate detection by hash. Done in skeleton.
+- Store raw GPX and derived records transactionally. Derived records done; raw file writing remains outside skeleton.
+- Implement active workout update policy. Done in skeleton.
+- Add ingest workflow tests for activity GPX, route GPX, invalid GPX, duplicate GPX, HR data, and missing timestamps. Activity, invalid, duplicate, and HR done in skeleton.
 
 Exit criteria:
 
@@ -216,7 +228,7 @@ Goal: add bounded model operations as a controlled infrastructure service.
 
 Tasks:
 
-- Implement typed LLM operation interface.
+- Implement typed LLM operation interface. Done in skeleton.
 - Add operation-specific schemas:
   - intent classification
   - workout reference extraction
@@ -228,9 +240,9 @@ Tasks:
 - Add token budgets per operation.
 - Add timeout/retry policy.
 - Add model-call trace events.
-- Add tests with fake LLM responses.
-- Add schema rejection tests.
-- Add guard ensuring routing/classification cannot receive large workout point data.
+- Add tests with fake LLM responses. Done in skeleton.
+- Add schema rejection tests. Done in skeleton.
+- Add guard ensuring routing/classification cannot receive large workout point data. Done in skeleton.
 
 Exit criteria:
 
@@ -249,13 +261,13 @@ Goal: restore normal conversational mention behavior.
 
 Tasks:
 
-- Implement chat routing to `ChatWorkflow`.
-- Load bounded profile, channel summary, and recent turns.
-- Generate concise replies in the configured language through LLM gateway.
-- Persist inbound and outbound history.
+- Implement chat routing to `ChatWorkflow`. Done in skeleton.
+- Load bounded profile, channel summary, and recent turns. Recent turns done in skeleton.
+- Generate concise replies in the configured language through LLM gateway. Done in skeleton.
+- Persist inbound and outbound history. Done in skeleton.
 - Refresh summaries with bounded input.
 - Add follow-up context handling.
-- Add tests for normal chat, short follow-ups, summary refresh, and model failure.
+- Add tests for normal chat, short follow-ups, summary refresh, and model failure. Normal chat and model failure done in skeleton.
 
 Exit criteria:
 
@@ -275,17 +287,18 @@ Goal: restore workout-related conversation with data grounding.
 
 Tasks:
 
-- Route workout questions to `WorkoutChatWorkflow`.
+- Route workout questions to `WorkoutChatWorkflow`. Done in skeleton.
 - Resolve references:
-  - active workout
-  - latest workout
+  - active workout. Done in skeleton.
+  - latest workout. Done in skeleton.
   - date
   - tag/type
   - numbered list item
-- Provide bounded workout facts to the LLM.
-- Answer as a concise coach.
+  - explicit id/reference. Exact id done in skeleton.
+- Provide bounded workout facts to the LLM. Done in skeleton.
+- Answer as a concise coach. Done through LLM operation skeleton.
 - Ask clarification only when required by policy.
-- Add tests for active/latest workout, missing data, ambiguous references, and general training advice without data.
+- Add tests for active/latest workout, missing data, ambiguous references, and general training advice without data. Active/latest/missing data done in skeleton.
 
 Exit criteria:
 
@@ -306,35 +319,35 @@ Tasks:
 
 - Implement visualization intent extraction.
 - Implement workout resolver for selectors:
-  - latest
-  - active
-  - explicit id/reference
+  - latest. Done in skeleton.
+  - active. Done in skeleton.
+  - explicit id/reference. Exact id done in skeleton.
   - date/range
   - tag/type
 - Implement dataset manifest builder.
 - Implement render plan compiler and validator.
-- Implement metric alias resolution.
+- Implement metric alias resolution. Done in skeleton.
 - Implement transforms:
-  - normalize to primary series range
+  - normalize to primary series range. Done in skeleton.
   - smoothing
   - aggregation
   - filtering
 - Implement renderer for v1 chart families:
-  - line
+  - line. Done in skeleton.
   - scatter
   - bar
   - area
   - pie
   - histogram
 - Add image artifact storage.
-- Add Discord file response integration.
+- Add Discord file response integration. Done at workflow-result boundary.
 - Add tests for:
-  - latest workout HR/pace/elevation plot
-  - latest workout missing HR
+  - latest workout HR/pace/elevation plot. Done in skeleton.
+  - latest workout missing HR. Done in skeleton.
   - HR zone distribution
   - weekly/monthly summary chart
   - invalid render plan
-  - no unnecessary clarification for latest/active workout
+  - no unnecessary clarification for latest/active workout. Latest missing metric done in skeleton.
 
 Exit criteria:
 

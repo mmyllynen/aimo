@@ -236,4 +236,5 @@ The foundation task is complete when:
 - translation catalogs validate for both supported languages
 - runtime context can be built without production integrations
 - schema.sql can be read as the initial v3 storage draft
+- storage helper can load schema into in-memory SQLite and manage transactions
 - no production behavior changes until the cutover phase explicitly wires the runtime
