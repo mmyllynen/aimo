@@ -31,6 +31,7 @@ from workout.references import (
 class ResolvedVisualizationRequest:
     workout: WorkoutRecord
     intent: VisualizationIntent
+    comparison_workouts: tuple[WorkoutRecord, ...] = ()
 
 
 class VisualizationWorkflow:
@@ -71,12 +72,20 @@ class VisualizationWorkflow:
 
         points = repositories.workout_streams.list_points(resolved.workout.workout_id)
         heart_rate_zones = repositories.heart_rate_zones.list_for_user(event.user_id)
+        if "heart_rate_zone_seconds" in resolved.intent.y_metrics and not heart_rate_zones:
+            return _error_result(
+                WorkflowStatus.USER_ERROR,
+                ErrorCategory.MISSING_METRIC,
+                TranslationKey.HR_ZONES_EMPTY,
+                "Heart-rate zone visualization requested without configured zones",
+            )
         try:
             artifact = render_workout_visualization(
                 resolved.workout,
                 points,
                 resolved.intent,
                 heart_rate_zones=heart_rate_zones,
+                comparison_workouts=resolved.comparison_workouts,
             )
         except MissingPrimaryMetricError as exc:
             return _error_result(
@@ -155,7 +164,14 @@ def _resolve_request(
         return "ambiguous"
     if resolved.workout is None:
         return None
-    return ResolvedVisualizationRequest(workout=resolved.workout, intent=intent)
+    comparison_workouts = _comparison_workouts(event, intent, repositories)
+    if _is_comparison_intent(intent) and len(comparison_workouts) < 2:
+        return None
+    return ResolvedVisualizationRequest(
+        workout=resolved.workout,
+        intent=intent,
+        comparison_workouts=comparison_workouts,
+    )
 
 
 def _intent(event: CanonicalEvent, route: RouteDecision, gateway: LLMGateway | None) -> VisualizationIntent:
@@ -171,13 +187,19 @@ def _intent(event: CanonicalEvent, route: RouteDecision, gateway: LLMGateway | N
             ),
         )
     selector = "active" if "aktiiv" in event.text.lower() or "active" in event.text.lower() else "latest"
+    comparison_mode = "recent" if _comparison_requested_by_text(event.text) else ""
+    metrics = infer_metrics_from_text(event.text)
+    if comparison_mode and metrics == ("heart_rate_bpm",):
+        metrics = ("distance_km",)
+    transforms = infer_transforms_from_text(event.text)
     return VisualizationIntent(
         workout_selector={"type": selector},
         x_metric=infer_x_metric_from_text(event.text),
-        y_metrics=infer_metrics_from_text(event.text),
-        transforms=infer_transforms_from_text(event.text),
+        y_metrics=metrics,
+        transforms=transforms,
         date_range={},
-        comparison_mode="",
+        comparison_mode=comparison_mode,
+        layout_mode="single_axis" if "normalize_to_primary_range" in transforms else "auto",
     )
 
 
@@ -191,6 +213,49 @@ def _resolve_workout(
     if resolved.status == WorkoutReferenceStatus.NOT_FOUND and isinstance(selector, dict) and not selector.get("value"):
         return resolve_workout_reference(repositories, event.user_id, event.text, default="latest")
     return resolved
+
+
+def _comparison_workouts(
+    event: CanonicalEvent,
+    intent: VisualizationIntent,
+    repositories: RepositoryBundle,
+) -> tuple[WorkoutRecord, ...]:
+    if not _is_comparison_intent(intent):
+        return ()
+    count = _comparison_count(intent, event.text)
+    return repositories.workouts.list_for_user(event.user_id, limit=count)
+
+
+def _comparison_count(intent: VisualizationIntent, text: str) -> int:
+    selector = intent.workout_selector
+    if isinstance(selector, dict):
+        count = selector.get("count") or selector.get("limit")
+        if isinstance(count, int) and count > 1:
+            return min(count, 10)
+        if isinstance(count, str) and count.isdecimal() and int(count) > 1:
+            return min(int(count), 10)
+    normalized = text.lower()
+    if "three" in normalized or "kolme" in normalized:
+        return 3
+    return 2
+
+
+def _is_comparison_intent(intent: VisualizationIntent) -> bool:
+    comparison = intent.comparison_mode.strip().lower()
+    return comparison not in {"", "none", "single"}
+
+
+def _comparison_requested_by_text(text: str) -> bool:
+    normalized = text.lower()
+    return (
+        "vertaa" in normalized
+        or "compare" in normalized
+        or "comparison" in normalized
+        or "kahta" in normalized
+        or "kaksi" in normalized
+        or "two " in normalized
+        or "last two" in normalized
+    )
 
 
 def _error_result(

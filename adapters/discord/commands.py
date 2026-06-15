@@ -44,11 +44,6 @@ COMMAND_SPECS = (
         description="Aimo yleiskomento: apu, GPX-liite tai tekstipyyntö.",
         options=(
             DiscordCommandOptionSpec(
-                name="apua",
-                description="Näytä Aimon käyttöohje.",
-                option_type=DiscordCommandOptionType.BOOLEAN,
-            ),
-            DiscordCommandOptionSpec(
                 name="syote",
                 description="Tekstipyyntö Aimolle.",
                 option_type=DiscordCommandOptionType.STRING,
@@ -78,7 +73,7 @@ COMMAND_SPECS = (
             ),
             DiscordCommandOptionSpec(
                 name="zones",
-                description="JSON-lista sykerajoista.",
+                description="Maksimisyke tai viisi ylärajaa, esim. 190 tai 114,133,152,171,190.",
                 option_type=DiscordCommandOptionType.STRING,
             ),
         ),

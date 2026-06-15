@@ -2,11 +2,13 @@
 
 ## Purpose
 
-This roadmap takes Aimo from the current foundation skeleton to a production-capable bot that satisfies the product specifications.
+This roadmap tracks Aimo from the original foundation skeleton to a production-capable bot that satisfies the product specifications. The current implementation is already well past the foundation phases; `HANDOVER.md` is the fast current-state entrypoint.
 
 Feature parity means parity with `PRODUCT_SPEC.md`, `COMMAND_SPEC.md`, `WORKOUT_SPEC.md`, `VISUALIZATION_SPEC.md`, `LLM_CONTRACTS.md`, and `OPERATIONS_SPEC.md`.
 
 ## Current State
+
+Approximate feature parity is 80%. The current tree is the clean v3 implementation. Do not use `legacy/` or old archived material as implementation guidance.
 
 Current project state contains:
 
@@ -27,12 +29,12 @@ Current project state contains:
 - repositories for users, HR zones, channels, history events, attachments, workouts, active workouts, workout streams/points, debug traces, and rendered artifacts
 - repository bundle and unit-of-work wrapper
 - Discord adapter shell for snapshot normalization and outgoing payload rendering
-- dispatcher skeleton with deterministic help, debug, and noop workflows
-- deterministic `/treenit` workflow skeleton for workout management actions
+- dispatcher foundation that persists inbound user/channel/history data and routes deterministic help/debug/noop workflows
+- deterministic `/treenit` workflow support for list/show/active/set-active/delete/HR-zone actions against repositories
 - bounded dispatch debug traces with requester/admin access policy
 - centralized trace payload redaction and count-based trace pruning
-- LLM gateway skeleton with typed operations, fake client tests, schema validation, and raw payload guards
-- chat workflow skeleton for mentioned chat through the typed LLM gateway with assistant reply history writes
+- LLM gateway foundation with typed operations, fake client tests, schema validation, language instruction, raw payload guards, trace events, and an OpenAI Responses API adapter
+- chat workflow foundation for mentioned chat through the typed LLM gateway with assistant reply history writes
 - GPX ingest foundation with parser, derived workout records, point/stream storage, active workout update, and duplicate detection
 - shared workout reference resolver with latest/active/id/list-index/date/title-kind-tag matching and deterministic no-match/ambiguity outcomes
 - visualization foundation with shared workout reference resolution, metric aliases, normalized secondary series, dataset request/resolver/manifest, visualization spec compiler/validator, renderer adapter, current line/HR-zone behavior, and missing-metric errors
@@ -44,18 +46,19 @@ Current project state contains:
 - SQLite migration runner using current schema as version 1 plus numbered migration directory support
 - bounded LLM model-call trace events in dispatch debug traces without prompts or model input payloads
 - Discord runtime skeleton for message handling, outgoing sends, attachment hydration, and `--run-discord` startup
-- Discord slash command specs and registration skeleton for `/aimo`, `/treenit`, and `/debug`
+- Discord slash command specs and registration skeleton for `/aimo`, `/treenit`, and `/debug`, with interaction option and attachment extraction tests
 - visualization spec compiler and validation for datasets, metrics, transforms, encodings, marks, and required values
 - LLM intent classification routing for mentions and `/aimo syote` with bounded inputs and deterministic fallback
+- observability/debug hardening with bounded trace stages for inbound events, repository persistence, routing, workflow execution, LLM calls, visualization rendering, outbound responses, and final results
+- `/debug` export limits for large traces with event-count summaries and redacted payloads
+- one-way documented JSON data importer with dry-run/apply modes, ownership validation, migration report counts, chat summaries, workout index, active workout, and raw GPX reference import support
 - production preflight checks and cutover smoke-test documentation
 
 Current project state does not contain:
 
-- complete production cutover validation
-- complete workflow handlers
-- complete visualization pipeline
-- data migration
-- production integration
+- production cutover execution with real local credentials
+- every final workflow enhancement, such as chat follow-up summaries and GPX-derived splits
+- completed production rollout
 
 ## Feature Parity Definition
 
@@ -347,9 +350,12 @@ Current behavior:
 - latest/active/id/date/tag/list-index workout references resolve through the shared resolver
 - line chart rendering works for point-series requests through the generic spec path
 - HR-zone distribution rendering works through the generic spec path
-- metric aliases, normalization, missing-primary-metric errors, artifact storage, and Discord file response boundary exist
+- metric aliases, normalization, `filter_non_null`, rolling-average smoothing, `aggregate_sum`/`aggregate_avg`, missing-primary-metric errors, artifact storage, and Discord file response boundary exist
+- dataset manifests expose a row-free model view with schema, safe stats, null counts, and allowed transforms only
+- workout summary metrics can resolve through a reusable `workout_summary` dataset and render through the generic bar-mark path
+- recent workout comparison metrics can resolve through a reusable owner-scoped `workout_comparison` dataset and render through the generic bar-mark path
 
-The next visualization work should add reusable dataset/spec capabilities instead of workflow-specific chart branches.
+Phase 9 is complete for the current roadmap scope. Future visualization work should still add behavior through reusable datasets, manifests, specs, transforms, encodings, or renderer primitives instead of workflow-specific chart branches.
 
 Tasks:
 
@@ -358,20 +364,20 @@ Tasks:
   - owner and workout selector
   - requested metrics/dimensions
   - date range and comparison scope
-  - Done in skeleton for point-series and HR-zone distribution requests.
+  - Done in skeleton for point-series, HR-zone distribution, workout summary, and recent comparison requests.
 - Implement `DatasetResolver`:
   - resolves user-owned datasets only
   - fetches raw series internally
   - produces bounded in-process datasets for Python rendering
   - produces a compact `DatasetManifest` for planning
-  - Done in skeleton for workout point and HR-zone distribution datasets.
+  - Done in skeleton for workout point, HR-zone distribution, workout summary, and recent comparison datasets.
 - Define `DatasetManifest`:
   - dataset ids
   - available columns and canonical metric ids
   - units, dimensions, row counts, null counts, min/max where safe
   - available grouping dimensions
   - supported transforms for each column type
-  - Done in skeleton for current datasets.
+  - Done in skeleton for current datasets, including a row-free model-facing manifest view.
 - Replace the legacy chart-specific planning model with `VisualizationSpec`:
   - datasets
   - marks, such as line, point, bar, area, interval, arc
@@ -395,10 +401,11 @@ Tasks:
   - Python compiles/fixes/rejects the spec deterministically
 - Add tests:
   - user text produces a dataset request for latest workout HR/pace/elevation
-  - dataset resolver produces manifest without raw rows for model input
+  - dataset resolver produces manifest without raw rows for model input. Done for current dataset manifests.
   - spec validator rejects invented columns
   - existing line chart request renders through generic spec path
   - existing HR-zone distribution renders through generic spec path
+  - recent workout comparison renders through generic spec path
   - missing primary metric still returns a precise error
   - no unnecessary clarification for latest/active/specific workout
 
@@ -422,24 +429,24 @@ Goal: make failures explainable.
 
 Tasks:
 
-- Finalize trace schema and payload redaction.
+- Finalize trace schema and payload redaction. Done.
 - Add trace spans for:
-  - inbound event
-  - routing
-  - workflow stages
-  - repository calls
-  - LLM calls
-  - render calls
-  - outbound response
-- Implement `/debug` export from v3 trace store.
-- Add payload-size limits and summaries for large traces.
-- Add tests for debug visibility and redaction.
+  - inbound event. Done.
+  - routing. Done.
+  - workflow stages. Done.
+  - repository calls. Done as bounded repository-stage summaries.
+  - LLM calls. Done.
+  - render calls. Done for visualization render outcomes.
+  - outbound response. Done.
+- Implement `/debug` export from v3 trace store. Done.
+- Add payload-size limits and summaries for large traces. Done.
+- Add tests for debug visibility and redaction. Done.
 
 Exit criteria:
 
-- Every request has a trace.
-- `/debug` returns the latest relevant trace.
-- Large payloads and secrets are not exposed.
+- Every request has a trace. Done.
+- `/debug` returns the latest relevant trace. Done.
+- Large payloads and secrets are not exposed. Done.
 
 Not in this phase:
 
@@ -451,25 +458,25 @@ Goal: support importing previously exported user/runtime data into storage throu
 
 Tasks:
 
-- Write one-way import readers for documented export formats.
+- Write one-way import readers for documented export formats. Done for `aimo.v3.import.v1` JSON in `docs/DATA_IMPORT_SPEC.md`.
 - Migrate:
-  - user profiles
-  - HR zones
-  - history events
-  - chat summaries
-  - workout index
-  - active workouts
-  - raw GPX references
-- Validate ownership and counts.
-- Produce migration report.
-- Add dry-run mode.
-- Add tests with fixture data.
+  - user profiles. Done.
+  - HR zones. Done.
+  - history events. Done.
+  - chat summaries. Done.
+  - workout index. Done.
+  - active workouts. Done.
+  - raw GPX references. Done as metadata references without mutating files.
+- Validate ownership and counts. Done.
+- Produce migration report. Done.
+- Add dry-run mode. Done.
+- Add tests with fixture data. Done.
 
 Exit criteria:
 
-- Migration can run in dry-run and apply modes.
-- Counts and key records match expectations.
-- Imported raw GPX files remain intact.
+- Migration can run in dry-run and apply modes. Done.
+- Counts and key records match expectations. Done.
+- Imported raw GPX files remain intact. Done.
 
 Not in this phase:
 
@@ -596,12 +603,19 @@ Mitigation: shadow run, structured traces, explicit rollout checklist, rollback 
 
 ## Recommended Immediate Next Task
 
-Implement Phase 1:
+Phase 11 data import and migration is complete for the current roadmap scope. Continue production cutover execution prep or move to Phase 12 shadow run.
 
-- add `tests/`
-- add foundation model tests
-- add storage helper
-- add schema load and basic insert tests
-- add import hygiene test
+High-value next steps:
 
-This makes v3 a tested base before adding any feature behavior.
+- add production host restart/deployment docs and run the real Discord smoke test when credentials are available
+- add chat follow-up context and summary refresh
+- add GPX-derived features such as splits, HR-zone enrichment at ingest time, and better workout tags
+
+Acceptance for the next completed step:
+
+- `python3 -m unittest discover` passes
+- no live model calls in tests
+- LLM inputs stay bounded and schema-validated
+- raw workout points stay out of LLM inputs
+- runtime bootstrap remains integration-free
+- no visualization feature is implemented as a workflow-specific chart branch

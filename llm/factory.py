@@ -11,6 +11,7 @@ def build_openai_gateway(config: OpenAIConfig) -> LLMGateway:
             OpenAIClientConfig(
                 api_key=config.api_key,
                 model=config.model,
+                timeout_s=config.timeout_s,
             )
         )
     )

@@ -64,6 +64,13 @@ class DispatcherTests(unittest.TestCase):
             first_events = repositories.debug_traces.list_events(first_trace.trace_id)
         route_event = next(event for event in first_events if event.stage == "route")
         self.assertEqual(route_event.payload["slots"]["options"]["token"], "[redacted]")
+        repository_event = next(
+            event
+            for event in first_events
+            if event.stage == "repository" and event.message == "workouts.list_for_user"
+        )
+        self.assertEqual(repository_event.payload["args"]["positional_types"], ["str"])
+        self.assertNotIn("user-1", json.dumps(repository_event.payload))
 
         self.dispatcher.dispatch(
             CanonicalEvent(
@@ -83,7 +90,32 @@ class DispatcherTests(unittest.TestCase):
             latest = repositories.debug_traces.latest_for_user("user-1")
             events = repositories.debug_traces.list_events(latest.trace_id)
         self.assertEqual(latest.source_event_id, "event-2")
-        self.assertEqual(len(events), 2)
+        self.assertGreaterEqual(len(events), 6)
+
+    def test_dispatcher_records_observability_spans_for_request_lifecycle(self) -> None:
+        event = CanonicalEvent(
+            event_id="event-1",
+            source=EventSource.DISCORD_MESSAGE,
+            kind=EventKind.MENTION,
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user_id="user-1",
+            user_name="runner",
+            text="apua",
+        )
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        with UnitOfWork(self.connection) as repositories:
+            trace = repositories.debug_traces.latest_for_user("user-1")
+            events = repositories.debug_traces.list_events(trace.trace_id)
+        stages = [event.stage for event in events]
+        for expected_stage in ("inbound", "repository", "route", "workflow", "outbound", "result"):
+            self.assertIn(expected_stage, stages)
+        inbound = next(event for event in events if event.stage == "inbound")
+        self.assertEqual(inbound.payload["text_chars"], 4)
+        self.assertNotIn("apua", json.dumps(inbound.payload))
 
     def test_dispatcher_records_llm_call_trace_event_without_prompt_payload(self) -> None:
         client = FakeLLMClient(
@@ -146,6 +178,7 @@ class DispatcherTests(unittest.TestCase):
                     "transform_hints": [],
                     "date_range": {},
                     "comparison_mode": "",
+                    "layout_mode": "auto",
                 },
             }
         )
@@ -218,7 +251,6 @@ class DispatcherTests(unittest.TestCase):
             channel_id="channel-1",
             user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
             command_name="aimo",
-            options={"apua": True},
         )
         event = slash_to_event(slash)
 
@@ -227,14 +259,14 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
         self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
 
-    def test_slash_aimo_help_takes_priority_over_attachment_ingest(self) -> None:
+    def test_slash_aimo_attachment_routes_to_ingest_without_help_flag(self) -> None:
         slash = DiscordSlashSnapshot(
             interaction_id="interaction-1",
             guild_id="guild-1",
             channel_id="channel-1",
             user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
             command_name="aimo",
-            options={"apua": True},
+            options={"liite": "attachment-1"},
         )
         event = slash_to_event(slash)
         event = replace(
@@ -250,8 +282,8 @@ class DispatcherTests(unittest.TestCase):
 
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
 
-        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
-        self.assertEqual(len(result.messages), 5)
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(result.error.category.value, "unsupported_attachment")
 
     def test_debug_workflow_returns_requesters_latest_trace_as_json_file(self) -> None:
         with UnitOfWork(self.connection) as repositories:
@@ -287,7 +319,55 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(result.messages[0].kind, OutgoingKind.EPHEMERAL_FILE)
         payload = json.loads(result.messages[0].content.decode("utf-8"))
         self.assertEqual(payload["debug_trace"]["trace_id"], "trace-1")
+        self.assertEqual(payload["debug_trace"]["event_count"], 1)
+        self.assertEqual(payload["debug_trace"]["events_truncated"], 0)
         self.assertEqual(payload["debug_trace"]["events"][0]["stage"], "route")
+
+    def test_debug_workflow_limits_large_trace_export_and_redacts_payloads(self) -> None:
+        with UnitOfWork(self.connection) as repositories:
+            repositories.debug_traces.create(
+                trace_id="trace-1",
+                source_event_id="event-0",
+                workflow="chat",
+                status="success",
+                started_at="2026-06-13T10:00:00Z",
+                payload={
+                    "user_id": "user-1",
+                    "token": "secret-token",
+                    "long": "x" * 500,
+                },
+            )
+            for index in range(105):
+                repositories.debug_traces.add_event(
+                    DebugTraceEventRecord(
+                        trace_event_id=f"trace-event-{index:03d}",
+                        trace_id="trace-1",
+                        stage="repository",
+                        level="info",
+                        message="stored",
+                        payload={"authorization": "Bearer secret", "items": list(range(30))},
+                        created_at=f"2026-06-13T10:00:{index:02d}Z",
+                    )
+                )
+        slash = DiscordSlashSnapshot(
+            interaction_id="interaction-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            command_name="debug",
+        )
+
+        result = self.dispatcher.dispatch(slash_to_event(slash), DispatchContext(UnitOfWork(self.connection)))
+        payload = json.loads(result.messages[0].content.decode("utf-8"))
+        trace = payload["debug_trace"]
+
+        self.assertEqual(trace["event_count"], 105)
+        self.assertEqual(trace["events_returned"], 100)
+        self.assertEqual(trace["events_truncated"], 5)
+        self.assertEqual(trace["payload"]["token"], "[redacted]")
+        self.assertIn("[truncated]", trace["payload"]["long"])
+        self.assertEqual(trace["events"][0]["payload"]["authorization"], "[redacted]")
+        self.assertEqual(len(trace["events"][0]["payload"]["items"]), 21)
 
     def test_debug_workflow_does_not_return_other_users_trace_for_non_admin(self) -> None:
         with UnitOfWork(self.connection) as repositories:

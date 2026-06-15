@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import json
 
-from app.redaction import redact_payload
+from app.redaction import RedactionPolicy, redact_payload
 from core.events import CanonicalEvent
 from core.routing import RouteDecision
 from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
 from app.policy import AdminPolicy
 from storage.unit_of_work import RepositoryBundle
+
+
+MAX_DEBUG_EXPORT_EVENTS = 100
+DEBUG_EXPORT_REDACTION_POLICY = RedactionPolicy(
+    max_string_length=240,
+    max_sequence_items=20,
+    max_mapping_items=40,
+    max_depth=5,
+)
 
 
 class DebugWorkflow:
@@ -28,6 +37,8 @@ class DebugWorkflow:
         if latest is None:
             payload = {"debug_trace": None}
         else:
+            trace_events = repositories.debug_traces.list_events(latest.trace_id)
+            exported_events = trace_events[:MAX_DEBUG_EXPORT_EVENTS]
             payload = {
                 "debug_trace": {
                     "trace_id": latest.trace_id,
@@ -36,17 +47,20 @@ class DebugWorkflow:
                     "status": latest.status,
                     "started_at": latest.started_at,
                     "finished_at": latest.finished_at,
-                    "payload": redact_payload(latest.payload),
+                    "payload": redact_payload(latest.payload, DEBUG_EXPORT_REDACTION_POLICY),
+                    "event_count": len(trace_events),
+                    "events_returned": len(exported_events),
+                    "events_truncated": max(0, len(trace_events) - len(exported_events)),
                     "events": [
                         {
                             "trace_event_id": trace_event.trace_event_id,
                             "stage": trace_event.stage,
                             "level": trace_event.level,
                             "message": trace_event.message,
-                            "payload": redact_payload(trace_event.payload),
+                            "payload": redact_payload(trace_event.payload, DEBUG_EXPORT_REDACTION_POLICY),
                             "created_at": trace_event.created_at,
                         }
-                        for trace_event in repositories.debug_traces.list_events(latest.trace_id)
+                        for trace_event in exported_events
                     ],
                 }
             }

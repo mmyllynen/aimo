@@ -80,7 +80,7 @@ def _json_schema(schema: JsonObject) -> JsonObject:
     return {
         "type": "object",
         "required": list(schema.get("required", ())),
-        "additionalProperties": True,
+        "additionalProperties": False,
         "properties": {
             key: _property_schema(property_schema)
             for key, property_schema in schema.get("properties", {}).items()
@@ -95,9 +95,16 @@ def _property_schema(schema: JsonObject) -> JsonObject:
     if expected_type is not None:
         result["type"] = expected_type
     if expected_type == "array":
-        result["items"] = {}
+        items = schema.get("items")
+        result["items"] = _property_schema(items) if isinstance(items, dict) else {}
     if expected_type == "object":
-        result["additionalProperties"] = True
+        result["additionalProperties"] = bool(schema.get("additionalProperties", False))
+        result["properties"] = {
+            key: _property_schema(property_schema)
+            for key, property_schema in schema.get("properties", {}).items()
+            if isinstance(property_schema, dict)
+        }
+        result["required"] = list(schema.get("required", result["properties"].keys()))
     if "enum" in schema:
         result["enum"] = schema["enum"]
     return result or {}

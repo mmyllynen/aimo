@@ -35,6 +35,7 @@ class TranslationKey(StrEnum):
     WORKOUT_ACTIVE_SET = "workout.active_set"
     WORKOUT_DELETED = "workout.deleted"
     HR_ZONES_EMPTY = "hr_zones.empty"
+    HR_ZONES_INVALID = "hr_zones.invalid"
     HR_ZONES_SUMMARY = "hr_zones.summary"
     HR_ZONES_UPDATED = "hr_zones.updated"
     GPX_ACCEPTED = "gpx.accepted"
@@ -71,12 +72,16 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.WORKOUT_AMBIGUOUS: "Löysin useamman sopivan treenin. Tarkennatko, mitä niistä tarkoitat?",
         TranslationKey.WORKOUT_MISSING_METRIC: "Treenissä ei ole pyydettyä mittaria: {metric}.",
         TranslationKey.WORKOUT_LIST_EMPTY: "Sinulla ei ole vielä tallennettuja treenejä.",
-        TranslationKey.WORKOUT_LIST_SUMMARY: "Löysin {count} treeniä:\n{items}",
+        TranslationKey.WORKOUT_LIST_SUMMARY: "Löysin {count}:\n{items}",
         TranslationKey.WORKOUT_DETAILS: "{title}\nPäivä: {date}\nMatka: {distance_km} km\nKesto: {duration}",
         TranslationKey.WORKOUT_ACTIVE_EMPTY: "Sinulla ei ole aktiivista treeniä.",
         TranslationKey.WORKOUT_ACTIVE_SET: "Asetin aktiiviseksi treeniksi: {title}.",
         TranslationKey.WORKOUT_DELETED: "Poistin treenin: {title}.",
         TranslationKey.HR_ZONES_EMPTY: "Sinulle ei ole vielä asetettu sykerajoja.",
+        TranslationKey.HR_ZONES_INVALID: (
+            "Sykerajojen muoto ei kelpaa. Anna maksimisyke tai viisi nousevaa ylärajaa, "
+            "esim. 190 tai 114,133,152,171,190."
+        ),
         TranslationKey.HR_ZONES_SUMMARY: "Sykerajasi:\n{zones}",
         TranslationKey.HR_ZONES_UPDATED: "Päivitin sykerajat.",
         TranslationKey.GPX_ACCEPTED: "Tallensin GPX-tiedoston treeniksi: {title}.",
@@ -108,12 +113,16 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.WORKOUT_AMBIGUOUS: "I found several matching workouts. Which one did you mean?",
         TranslationKey.WORKOUT_MISSING_METRIC: "The workout does not contain the requested metric: {metric}.",
         TranslationKey.WORKOUT_LIST_EMPTY: "You do not have any saved workouts yet.",
-        TranslationKey.WORKOUT_LIST_SUMMARY: "I found {count} workouts:\n{items}",
+        TranslationKey.WORKOUT_LIST_SUMMARY: "I found {count}:\n{items}",
         TranslationKey.WORKOUT_DETAILS: "{title}\nDate: {date}\nDistance: {distance_km} km\nDuration: {duration}",
         TranslationKey.WORKOUT_ACTIVE_EMPTY: "You do not have an active workout.",
         TranslationKey.WORKOUT_ACTIVE_SET: "Set active workout to: {title}.",
         TranslationKey.WORKOUT_DELETED: "Deleted workout: {title}.",
         TranslationKey.HR_ZONES_EMPTY: "You do not have heart-rate zones configured yet.",
+        TranslationKey.HR_ZONES_INVALID: (
+            "The heart-rate zone format is invalid. Provide max heart rate or five increasing upper limits, "
+            "for example 190 or 114,133,152,171,190."
+        ),
         TranslationKey.HR_ZONES_SUMMARY: "Your heart-rate zones:\n{zones}",
         TranslationKey.HR_ZONES_UPDATED: "Updated heart-rate zones.",
         TranslationKey.GPX_ACCEPTED: "Saved the GPX file as a workout: {title}.",

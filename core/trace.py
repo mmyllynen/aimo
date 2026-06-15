@@ -15,12 +15,23 @@ class TraceLevel(StrEnum):
     ERROR = "error"
 
 
+class TraceStage(StrEnum):
+    INBOUND = "inbound"
+    REPOSITORY = "repository"
+    ROUTE = "route"
+    WORKFLOW = "workflow"
+    LLM = "llm"
+    RENDER = "render"
+    OUTBOUND = "outbound"
+    RESULT = "result"
+
+
 @dataclass(frozen=True)
 class TraceEvent:
     trace_id: str
     event_id: str
     workflow: WorkflowTarget | None
-    stage: str
+    stage: TraceStage | str
     level: TraceLevel
     message: str
     payload: dict[str, Any] = field(default_factory=dict)

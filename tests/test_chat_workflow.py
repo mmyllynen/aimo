@@ -54,11 +54,54 @@ class ChatWorkflowTests(unittest.TestCase):
         chat_request = next(request for request in client.requests if request.operation == LLMOperation.CHAT_REPLY)
         self.assertIn("Respond in fi", chat_request.system_prompt)
         self.assertEqual(chat_request.user_payload["user_text"], "mitä kuuluu?")
+        capabilities = chat_request.user_payload["workflow_facts"]["capabilities"]
+        self.assertEqual(capabilities["workout_management"]["list_command"], "/treenit toiminto:listaa")
+        self.assertTrue(capabilities["workout_management"]["private_by_default"])
+        self.assertIn("public chat", capabilities["workout_management"]["public_chat_behavior"])
 
         with UnitOfWork(self.connection) as repositories:
             history = repositories.history.list_recent_for_channel("channel-1")
         self.assertEqual([record.role for record in history], ["user", "assistant"])
         self.assertEqual(history[1].content, "Tuo kuulostaa hyvältä suunnalta.")
+
+    def test_workout_management_like_mention_stays_generic_chat_with_capability_context(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.CHAT_REPLY: {
+                    "reply_text": "Treenien listaamiseen kannattaa käyttää /treenit toiminto:listaa.",
+                    "tone": "concise",
+                    "should_update_summary": False,
+                }
+            }
+        )
+        event = CanonicalEvent(
+            event_id="event-1",
+            source=EventSource.DISCORD_MESSAGE,
+            kind=EventKind.MENTION,
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user_id="user-1",
+            user_name="runner",
+            text="listaa mun treenit",
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(
+                UnitOfWork(self.connection),
+                language=SupportedLanguage.FI,
+                llm_gateway=LLMGateway(client),
+            ),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        chat_requests = [request for request in client.requests if request.operation == LLMOperation.CHAT_REPLY]
+        self.assertEqual(len(chat_requests), 1)
+        self.assertEqual(chat_requests[0].user_payload["user_text"], "listaa mun treenit")
+        self.assertEqual(
+            chat_requests[0].user_payload["workflow_facts"]["capabilities"]["workout_management"]["list_command"],
+            "/treenit toiminto:listaa",
+        )
 
     def test_normal_message_is_only_persisted_and_does_not_call_llm(self) -> None:
         client = FakeLLMClient({})

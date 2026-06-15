@@ -27,6 +27,7 @@ class OpenAIConfig:
     api_key: str = ""
     model: str = "gpt-5.5"
     max_tokens: int = 500
+    timeout_s: float = 180.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = F
             api_key=_get(parser, "openai", "api_key", fallback=""),
             model=_get(parser, "openai", "model", fallback="gpt-5.5"),
             max_tokens=_getint(parser, "openai", "max_tokens", fallback=500),
+            timeout_s=_getfloat(parser, "openai", "timeout_s", fallback=180.0),
         ),
         storage=StorageConfig(
             database_path=Path(_get(parser, "storage", "database_path", fallback="data/aimo.sqlite3")),
@@ -118,6 +120,8 @@ def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = F
 def validate_config(config: AppConfig, *, require_secrets: bool = False) -> None:
     if config.openai.max_tokens <= 0:
         raise ConfigError("openai.max_tokens must be positive")
+    if config.openai.timeout_s <= 0:
+        raise ConfigError("openai.timeout_s must be positive")
     if config.limits.max_attachment_size_bytes <= 0:
         raise ConfigError("limits.max_attachment_size_bytes must be positive")
     if config.history.retention_days <= 0:
@@ -146,6 +150,13 @@ def _getint(parser: ConfigParser, section: str, option: str, *, fallback: int) -
         raise ConfigError(f"{section}.{option} must be an integer") from exc
 
 
+def _getfloat(parser: ConfigParser, section: str, option: str, *, fallback: float) -> float:
+    try:
+        return parser.getfloat(section, option, fallback=fallback)
+    except ValueError as exc:
+        raise ConfigError(f"{section}.{option} must be a number") from exc
+
+
 def _getbool(parser: ConfigParser, section: str, option: str, *, fallback: bool) -> bool:
     try:
         return parser.getboolean(section, option, fallback=fallback)
@@ -155,4 +166,3 @@ def _getbool(parser: ConfigParser, section: str, option: str, *, fallback: bool)
 
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
-

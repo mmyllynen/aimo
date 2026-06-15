@@ -33,6 +33,27 @@ class ApplicationContext:
             artifact_path=self.runtime.config.storage.artifact_path,
         )
 
+    def dispatch_event(self, event: CanonicalEvent):
+        return self.dispatcher.dispatch(event, self.dispatch_context())
+
+    def dispatch_event_isolated(self, event: CanonicalEvent):
+        connection = open_database(str(self.runtime.config.storage.database_path))
+        try:
+            return self.dispatcher.dispatch(
+                event,
+                DispatchContext(
+                    unit_of_work=UnitOfWork(connection),
+                    admin_policy=self.admin_policy,
+                    language=self.runtime.config.bot.language,
+                    llm_gateway=self.llm_gateway,
+                    max_attachment_size_bytes=self.runtime.config.limits.max_attachment_size_bytes,
+                    raw_gpx_path=self.runtime.config.storage.raw_gpx_path,
+                    artifact_path=self.runtime.config.storage.artifact_path,
+                ),
+            )
+        finally:
+            connection.close()
+
     def hydrate_attachments(self, event: CanonicalEvent) -> CanonicalEvent:
         return hydrate_attachment_content(
             event,

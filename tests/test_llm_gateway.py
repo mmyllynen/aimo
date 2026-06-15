@@ -124,6 +124,8 @@ class LLMGatewayTests(unittest.TestCase):
 
         self.assertEqual(reply.reply_text, "Sure.")
         self.assertIn("Respond in en", client.requests[0].system_prompt)
+        self.assertIn("Use workflow_facts and capabilities as ground truth", client.requests[0].system_prompt)
+        self.assertIn("Do not claim integrations", client.requests[0].system_prompt)
 
     def test_extract_visualization_intent_returns_structured_intent(self) -> None:
         gateway = LLMGateway(
@@ -136,6 +138,7 @@ class LLMGatewayTests(unittest.TestCase):
                         "transform_hints": [],
                         "date_range": {},
                         "comparison_mode": "",
+                        "layout_mode": "auto",
                     }
                 }
             )
@@ -148,6 +151,7 @@ class LLMGatewayTests(unittest.TestCase):
 
         self.assertEqual(intent.workout_selector["type"], "latest")
         self.assertEqual(intent.y_metrics, ("heart_rate_bpm",))
+        self.assertEqual(intent.layout_mode, "auto")
 
     def test_write_workout_reply_uses_bounded_workout_facts(self) -> None:
         client = FakeLLMClient(

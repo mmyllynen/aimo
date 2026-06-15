@@ -20,6 +20,7 @@ class ConfigRuntimeTests(unittest.TestCase):
         self.assertEqual(config.bot.language, SupportedLanguage.FI)
         self.assertEqual(config.openai.model, "gpt-5.5")
         self.assertEqual(config.openai.max_tokens, 500)
+        self.assertEqual(config.openai.timeout_s, 180.0)
         self.assertEqual(config.history.retention_days, 365)
 
     def test_reads_full_config(self) -> None:
@@ -37,6 +38,7 @@ class ConfigRuntimeTests(unittest.TestCase):
                         "api_key = openai-key",
                         "model = test-model",
                         "max_tokens = 123",
+                        "timeout_s = 45.5",
                         "[storage]",
                         "database_path = data/test.sqlite3",
                         "artifact_path = out/artifacts",
@@ -62,6 +64,7 @@ class ConfigRuntimeTests(unittest.TestCase):
         self.assertEqual(config.openai.api_key, "openai-key")
         self.assertEqual(config.openai.model, "test-model")
         self.assertEqual(config.openai.max_tokens, 123)
+        self.assertEqual(config.openai.timeout_s, 45.5)
         self.assertEqual(config.storage.database_path, Path("data/test.sqlite3"))
         self.assertEqual(config.admin.user_ids, frozenset({"111", "222"}))
         self.assertEqual(config.limits.max_attachment_size_bytes, 4096)

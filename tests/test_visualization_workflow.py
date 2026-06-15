@@ -95,8 +95,8 @@ class VisualizationWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
-        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_MISSING_METRIC)
-        self.assertEqual(result.messages[0].localized_text.params["metric"], "heart_rate_zone_seconds")
+        self.assertEqual(result.error.category.value, "missing_metric")
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.HR_ZONES_EMPTY)
 
     def test_latest_workout_missing_primary_metric_returns_specific_error_without_clarification(self) -> None:
         self._seed_workout(with_heart_rate=False)
@@ -122,6 +122,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     "transform_hints": [],
                     "date_range": {},
                     "comparison_mode": "",
+                    "layout_mode": "auto",
                 }
             }
         )
@@ -153,6 +154,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     "transform_hints": [],
                     "date_range": {},
                     "comparison_mode": "",
+                    "layout_mode": "auto",
                 }
             }
         )
@@ -171,7 +173,73 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
         self.assertEqual(route.target, WorkflowTarget.VISUALIZATION)
 
-    def _seed_workout(self, *, with_heart_rate: bool, with_zones: bool = False) -> None:
+    def test_comparison_visualization_uses_recent_owned_workouts(self) -> None:
+        self._seed_workout(
+            workout_id="workout-1",
+            title="Older run",
+            distance_km=5.0,
+            created_at="2026-06-12T10:30:00Z",
+            start_time_local="2026-06-12T10:00:00+03:00",
+            local_date="2026-06-12",
+            with_heart_rate=True,
+        )
+        self._seed_workout(
+            workout_id="workout-2",
+            title="Newer run",
+            distance_km=7.0,
+            created_at="2026-06-13T10:30:00Z",
+            start_time_local="2026-06-13T10:00:00+03:00",
+            local_date="2026-06-13",
+            with_heart_rate=True,
+        )
+        with UnitOfWork(self.connection) as repositories:
+            repositories.users.touch(user_id="user-2", seen_at="2026-06-13T09:00:00Z")
+            repositories.workouts.add(
+                WorkoutRecord(
+                    workout_id="other-user-workout",
+                    owner_user_id="user-2",
+                    source_attachment_id=None,
+                    guild_id="guild-1",
+                    channel_id="channel-1",
+                    title="Other user run",
+                    kind="activity",
+                    primary_kind="activity",
+                    start_time_utc="2026-06-14T07:00:00Z",
+                    start_time_local="2026-06-14T10:00:00+03:00",
+                    local_date="2026-06-14",
+                    distance_km=99.0,
+                    duration_s=600,
+                    pace_s_per_km=600,
+                    ascent_m=10,
+                    avg_hr_bpm=130,
+                    max_hr_bpm=140,
+                    point_count=0,
+                    created_at="2026-06-14T10:30:00Z",
+                )
+            )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "vertaa kahta viimeisintä treeniä matkan perusteella"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.FILE)
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("distance_km",))
+        self.assertEqual(result.messages[0].metadata["workout_id"], "workout-2")
+
+    def _seed_workout(
+        self,
+        *,
+        with_heart_rate: bool,
+        with_zones: bool = False,
+        workout_id: str = "workout-1",
+        title: str = "Morning run",
+        distance_km: float = 1.0,
+        created_at: str = "2026-06-13T10:30:00Z",
+        start_time_local: str = "2026-06-13T10:00:00+03:00",
+        local_date: str = "2026-06-13",
+    ) -> None:
         with UnitOfWork(self.connection) as repositories:
             repositories.users.touch(user_id="user-1", seen_at="2026-06-13T09:00:00Z")
             if with_zones:
@@ -203,25 +271,25 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     ),
                 )
             workout = WorkoutRecord(
-                workout_id="workout-1",
+                workout_id=workout_id,
                 owner_user_id="user-1",
                 source_attachment_id=None,
                 guild_id="guild-1",
                 channel_id="channel-1",
-                title="Morning run",
+                title=title,
                 kind="activity",
                 primary_kind="activity",
-                start_time_utc="2026-06-13T07:00:00Z",
-                start_time_local="2026-06-13T10:00:00+03:00",
-                local_date="2026-06-13",
-                distance_km=1.0,
+                start_time_utc=start_time_local,
+                start_time_local=start_time_local,
+                local_date=local_date,
+                distance_km=distance_km,
                 duration_s=600,
                 pace_s_per_km=600,
                 ascent_m=10,
                 avg_hr_bpm=130 if with_heart_rate else None,
                 max_hr_bpm=140 if with_heart_rate else None,
                 point_count=3,
-                created_at="2026-06-13T10:30:00Z",
+                created_at=created_at,
             )
             repositories.workouts.add(workout)
             repositories.workout_streams.replace_for_workout(

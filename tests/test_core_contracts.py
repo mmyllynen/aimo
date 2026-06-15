@@ -8,7 +8,7 @@ from core.errors import AppError, ErrorCategory
 from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
 from core.i18n import LocalizedText, TranslationKey
 from core.routing import RouteConfidence, RouteDecision, WorkflowTarget
-from core.trace import TraceEvent, TraceLevel
+from core.trace import TraceEvent, TraceLevel, TraceStage
 from core.workflows import (
     OutgoingKind,
     OutgoingMessage,
@@ -76,13 +76,14 @@ class CoreContractTests(unittest.TestCase):
             trace_id="trace-1",
             event_id="evt-1",
             workflow=WorkflowTarget.CHAT,
-            stage="route",
+            stage=TraceStage.ROUTE,
             level=TraceLevel.INFO,
             message="routed",
             payload={"confidence": "high"},
         )
 
         self.assertEqual(trace.workflow, WorkflowTarget.CHAT)
+        self.assertEqual(trace.stage, TraceStage.ROUTE)
         self.assertEqual(trace.created_at.tzinfo, timezone.utc)
         self.assertEqual(trace.payload["confidence"], "high")
 
@@ -130,4 +131,3 @@ class CoreContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

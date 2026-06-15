@@ -39,9 +39,18 @@ Done:
 - Discord runtime skeleton wires message handling, outgoing text/file sends, attachment hydration, and `--run-discord` startup around the application context with optional `discord.py`.
 - Discord slash command specs and registration skeleton exist for `/aimo`, `/treenit`, and `/debug`, with richer interaction option and attachment extraction tests.
 - Visualization spec compiler validates requested datasets, metric aliases, transforms, encodings, required values, and renderer marks before rendering.
+- Visualization dataset manifests expose a row-free model view with schema, safe stats, null counts, and allowed transforms only.
+- Visualization renderer supports reusable `filter_non_null` and `rolling_average`/`smooth` transforms through the generic spec path.
+- Visualization renderer supports reusable `aggregate_sum` and `aggregate_avg` transforms through the generic spec path.
+- Visualization resolver supports a reusable `workout_summary` dataset for scalar workout metrics such as duration, distance, ascent, average HR, max HR, and point count.
+- Visualization resolver supports reusable recent-workout comparison datasets for owner-scoped workout summary metrics through the generic spec path.
 - LLM intent classification can route mentions and `/aimo syote` with bounded inputs, while deterministic explicit commands and GPX attachments keep priority and fallback remains available.
 - Production preflight checks validate required secrets, storage migrations, storage writeability, LLM gateway configuration, and local `discord.py` package availability without connecting to Discord or OpenAI.
 - Production cutover and manual smoke-test checklist exists in `docs/PRODUCTION_CUTOVER.md`.
+- Debug traces include bounded lifecycle spans for inbound events, repository persistence, routing, workflow execution, LLM calls, visualization rendering, outbound responses, and final results.
+- `/debug` exports requester/admin-scoped trace JSON with redaction, event-count summaries, and large-trace event limits.
+- Documented `aimo.v3.import.v1` JSON data importer supports dry-run/apply modes for users, HR zones, history, channel summaries, workout index records, active workouts, and raw GPX references.
+- Data importer validates ownership/counts, rejects conflicting primary keys, reports imported counts, and does not mutate referenced raw GPX files.
 - `aimo.py --check --config aimo.conf.example` validates config and catalogs without Discord/OpenAI startup.
 - `data/`, `logs/`, `artifacts/`, local config, SQLite databases, and IDE files are ignored.
 
@@ -73,9 +82,8 @@ Run `python3 aimo.py --preflight --config aimo.conf` separately before productio
 
 ## Next Step
 
-Continue Phase 9 by expanding the generic visualizer through reusable dataset/spec capabilities, or continue production cutover execution prep:
+Phase 11 data import and migration is complete for the current roadmap scope. Continue production cutover execution prep or move to Phase 12 shadow run:
 
-- add generic spec support for reusable transforms such as smoothing, aggregation, filtering, comparison datasets, and summary datasets, or
 - add restart/deployment script docs for the actual host and run a real Discord smoke test when credentials are available
 - keep `discord.py` objects outside workflow code
 

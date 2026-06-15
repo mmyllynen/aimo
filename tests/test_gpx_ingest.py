@@ -11,6 +11,7 @@ from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
 from core.i18n import TranslationKey
 from core.routing import WorkflowTarget
 from core.workflows import WorkflowStatus
+from llm.gateway import FakeLLMClient, LLMGateway
 from storage.unit_of_work import UnitOfWork, open_database
 from workout.gpx import GpxParseError, parse_gpx
 
@@ -152,6 +153,27 @@ class GpxIngestWorkflowTests(unittest.TestCase):
         self.assertEqual(route.target, WorkflowTarget.GPX_INGEST)
         self.assertEqual(route.slots["attachment_ids"], ["attachment-1"])
 
+    def test_unsupported_attachment_returns_user_error_without_llm(self) -> None:
+        client = FakeLLMClient({})
+        result = self.dispatcher.dispatch(
+            _unsupported_attachment_event("event-1", "attachment-1"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(result.error.category.value, "unsupported_attachment")
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_UNSUPPORTED_ATTACHMENT)
+        self.assertEqual(client.requests, [])
+
+    def test_route_event_marks_unsupported_attachment_as_deterministic_ingest_error(self) -> None:
+        from app.dispatcher import route_event
+
+        route = route_event(_unsupported_attachment_event("event-1", "attachment-1"))
+
+        self.assertEqual(route.target, WorkflowTarget.GPX_INGEST)
+        self.assertEqual(route.slots["attachment_ids"], ["attachment-1"])
+        self.assertTrue(route.slots["unsupported_attachment"])
+
 
 def _gpx_event(event_id: str, attachment_id: str, content: bytes) -> CanonicalEvent:
     return CanonicalEvent(
@@ -170,6 +192,28 @@ def _gpx_event(event_id: str, attachment_id: str, content: bytes) -> CanonicalEv
                 content_type="application/gpx+xml",
                 size_bytes=len(content),
                 metadata={"content": content},
+            ),
+        ),
+        created_at=datetime(2026, 6, 13, 7, 0, tzinfo=timezone.utc),
+    )
+
+
+def _unsupported_attachment_event(event_id: str, attachment_id: str) -> CanonicalEvent:
+    return CanonicalEvent(
+        event_id=event_id,
+        source=EventSource.DISCORD_MESSAGE,
+        kind=EventKind.MENTION,
+        guild_id="guild-1",
+        channel_id="channel-1",
+        user_id="user-1",
+        user_name="runner",
+        text="katso tämä kuva",
+        attachments=(
+            AttachmentRef(
+                attachment_id=attachment_id,
+                filename="photo.png",
+                content_type="image/png",
+                size_bytes=123,
             ),
         ),
         created_at=datetime(2026, 6, 13, 7, 0, tzinfo=timezone.utc),

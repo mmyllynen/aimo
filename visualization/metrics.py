@@ -20,6 +20,15 @@ METRIC_ALIASES = {
     "time": "elapsed_s",
     "matka": "distance_km",
     "distance": "distance_km",
+    "kesto": "duration_s",
+    "duration": "duration_s",
+    "nousu": "ascent_m",
+    "ascent": "ascent_m",
+    "keskisyke": "avg_hr_bpm",
+    "average_hr": "avg_hr_bpm",
+    "avg_hr": "avg_hr_bpm",
+    "maksimisyke": "max_hr_bpm",
+    "max_hr": "max_hr_bpm",
     "kadenssi": "cadence_spm",
     "cadence": "cadence_spm",
 }
@@ -37,6 +46,11 @@ CANONICAL_POINT_METRICS = {
     "cadence_spm",
     "pace_s_per_km",
     "heart_rate_zone_seconds",
+    "duration_s",
+    "ascent_m",
+    "avg_hr_bpm",
+    "max_hr_bpm",
+    "point_count",
 }
 
 
@@ -73,6 +87,20 @@ def infer_x_metric_from_text(text: str) -> str:
 
 def infer_transforms_from_text(text: str) -> tuple[str, ...]:
     normalized = text.lower()
+    transforms: list[str] = []
     if "skaal" in normalized or "same range" in normalized or "normalize" in normalized:
-        return ("normalize_to_primary_range",)
-    return ()
+        transforms.append("normalize_to_primary_range")
+    if (
+        "smooth" in normalized
+        or "smoothing" in normalized
+        or "rolling average" in normalized
+        or "liukuva" in normalized
+        or "tasoita" in normalized
+        or "tasoit" in normalized
+    ):
+        transforms.append("rolling_average")
+    if "summa" in normalized or "yhteensä" in normalized or "total" in normalized or "sum" in normalized:
+        transforms.append("aggregate_sum")
+    if "keskiarvo" in normalized or "average" in normalized or "avg" in normalized:
+        transforms.append("aggregate_avg")
+    return tuple(transforms)

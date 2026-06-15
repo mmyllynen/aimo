@@ -24,6 +24,7 @@ from storage.repositories import (
     WorkoutsRepository,
 )
 from storage.sqlite import StorageError, load_schema, open_connection, transaction
+from storage.importer import IMPORT_FORMAT, ImportReport, ImportValidationError, import_json_file, import_payload
 from storage.migrations import Migration, MigrationResult, load_migrations, migrate, open_migrated_database
 from storage.unit_of_work import RepositoryBundle, UnitOfWork, build_repositories, open_database
 
@@ -40,6 +41,9 @@ __all__ = [
     "HeartRateZonesRepository",
     "HistoryEventRecord",
     "HistoryRepository",
+    "IMPORT_FORMAT",
+    "ImportReport",
+    "ImportValidationError",
     "Migration",
     "MigrationResult",
     "RenderedArtifactRecord",
@@ -55,6 +59,8 @@ __all__ = [
     "WorkoutStreamsRepository",
     "WorkoutsRepository",
     "build_repositories",
+    "import_json_file",
+    "import_payload",
     "load_schema",
     "load_migrations",
     "migrate",

@@ -54,6 +54,7 @@ class ChatWorkflow:
                     workflow_facts={
                         "route_confidence": route.confidence.value,
                         "route_reason": route.reason,
+                        "capabilities": _capability_facts(),
                     },
                 ),
                 language=language,
@@ -118,6 +119,45 @@ def _truncate(value: str, max_chars: int) -> str:
     if max_chars <= 0 or len(value) <= max_chars:
         return value
     return value[:max_chars]
+
+
+def _capability_facts() -> dict[str, object]:
+    return {
+        "chat": {
+            "available_in_public_mention": True,
+            "behavior": "Answer concise general chat and training questions without claiming unavailable data access.",
+        },
+        "workout_chat": {
+            "available_in_public_mention": True,
+            "behavior": "Answer coaching questions from stored workout summaries when the workflow provides them.",
+        },
+        "workout_management": {
+            "available_via": "/treenit",
+            "actions": (
+                "listaa",
+                "nayta",
+                "aktiivinen",
+                "aseta_aktiivinen",
+                "poista",
+                "sykerajat",
+                "aseta_sykerajat",
+            ),
+            "list_command": "/treenit toiminto:listaa",
+            "private_by_default": True,
+            "public_chat_behavior": (
+                "Do not list or expose a user's workout library in public chat. "
+                "Guide workout management requests to the slash command instead."
+            ),
+        },
+        "gpx_ingest": {
+            "available_via": "Aimo mention with a .gpx attachment",
+            "behavior": "Only GPX attachments are accepted as workout or route uploads.",
+        },
+        "debug": {
+            "available_via": "/debug",
+            "behavior": "Debug output is a separate operational command.",
+        },
+    }
 
 
 def _model_unavailable_result() -> WorkflowResult:

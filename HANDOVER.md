@@ -1,61 +1,119 @@
 # Aimo Handover
 
-This file is the fast entrypoint for the next session. It captures the current implementation direction and the traps to avoid. `TODO.md` remains the short status checklist; specs under `docs/` remain the product source of truth.
+This is the fast entrypoint for the next session. The local tree under `/home/myllymik/Projects/aimo` is the standalone source of truth. Follow `AGENTS.md`: use local specs and code, do not use `legacy/` as implementation guidance unless explicitly asked for comparison/import work.
 
-## Current State
+Current date/status: 2026-06-15. Aimo v3 is running in production on `mushroom` from `~/chatgpt`, which is the same physical tree visible through this local sshfs/fuse mount.
 
-Approximate feature parity: 80%.
+## Production State
 
-The current tree is the clean v3 implementation. Do not use `legacy/` or old archived material as implementation guidance.
+- Runtime host: `mushroom`
+- Runtime directory: `/home/myllymik/chatgpt`
+- Runtime command: `python3 aimo.py --config aimo.conf --run-discord`
+- Restart helper: `./check-restart.sh --force`
+- Latest confirmed restart: 2026-06-15 12:16:49, log line `Aimo Discord runtime ready`
+- Production preflight after latest changes: `Aimo production preflight OK: 7/7 checks passed`
+- Discord smoke testing is in progress with the real bot.
 
-Major foundations are in place:
-
-- config/runtime bootstrap in `aimo.py`, `core/`, and `app/runtime.py`
-- SQLite schema, migration runner, repositories, and unit-of-work in `storage/`
-- Discord normalization/runtime skeleton in `adapters/discord/`
-- typed LLM gateway, fake client tests, and OpenAI Responses API adapter in `llm/`
-- dispatcher, traces, debug workflow, chat workflow, GPX ingest, workout management, workout chat, and visualization workflows
-- production preflight in `app/preflight.py`
-- cutover checklist in `docs/PRODUCTION_CUTOVER.md`
-
-Tests are currently passing:
+Useful production commands:
 
 ```bash
-python3 -m unittest discover
-python3 -m py_compile aimo.py adapters/*.py adapters/discord/*.py app/*.py core/*.py llm/*.py storage/*.py tests/*.py visualization/*.py workflows/*.py workout/*.py
-python3 aimo.py --check --config aimo.conf.example
-python3 aimo.py --check-services --config aimo.conf.example
+ssh -F ~/.ssh/config -o BatchMode=yes mushroom "cd ~/chatgpt && source venv/bin/activate && python3 -m unittest discover"
+ssh -F ~/.ssh/config -o BatchMode=yes mushroom "cd ~/chatgpt && source venv/bin/activate && python3 aimo.py --config aimo.conf --preflight"
+ssh -F ~/.ssh/config -o BatchMode=yes mushroom "cd ~/chatgpt && ./check-restart.sh --force"
+ssh -F ~/.ssh/config -o BatchMode=yes mushroom "cd ~/chatgpt && tail -n 80 logs/bot.log"
+```
+
+## Verification Baseline
+
+Last successful verification in this session:
+
+```bash
+source venv/bin/activate && python3 -m unittest discover
+# Ran 195 tests OK
+
 git diff --check
+# OK
+
+ssh -F ~/.ssh/config -o BatchMode=yes mushroom "cd ~/chatgpt && source venv/bin/activate && python3 -m unittest tests.test_visualization_specs tests.test_visualization_workflow"
+# Ran 49 tests OK
+
+ssh -F ~/.ssh/config -o BatchMode=yes mushroom "cd ~/chatgpt && source venv/bin/activate && python3 aimo.py --config aimo.conf --preflight"
+# 7/7 OK
 ```
 
-Before production cutover, run separately with real local credentials:
+A production dispatch probe for:
 
-```bash
-python3 aimo.py --preflight --config aimo.conf
+```text
+@aimo piirrä viimeisimmästä treenistä sykealuejakauma
 ```
 
-## Architecture Direction
+returned a PNG successfully before the latest restart.
 
-Aimo is a workflow-driven Discord bot. LLMs may interpret language and draft text, but Python owns:
+## What Changed Today
 
-- state transitions
-- repository access
-- permissions and owner checks
-- validation
-- transforms
-- rendering
-- stable error categories
-- localized deterministic user-facing text
+### Discord Runtime
 
-Keep Discord-specific objects at the adapter boundary. Workflows should consume canonical events and return workflow results.
+- Real Discord slash commands are registered through `discord.app_commands`.
+- Slash interactions are deferred immediately with `thinking=True`, then answered via followup. This fixes Discord's 30 second initial interaction timeout without changing workflow logic.
+- Startup logs now include command sync and ready state.
+- Message processing and interaction processing log inbound/dispatch summaries.
+- Interaction exceptions now send a generic localized error followup instead of leaving Discord stuck at "Aimo is thinking...".
+- `allowed_mentions` dicts are converted to Discord `AllowedMentions`, fixing mention behavior.
 
-Keep model inputs bounded. Routing and visualization planning must never receive raw GPX, raw workout point rows, tokens, local config, database contents, or cross-user data.
+### `/aimo`
 
-## Visualization Direction
+- Removed the awkward `apua:true|false` boolean option.
+- `/aimo` with no useful options returns help.
+- `/aimo syote:<text>` remains generic text request.
+- `/aimo liite:<file>` remains attachment ingest path.
+- No compatibility layer was kept for `apua:true`.
 
-This is the most important current guardrail.
+### `/treenit`
 
-Aimo's visualization intent is to be a generic visualizer:
+- Workout listing format no longer exposes opaque `workout-<uuid>` ids by default.
+- Listing now shows user-meaningful numbered rows with date, title, kind, distance, duration, and average HR when available.
+- Users can refer to workouts by list number, date, title, latest, or active where supported.
+
+### HR Zone Configuration
+
+`/treenit toiminto:aseta_sykerajat zones:<value>` no longer accepts JSON as the intended path.
+
+Accepted forms:
+
+- `190`: max HR; derives five upper limits at 60/70/80/90/100%
+- `114,133,152,171,190`: manual increasing upper limits for `pk1`, `pk2`, `vk1`, `vk2`, `mk`
+
+Stored records use:
+
+- `zone_key`: `z1..z5`
+- labels: `pk1`, `pk2`, `vk1`, `vk2`, `mk`
+- lower bounds derived as previous upper + 1
+
+The production probe confirmed `zones=190` stored:
+
+```text
+z1 pk1 -114
+z2 pk2 115-133
+z3 vk1 134-152
+z4 vk2 153-171
+z5 mk 172-190
+```
+
+### Chat / LLM Robustness
+
+- OpenAI structured output schemas were fixed for arrays.
+- `chat_reply`, `workout_reply`, and visualization intent operations no longer fail because array `items` schemas are missing.
+- Generic chat now receives capability/policy facts, so public mention requests like `@aimo listaa mun treenit` can be answered by the model with guidance to use private slash commands instead of Python adding hidden deterministic intent branches.
+- `chat_reply` token budget was increased to avoid incomplete model responses.
+
+### Attachment Routing
+
+- Non-GPX attachments are rejected deterministically instead of falling through to chat/LLM.
+- GPX attachments still route to GPX ingest.
+
+### Visualization
+
+The current visualization pipeline is generic and should stay that way:
 
 ```text
 user text
@@ -64,95 +122,120 @@ user text
 -> DatasetResolver
 -> DatasetManifest
 -> VisualizationSpec
--> spec validator/compiler
+-> validator/compiler
 -> renderer adapter
 -> PNG artifact
 ```
 
-Current implementation files:
+Current supported renderer marks are still `line` and `bar`.
 
-- `visualization/datasets.py`
-  - `DatasetRequest`
-  - `DatasetManifest`
-  - workout point dataset
-  - derived HR-zone distribution dataset
-- `visualization/specs.py`
-  - `VisualizationSpec`
-  - encoding validation against manifest
-  - mark selection from data shape
-- `visualization/service.py`
-  - generic orchestration from intent to artifact
-  - renderer adapter call
-- `visualization/render.py`
-  - drawing primitives for line and bar PNG output
-- `workflows/visualization.py`
-  - workout resolution, repository fetches, artifact persistence, user-facing errors
+Recent visualizer improvements:
 
-The old render-plan/chart-family model has been removed. Do not reintroduce:
+- Multi-metric line charts default to small multiples when units differ.
+- Explicit same-axis / scale requests can still normalize secondary series to the primary range.
+- Charts now have better title/subtitle, labels, ticks, and a subtle background gradient.
+- Dense rough line series can auto-smooth generically.
+- Explicit smoothing via user text maps to rolling average.
+- Outlier clipping is robust and less aggressive.
+- Pace `s/km` is rendered as `min/km` and inverted so higher means faster visually.
+- Bar charts can render duration ticks.
+- HR zone distribution resolves through the generic `hr_zone_distribution` dataset, not a custom workflow branch.
+- Category bar distributions no longer collapse into one aggregate metric bar when `aggregate_sum` appears.
+- Spec compiler now prefers nominal/ordinal dataset axes when the requested x metric is also the y metric. This fixes LLM intents such as `x_metric=heart_rate_zone_seconds`, `y_metrics=(heart_rate_zone_seconds)`.
 
-- `chart_family`
-- `RenderPlan`
-- `compile_render_plan`
-- workflow branches like `if user asked HR zones then render special chart`
-- service branches like `if spec kind is this product feature then use custom path`
+Tested manually:
 
-Allowed explicit code:
+- `@aimo piirrä viimeisimmästä treenistä syke ajan funktiona`
+- `@aimo piirrä samaan kuvaajaan syke, vauhti ja korkeuskäyrä viimeisimmästä treenistä`
+- `@aimo piirrä viimeisimmästä treenistä tasoitettu vauhtikäyrä ajan funktiona`
+- `/treenit toiminto:aseta_sykerajat zones:190`
+- `@aimo piirrä viimeisimmästä treenistä sykealuejakauma`
 
-- renderer marks/primitives, such as `line` and `bar`
-- dataset definitions, such as a derived HR-zone dataset
-- canonical metric aliases
-- validated transform names
+## Open Observations / Next Tests
 
-Those are infrastructure primitives, not product-level chart branches. New visualization behavior should be added by extending reusable datasets, manifests, specs, transforms, encodings, or renderer primitives.
+Continue smoke testing from here.
 
-## Next Good Steps
+Important current open visualization limitation:
 
-High-value next steps:
+- User asked: `@aimo tee sama piirakkakuviona, jakauma prosentuaalisesti`
+- Actual result: same time-in-zone bar chart as before.
+- Analysis: this is expected with current implementation because:
+  - `arc`/pie/donut rendering is not implemented;
+  - visualization follow-up context does not reliably carry "same" from the previous rendered chart;
+  - there is no generic `as_percentage_of_total` / `normalize_to_share` transform yet.
 
-- Add generic visualization transforms:
-  - `filter_non_null`
-  - smoothing / rolling average
-  - aggregation
-  - comparison datasets
-  - workout summary datasets
-- Add dataset manifest tests proving model-visible planning inputs contain schema/stats only, not raw rows.
-- Add production host restart/deployment docs and run the real Discord smoke test when credentials are available.
-- Add chat follow-up context and summary refresh.
-- Add GPX-derived features:
-  - splits
-  - HR-zone enrichment at ingest time
-  - better workout tags
+Recommended next generic implementation direction:
 
-## Do Not Do
+- Add a generic percentage/share transform, e.g. `as_percentage_of_total`, valid for categorical bar datasets with numeric y values.
+- Let LLM map words like `prosentuaalisesti`, `share`, `percentage`, `osuus`, `jakauma` to that transform, but Python must validate applicability.
+- Render percentage bar charts first. Pie/donut can come later as a generic `arc` mark.
+- If adding pie/donut, implement it as a renderer mark primitive, not a sykealue-specific branch.
+- Add visualization follow-up context later so "tee sama" can refer to the previous visualization intent/spec/artifact.
 
-- Do not use `legacy/` as guidance.
-- Do not add visualization features as one-off workflow/service branches.
-- Do not pass raw workout points or GPX rows to LLM operations.
-- Do not use live OpenAI or live Discord in unit tests.
-- Do not commit `aimo.conf`, tokens, user data, GPX files, logs, generated artifacts, or SQLite databases.
-- Do not put Discord.py objects into workflows.
-- Do not add deterministic user-facing text without i18n keys.
-- Do not weaken owner checks around workouts, artifacts, debug traces, or history.
+Other good next smoke tests:
 
-## Current Git Context
+- `@aimo analysoi viimeisin treeni`
+- `@aimo listaa mun treenit`
+- `/aimo syote:mitä osaat tehdä?`
+- Mention with a non-GPX image attachment
+- GPX upload mention
+- `/debug` after an intentional visualization/user error
 
-The current checkpoint should be committed after this handover. The commit includes multiple foundations since the previous checkpoint:
+## Current Design Guardrails
 
-- OpenAI client adapter
-- application runtime context
-- Discord attachment hydration/runtime/slash registration skeleton
-- raw/artifact file storage
-- SQLite migration runner
-- LLM trace events
-- LLM intent routing
-- shared workout reference resolver
-- production preflight and cutover docs
-- generic visualization dataset/spec pipeline
+Python owns:
 
-If continuing from this commit, start by reading:
+- state transitions
+- data access
+- owner checks
+- validation
+- transforms
+- rendering
+- localized deterministic user-facing errors
 
-1. `HANDOVER.md`
-2. `TODO.md`
-3. `docs/VISUALIZATION_SPEC.md` for visualizer work
-4. `docs/V3_ROADMAP.md` for phase-level work
-5. touched module tests for the feature area being changed
+LLMs may:
+
+- interpret user language into typed intent
+- draft chat/workout replies from bounded facts
+
+LLMs must not receive:
+
+- raw GPX
+- raw workout point rows
+- secrets/config
+- cross-user data
+
+Avoid:
+
+- Python hidden intent branches like `if user text says list workouts then do /treenit logic`
+- visualization one-off product branches like `if HR zones then special render`
+- compatibility layers unless explicitly requested
+- deterministic user-facing text without i18n keys
+- Discord.py objects outside the adapter boundary
+
+## Dirty Worktree Note
+
+The worktree is intentionally dirty from the production hardening/smoke-test session. Many files are modified and several files are new, including:
+
+- `PROD_SMOKE_TEST.md`
+- `check-restart.sh`
+- `docs/DATA_IMPORT_SPEC.md`
+- `storage/importer.py`
+- `tests/test_data_import.py`
+
+Do not revert unrelated changes. If committing later, inspect the full diff carefully and split if useful.
+
+## Suggested Resume Order
+
+1. Read `AGENTS.md`.
+2. Read this `HANDOVER.md`.
+3. Skim `PROD_SMOKE_TEST.md` for the full manual testing history.
+4. Check `git status --short`.
+5. If continuing visualizer work, read:
+   - `docs/VISUALIZATION_SPEC.md`
+   - `visualization/datasets.py`
+   - `visualization/specs.py`
+   - `visualization/service.py`
+   - `visualization/render.py`
+   - `tests/test_visualization_specs.py`
+6. Before any production restart, run targeted tests, full tests if scope warrants it, `git diff --check`, and mushroom preflight.

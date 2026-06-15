@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -10,6 +12,9 @@ from app.preflight import run_production_preflight
 from app.runtime import build_application_context
 from core.config import ConfigError
 from core.runtime import build_runtime
+from storage.importer import ImportValidationError, import_json_file
+from storage.sqlite import StorageError
+from storage.unit_of_work import open_database
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,7 +50,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Allow production preflight to pass without discord.py installed; intended for local CI only",
     )
+    parser.add_argument(
+        "--import-data",
+        help="Import documented Aimo JSON export data into the configured SQLite database",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate an import without committing database changes",
+    )
     args = parser.parse_args(argv)
+    _configure_logging()
 
     if args.preflight:
         report = run_production_preflight(
@@ -67,6 +82,21 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"Startup validation error: {exc}", file=sys.stderr)
         return 2
+
+    if args.import_data:
+        _ensure_parent_dir(runtime.config.storage.database_path)
+        connection = open_database(runtime.config.storage.database_path, apply_migrations=True)
+        try:
+            report = import_json_file(connection, args.import_data, dry_run=args.dry_run)
+        except (ImportValidationError, StorageError, OSError, ValueError, sqlite3.DatabaseError) as exc:
+            print(f"Import error: {exc}", file=sys.stderr)
+            return 2
+        finally:
+            connection.close()
+        print(report.summary())
+        for warning in report.warnings:
+            print(f"WARNING: {warning}")
+        return 0
 
     if args.check_services:
         context = build_application_context(Path(args.config), require_secrets=args.require_secrets)
@@ -90,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.run_discord:
         try:
+            logging.getLogger(__name__).info("Starting Aimo Discord runtime.")
             asyncio.run(build_discord_runtime(context).start())
         except (ConfigError, DiscordRuntimeError) as exc:
             print(f"Startup validation error: {exc}", file=sys.stderr)
@@ -100,6 +131,21 @@ def main(argv: list[str] | None = None) -> int:
     context.close()
     print("Aimo v3 application services are valid; use --run-discord to start Discord.")
     return 0
+
+
+def _ensure_parent_dir(path: Path) -> None:
+    parent = path.parent
+    if str(parent) and str(parent) != ".":
+        parent.mkdir(parents=True, exist_ok=True)
+
+
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
 
 
 if __name__ == "__main__":

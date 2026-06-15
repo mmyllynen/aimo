@@ -9,6 +9,28 @@ from llm.gateway import LLMGateway, LLMOperation, LLMRequest
 
 
 JsonObject = dict[str, Any]
+VISUALIZATION_SELECTOR_TYPES = ("latest", "active", "id", "date", "text", "list_index")
+VISUALIZATION_METRICS = (
+    "elapsed_s",
+    "distance_km",
+    "elevation_m",
+    "heart_rate_bpm",
+    "cadence_spm",
+    "pace_s_per_km",
+    "heart_rate_zone_seconds",
+    "duration_s",
+    "ascent_m",
+    "avg_hr_bpm",
+    "max_hr_bpm",
+    "point_count",
+)
+VISUALIZATION_TRANSFORMS = (
+    "normalize_to_primary_range",
+    "rolling_average",
+    "aggregate_sum",
+    "aggregate_avg",
+)
+VISUALIZATION_LAYOUT_MODES = ("auto", "single_axis", "small_multiples")
 
 
 @dataclass(frozen=True)
@@ -82,6 +104,7 @@ class VisualizationIntent:
     transforms: tuple[str, ...]
     date_range: JsonObject
     comparison_mode: str
+    layout_mode: str = "auto"
 
 
 def classify_intent(gateway: LLMGateway, data: IntentClassificationInput) -> RouteDecision:
@@ -136,7 +159,12 @@ def write_chat_reply(gateway: LLMGateway, data: ChatReplyInput, *, language: Sup
     payload = gateway.run(
         LLMRequest(
             operation=LLMOperation.CHAT_REPLY,
-            system_prompt=f"Write a concise Aimo reply. Respond in {language.value}.",
+            system_prompt=(
+                f"Write a concise Aimo reply. Respond in {language.value}. "
+                "Use workflow_facts and capabilities as ground truth. "
+                "Do not claim integrations, tools, or data access that are not present in the payload. "
+                "If a request belongs to a slash command or private workflow, guide the user to that command."
+            ),
             user_payload={
                 "user_text": data.user_text,
                 "bounded_recent_context": list(data.bounded_recent_context),
@@ -145,7 +173,7 @@ def write_chat_reply(gateway: LLMGateway, data: ChatReplyInput, *, language: Sup
                 "workflow_facts": data.workflow_facts,
             },
             response_schema=_chat_reply_schema(),
-            max_tokens=500,
+            max_tokens=2000,
         )
     )
     return ChatReply(
@@ -168,7 +196,7 @@ def write_workout_reply(gateway: LLMGateway, data: WorkoutReplyInput, *, languag
                 "bounded_recent_context": list(data.bounded_recent_context),
             },
             response_schema=_workout_reply_schema(),
-            max_tokens=500,
+            max_tokens=2000,
         )
     )
     return WorkoutReply(
@@ -182,13 +210,20 @@ def extract_visualization_intent(gateway: LLMGateway, data: VisualizationIntentI
     payload = gateway.run(
         LLMRequest(
             operation=LLMOperation.VISUALIZATION_INTENT,
-            system_prompt="Extract visualization intent only. Do not request workout point data.",
+            system_prompt=(
+                "Extract visualization intent only. Do not request workout point data. "
+                "Use only canonical enum values from the response schema. "
+                "Map aliases such as syke/heart_rate/hr to heart_rate_bpm and aika/time to elapsed_s. "
+                "Use layout_mode auto by default. Use single_axis only when the user explicitly asks for the same y-axis, "
+                "same scale, or overlaid series. Finnish 'samaan kuvaajaan' means the same image, not necessarily one axis. "
+                "Use normalize_to_primary_range only for explicit scale/normalize/skaala requests, not merely for same image."
+            ),
             user_payload={
                 "user_text": data.user_text,
                 "compact_routing_context": data.compact_routing_context,
             },
             response_schema=_visualization_intent_schema(),
-            max_tokens=500,
+            max_tokens=2000,
         )
     )
     return VisualizationIntent(
@@ -198,6 +233,7 @@ def extract_visualization_intent(gateway: LLMGateway, data: VisualizationIntentI
         transforms=tuple(payload.get("transform_hints", payload.get("transforms", ()))),
         date_range=payload.get("date_range", {}),
         comparison_mode=payload.get("comparison_mode", ""),
+        layout_mode=payload.get("layout_mode", "auto"),
     )
 
 
@@ -220,7 +256,7 @@ def _workout_reference_schema() -> JsonObject:
         "properties": {
             "selector_type": {"type": "string"},
             "selector_value": {"type": "string"},
-            "matched_workout_ids": {"type": "array"},
+            "matched_workout_ids": {"type": "array", "items": {"type": "string"}},
             "ambiguity_reason": {"type": "string"},
             "requires_clarification": {"type": "boolean"},
         },
@@ -243,21 +279,54 @@ def _workout_reply_schema() -> JsonObject:
         "required": ["reply_text", "claims_used", "missing_data_notes"],
         "properties": {
             "reply_text": {"type": "string"},
-            "claims_used": {"type": "array"},
-            "missing_data_notes": {"type": "array"},
+            "claims_used": {"type": "array", "items": {"type": "string"}},
+            "missing_data_notes": {"type": "array", "items": {"type": "string"}},
         },
     }
 
 
 def _visualization_intent_schema() -> JsonObject:
     return {
-        "required": ["workout_selector", "x_metric", "requested_metrics", "transform_hints", "date_range", "comparison_mode"],
+        "required": [
+            "workout_selector",
+            "x_metric",
+            "requested_metrics",
+            "transform_hints",
+            "date_range",
+            "comparison_mode",
+            "layout_mode",
+        ],
         "properties": {
-            "workout_selector": {"type": "object"},
-            "x_metric": {"type": "string"},
-            "requested_metrics": {"type": "array"},
-            "transform_hints": {"type": "array"},
-            "date_range": {"type": "object"},
+            "workout_selector": {
+                "type": "object",
+                "required": ["type", "value", "count", "limit"],
+                "properties": {
+                    "type": {"type": "string", "enum": list(VISUALIZATION_SELECTOR_TYPES)},
+                    "value": {"type": "string"},
+                    "count": {"type": ["integer", "null"]},
+                    "limit": {"type": ["integer", "null"]},
+                },
+                "additionalProperties": False,
+            },
+            "x_metric": {"type": "string", "enum": list(VISUALIZATION_METRICS)},
+            "requested_metrics": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(VISUALIZATION_METRICS)},
+            },
+            "transform_hints": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(VISUALIZATION_TRANSFORMS)},
+            },
+            "date_range": {
+                "type": "object",
+                "required": ["start", "end"],
+                "properties": {
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
             "comparison_mode": {"type": "string"},
+            "layout_mode": {"type": "string", "enum": list(VISUALIZATION_LAYOUT_MODES)},
         },
     }

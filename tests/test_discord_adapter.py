@@ -73,7 +73,7 @@ class DiscordAdapterTests(unittest.TestCase):
             channel_id="channel-1",
             user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
             command_name="aimo",
-            options={"syote": "apua", "apua": True},
+            options={"syote": "apua"},
         )
 
         event = slash_to_event(slash)
@@ -82,7 +82,7 @@ class DiscordAdapterTests(unittest.TestCase):
         self.assertEqual(event.kind, EventKind.SLASH_COMMAND)
         self.assertEqual(event.text, "apua")
         self.assertEqual(event.metadata["command_name"], "aimo")
-        self.assertEqual(event.metadata["options"]["apua"], True)
+        self.assertNotIn("apua", event.metadata["options"])
 
     def test_outgoing_payload_renders_i18n_and_disables_mentions(self) -> None:
         message = OutgoingMessage(
@@ -121,4 +121,3 @@ class DiscordAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

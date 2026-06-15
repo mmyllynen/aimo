@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
-from llm.gateway import LLMGatewayError, LLMOperation, LLMRequest
+from llm.gateway import LLMGateway, LLMGatewayError, LLMOperation, LLMRequest
+from llm.operations import VisualizationIntentInput, extract_visualization_intent
 from llm.openai_client import OpenAIClientConfig, OpenAIResponsesClient
 
 
@@ -58,6 +59,7 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         self.assertEqual(body["max_output_tokens"], 100)
         self.assertEqual(body["text"]["format"]["type"], "json_schema")
         self.assertEqual(body["text"]["format"]["schema"]["required"], ["reply_text", "tone", "should_update_summary"])
+        self.assertFalse(body["text"]["format"]["schema"]["additionalProperties"])
         model_input = json.loads(body["input"])
         self.assertEqual(model_input["operation"], "chat_reply")
         self.assertEqual(model_input["payload"]["user_text"], "moi")
@@ -84,6 +86,63 @@ class OpenAIResponsesClientTests(unittest.TestCase):
 
         self.assertEqual(response.payload["should_update_summary"], True)
 
+    def test_request_schema_preserves_array_item_types(self) -> None:
+        opener = FakeOpener(
+            {
+                "status": "completed",
+                "output_text": json.dumps(
+                    {
+                        "reply_text": "Hyvä treeni.",
+                        "claims_used": ["distance"],
+                        "missing_data_notes": [],
+                    }
+                ),
+            }
+        )
+        client = OpenAIResponsesClient(OpenAIClientConfig(api_key="test-key", model="gpt-test"), opener=opener)
+
+        client.complete_json(_workout_request())
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        properties = body["text"]["format"]["schema"]["properties"]
+        self.assertEqual(properties["claims_used"]["items"], {"type": "string"})
+        self.assertEqual(properties["missing_data_notes"]["items"], {"type": "string"})
+
+    def test_request_schema_closes_nested_object_properties(self) -> None:
+        opener = FakeOpener(
+            {
+                "status": "completed",
+                "output_text": json.dumps(
+                    {
+                        "workout_selector": {"type": "latest", "value": "", "count": None, "limit": None},
+                        "x_metric": "elapsed_s",
+                        "requested_metrics": ["heart_rate_bpm"],
+                        "transform_hints": [],
+                        "date_range": {"start": "", "end": ""},
+                        "comparison_mode": "",
+                        "layout_mode": "auto",
+                    }
+                ),
+            }
+        )
+        client = OpenAIResponsesClient(OpenAIClientConfig(api_key="test-key", model="gpt-test"), opener=opener)
+
+        extract_visualization_intent(LLMGateway(client), VisualizationIntentInput(user_text="draw heart rate"))
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        properties = body["text"]["format"]["schema"]["properties"]
+        workout_selector = properties["workout_selector"]
+        date_range = properties["date_range"]
+        self.assertFalse(workout_selector["additionalProperties"])
+        self.assertEqual(workout_selector["required"], ["type", "value", "count", "limit"])
+        self.assertIn("latest", workout_selector["properties"]["type"]["enum"])
+        self.assertEqual(workout_selector["properties"]["count"]["type"], ["integer", "null"])
+        self.assertIn("heart_rate_bpm", properties["requested_metrics"]["items"]["enum"])
+        self.assertNotIn("heart_rate", properties["requested_metrics"]["items"]["enum"])
+        self.assertEqual(properties["layout_mode"]["enum"], ["auto", "single_axis", "small_multiples"])
+        self.assertFalse(date_range["additionalProperties"])
+        self.assertEqual(date_range["required"], ["start", "end"])
+
     def test_complete_json_rejects_missing_json_output(self) -> None:
         opener = FakeOpener({"status": "completed", "output_text": "not-json"})
         client = OpenAIResponsesClient(OpenAIClientConfig(api_key="test-key", model="gpt-test"), opener=opener)
@@ -109,6 +168,23 @@ def _chat_request() -> LLMRequest:
                 "reply_text": {"type": "string"},
                 "tone": {"type": "string"},
                 "should_update_summary": {"type": "boolean"},
+            },
+        },
+        max_tokens=100,
+    )
+
+
+def _workout_request() -> LLMRequest:
+    return LLMRequest(
+        operation=LLMOperation.WORKOUT_REPLY,
+        system_prompt="reply",
+        user_payload={"user_text": "analysoi viimeisin treeni"},
+        response_schema={
+            "required": ["reply_text", "claims_used", "missing_data_notes"],
+            "properties": {
+                "reply_text": {"type": "string"},
+                "claims_used": {"type": "array", "items": {"type": "string"}},
+                "missing_data_notes": {"type": "array", "items": {"type": "string"}},
             },
         },
         max_tokens=100,

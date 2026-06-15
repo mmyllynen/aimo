@@ -27,9 +27,28 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         text = _render_first(result)
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertIn("Löysin 2 treeniä:", text)
+        self.assertIn("1. 13.6.2026 - Evening run", text)
+        self.assertIn("2. 13.6.2026 - Morning run", text)
+        self.assertIn("Juoksu, 6 km, 35:00, keskisyke 132", text)
+        self.assertIn("Voit viitata treeniin numerolla, päivämäärällä tai nimellä.", text)
         self.assertIn("Morning run", text)
         self.assertIn("Evening run", text)
+        self.assertNotIn("workout-1", text)
+        self.assertNotIn("workout-2", text)
         self.assertNotIn("Other user run", text)
+
+    def test_treenit_listaa_uses_singular_count_for_one_workout(self) -> None:
+        self._seed_single_workout()
+        event = self._treenit_event("event-list", "user-1", {"toiminto": "listaa"})
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+        text = _render_first(result)
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertIn("Löysin 1 treenin:", text)
+        self.assertIn("1. 13.6.2026 - Morning run", text)
+        self.assertNotIn("workout-1", text)
 
     def test_treenit_nayta_rejects_other_users_workout(self) -> None:
         self._seed_workouts()
@@ -121,10 +140,7 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
             "user-1",
             {
                 "toiminto": "aseta_sykerajat",
-                "zones": [
-                    {"zone_key": "z1", "label": "Kevyt", "upper_bpm": 130, "sort_order": 1},
-                    {"zone_key": "z2", "label": "Reipas", "lower_bpm": 131, "upper_bpm": 150, "sort_order": 2},
-                ],
+                "zones": "114,133,152,171,190",
             },
         )
 
@@ -136,8 +152,51 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         text = _render_first(list_result)
 
         self.assertEqual(_render_first(update_result), "Päivitin sykerajat.")
-        self.assertIn("Kevyt", text)
-        self.assertIn("Reipas", text)
+        self.assertIn("- pk1: -114 bpm", text)
+        self.assertIn("- pk2: 115-133 bpm", text)
+        self.assertIn("- vk1: 134-152 bpm", text)
+        self.assertIn("- vk2: 153-171 bpm", text)
+        self.assertIn("- mk: 172-190 bpm", text)
+
+    def test_treenit_sykerajat_calculates_limits_from_max_heart_rate(self) -> None:
+        update = self._treenit_event(
+            "event-zones-update",
+            "user-1",
+            {
+                "toiminto": "aseta_sykerajat",
+                "zones": "190",
+            },
+        )
+
+        update_result = self.dispatcher.dispatch(update, DispatchContext(UnitOfWork(self.connection)))
+        list_result = self.dispatcher.dispatch(
+            self._treenit_event("event-zones-list", "user-1", {"toiminto": "sykerajat"}),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(_render_first(update_result), "Päivitin sykerajat.")
+        text = _render_first(list_result)
+        self.assertIn("- pk1: -114 bpm", text)
+        self.assertIn("- pk2: 115-133 bpm", text)
+        self.assertIn("- vk1: 134-152 bpm", text)
+        self.assertIn("- vk2: 153-171 bpm", text)
+        self.assertIn("- mk: 172-190 bpm", text)
+
+    def test_treenit_sykerajat_invalid_limits_return_user_error(self) -> None:
+        event = self._treenit_event(
+            "event-zones-invalid",
+            "user-1",
+            {"toiminto": "aseta_sykerajat", "zones": "130,120"},
+        )
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(
+            _render_first(result),
+            "Sykerajojen muoto ei kelpaa. Anna maksimisyke tai viisi nousevaa ylärajaa, "
+            "esim. 190 tai 114,133,152,171,190.",
+        )
 
     def _treenit_event(self, interaction_id: str, user_id: str, options: dict[str, object]):
         return slash_to_event(
@@ -221,6 +280,33 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
                 ),
             ):
                 repositories.workouts.add(workout)
+
+    def _seed_single_workout(self) -> None:
+        with UnitOfWork(self.connection) as repositories:
+            repositories.users.touch(user_id="user-1", seen_at="2026-06-13T09:00:00Z")
+            repositories.workouts.add(
+                WorkoutRecord(
+                    workout_id="workout-1",
+                    owner_user_id="user-1",
+                    source_attachment_id=None,
+                    guild_id="guild-1",
+                    channel_id="channel-1",
+                    title="Morning run",
+                    kind="run",
+                    primary_kind="run",
+                    start_time_utc="2026-06-13T07:00:00Z",
+                    start_time_local="2026-06-13T10:00:00+03:00",
+                    local_date="2026-06-13",
+                    distance_km=5.0,
+                    duration_s=1800,
+                    pace_s_per_km=360,
+                    ascent_m=20,
+                    avg_hr_bpm=130,
+                    max_hr_bpm=150,
+                    point_count=0,
+                    created_at="2026-06-13T10:30:00Z",
+                )
+            )
 
 
 def _render_first(result):

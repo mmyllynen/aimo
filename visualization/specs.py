@@ -6,7 +6,14 @@ from visualization.datasets import DatasetManifest, DatasetRequest
 
 
 SUPPORTED_MARKS = {"line", "bar"}
-SUPPORTED_TRANSFORMS = {"normalize_to_primary_range", "filter_non_null"}
+SUPPORTED_TRANSFORMS = {
+    "normalize_to_primary_range",
+    "filter_non_null",
+    "smooth",
+    "rolling_average",
+    "aggregate_sum",
+    "aggregate_avg",
+}
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,12 @@ def _validate_encoding(encoding: Encoding, manifest: DatasetManifest, *, require
 
 def _select_dataset(request: DatasetRequest, manifest: DatasetManifest):
     requested = set(request.metrics)
+    if request.comparison:
+        comparison = manifest.dataset("workout_comparison")
+        if comparison is not None:
+            columns = {column.column_id for column in comparison.columns}
+            if requested and requested.issubset(columns):
+                return comparison
     for dataset in manifest.datasets:
         columns = {column.column_id for column in dataset.columns}
         if requested and requested.issubset(columns):
@@ -107,10 +120,10 @@ def _select_dataset(request: DatasetRequest, manifest: DatasetManifest):
 
 def _select_x_column(request: DatasetRequest, dataset):
     for column in dataset.columns:
-        if column.column_id == request.x_metric:
+        if column.semantic_type in {"temporal", "ordinal", "nominal"} and column.column_id not in request.metrics:
             return column
     for column in dataset.columns:
-        if column.semantic_type in {"temporal", "ordinal", "nominal"}:
+        if column.column_id == request.x_metric:
             return column
     raise UnsupportedColumnError(request.x_metric)
 

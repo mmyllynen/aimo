@@ -24,9 +24,9 @@ class DiscordCommandSpecTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(specs), {"aimo", "treenit", "debug"})
         self.assertEqual(
             {option.name for option in specs["aimo"].options},
-            {"apua", "syote", "liite"},
+            {"syote", "liite"},
         )
-        self.assertEqual(specs["aimo"].options[2].option_type, DiscordCommandOptionType.ATTACHMENT)
+        self.assertEqual(specs["aimo"].options[1].option_type, DiscordCommandOptionType.ATTACHMENT)
         treenit_action = specs["treenit"].options[0]
         self.assertTrue(treenit_action.required)
         self.assertIn("listaa", treenit_action.choices)
