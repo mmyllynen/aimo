@@ -1,5 +1,7 @@
 # Aimo Foundation
 
+Status note: this document describes the original foundation boundary. It is not the current implementation status. For the current project state, read `HANDOVER.md` first, then `TODO.md` and `docs/V3_ROADMAP.md`.
+
 This document turns the rewrite plan into the first concrete technical boundary. It defines the stable contracts for Aimo without integrating them into a live runtime.
 
 ## Scope
@@ -236,4 +238,5 @@ The foundation task is complete when:
 - translation catalogs validate for both supported languages
 - runtime context can be built without production integrations
 - schema.sql can be read as the initial v3 storage draft
+- storage helper can load schema into in-memory SQLite and manage transactions
 - no production behavior changes until the cutover phase explicitly wires the runtime

@@ -30,36 +30,68 @@ vertaa kahta viimeisintä juoksua
 piirrä reitin korkeuskäyrä
 ```
 
+## Architecture Principle
+
+Aimo is a generic workout visualizer.
+
+The implementation must not grow by adding workflow-specific branches for each new chart request. Rendering marks are primitives, not product features. Product behavior is expressed through a validated visualization spec that references resolved datasets.
+
+Required boundary:
+
+```text
+natural language
+-> visualization intent
+-> dataset request
+-> dataset resolver
+-> dataset manifest
+-> visualization spec
+-> validator/compiler
+-> renderer adapter
+-> PNG artifact
+```
+
+Python owns:
+
+- dataset resolution
+- workout ownership checks
+- metric alias resolution
+- manifest generation
+- spec validation
+- transform execution
+- rendering
+
+The language model may help interpret user text and propose a bounded spec, but only from compact manifests. It must not receive raw workout point rows, raw GPX, secrets, or user-private data that is not required for the requested visualization.
+
 ## Pipeline
 
 1. Route request to visualization workflow.
-2. Extract chart intent from user text.
-3. Resolve workout selector.
-4. Build dataset manifest from available data.
-5. Produce or compile render plan.
-6. Validate render plan.
-7. Fetch raw series internally.
-8. Apply transforms.
-9. Render image.
-10. Send image and concise caption.
+2. Extract visualization intent from user text.
+3. Compile a dataset request.
+4. Resolve datasets and workout selectors with owner checks.
+5. Build a compact dataset manifest.
+6. Produce a visualization spec from the intent and manifest.
+7. Validate and compile the spec.
+8. Fetch or use raw series internally only after validation.
+9. Apply transforms in Python.
+10. Render image through renderer adapter.
+11. Send image and concise caption.
 
-## Chart Intent
+## Visualization Intent
 
-Chart intent is semantic and small.
+Visualization intent is semantic and small. It is not the final render instruction.
 
 Fields:
 
 - `workout_selector`
-- `chart_family`
-- `x_metric`
-- `y_metrics`
-- `group_by`
+- requested datasets
+- requested metrics
+- grouping hints
 - `date_range`
-- `transforms`
+- transform hints
 - `comparison_mode`
 - `caption_preference`
 
-Chart intent must not contain raw point rows.
+Visualization intent must not contain raw point rows.
 
 ## Workout Selectors
 
@@ -106,45 +138,104 @@ Metric aliases:
 
 Alias resolution is deterministic and owned by Python.
 
-## Chart Families
+## Dataset Request
 
-V1 supported:
+Dataset request is the deterministic Python-owned description of what data is needed.
 
-- `line`
-- `scatter`
-- `bar`
-- `area`
-- `pie`
-- `histogram`
+Fields:
 
-Common use:
+- dataset ids
+- dataset source type:
+  - workout points
+  - workout streams
+  - workout summary
+  - HR zones
+  - workout collection
+- owner user id
+- workout selector
+- date range
+- requested metrics
+- requested dimensions
+- comparison scope
 
-- `line`: time series, HR, pace, elevation
-- `scatter`: relationship between two metrics
-- `bar`: workout summaries and comparisons
-- `area`: cumulative or filled trend
-- `pie`: part-to-whole distributions such as HR zones
-- `histogram`: metric distributions
+Dataset request may be derived from LLM output, but Python validates and normalizes it before repository access.
 
-Unsupported chart families should return a user-level unsupported request or fall back to a close supported family when safe.
+## Dataset Manifest
 
-## Render Plan
+Dataset manifest is the only dataset description the model may see for visualization planning.
 
-Render plan is concrete and validated.
+Fields:
+
+- dataset id
+- row count
+- available columns
+- canonical metric ids
+- unit
+- semantic type:
+  - quantitative
+  - temporal
+  - ordinal
+  - nominal
+- null count
+- min/max for safe numeric fields
+- allowed transforms
+- allowed grouping dimensions
+
+Dataset manifest must not contain raw rows.
+
+## Visualization Spec
+
+Visualization spec is concrete and validated before rendering.
 
 Fields:
 
 - datasets
-- series
-- x axis
-- y axes or scale policy
+- mark:
+  - line
+  - point
+  - bar
+  - area
+  - interval
+  - arc
+- encodings:
+  - x
+  - y
+  - color
+  - group
+  - size
 - transforms
+- filters
+- aggregation
+- sorting
+- scale policy
 - annotations
 - legend
 - layout
 - output filename
 
-Render plan references only canonical column ids.
+Visualization spec references only dataset ids and canonical column ids.
+
+## Rendering Marks
+
+V1 supported:
+
+- `line`
+- `point`
+- `bar`
+- `area`
+- `interval`
+- `arc`
+
+Common use:
+
+- `line`: time series, HR, pace, elevation
+- `point`: relationships between two metrics
+- `bar`: workout summaries and comparisons
+- `area`: cumulative or filled trend
+- `interval`: distributions and bins
+- `arc`: part-to-whole distributions such as HR zones
+
+Unsupported marks should return a user-level unsupported request or fall back to a close supported mark when safe.
 
 ## Transforms
 
@@ -184,10 +275,12 @@ Before rendering:
 
 - workout belongs to requesting user
 - dataset exists
-- series references existing columns
-- x and y columns have renderable values
-- chart family supports requested data shape
+- spec references existing dataset ids
+- encodings reference existing columns
+- required columns have renderable values
+- mark supports requested data shape
 - transforms are allowed for metric types
+- aggregation is allowed for selected metric and grouping
 - output size is within limits
 
 ## Caption Requirements
@@ -208,4 +301,3 @@ Do not include internal plan JSON or model reasoning.
 - readable labels
 - legend when multiple series exist
 - no raw data dump in the message
-

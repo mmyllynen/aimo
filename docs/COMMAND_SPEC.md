@@ -51,16 +51,14 @@ Purpose: general Aimo command surface.
 
 Parameters:
 
-- `apua`: boolean, optional
 - `liite`: attachment, optional
 - `syote`: string, optional
 
 Behavior:
 
-- If `apua` is true, return help text.
+- If no useful parameter is present, return help text.
 - If `liite` is present, run GPX ingest for that attachment.
 - If `syote` is present, route it as a canonical user request.
-- If no useful parameter is present, return help text.
 
 Visibility:
 
@@ -123,6 +121,11 @@ Shows current HR zones.
 ### `aseta_sykerajat`
 
 Updates HR zones from explicit numeric limits.
+
+Accepted input forms:
+
+- one integer: max heart rate; Aimo derives pk1, pk2, vk1, vk2, and mk upper limits from it
+- five increasing integers: manual upper limits for pk1, pk2, vk1, vk2, and mk
 
 Validation:
 

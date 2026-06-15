@@ -12,6 +12,7 @@ token =
 api_key =
 model = gpt-5.5
 max_tokens = 500
+timeout_s = 180
 
 [storage]
 database_path = data/aimo.sqlite3

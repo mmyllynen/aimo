@@ -133,10 +133,10 @@ Output:
 
 ```text
 workout_selector
-chart_family
-x_metric
-y_metrics
-transforms
+requested_datasets
+requested_metrics
+grouping_hints
+transform_hints
 date_range
 comparison_mode
 ```
@@ -146,20 +146,21 @@ Rules:
 - semantic intent only
 - no dataset rows
 - canonical metric aliases preferred when possible
+- not the final render instruction
 
-## Operation: Visualization Plan Writing
+## Operation: Visualization Spec Writing
 
 Input:
 
-- chart intent
+- visualization intent
 - dataset manifest
-- allowed chart families
+- allowed marks
 - allowed transforms
 
 Output:
 
 ```text
-render_plan
+visualization_spec
 caption_draft
 ```
 
@@ -168,6 +169,7 @@ Rules:
 - may reference only manifest columns
 - must not invent columns
 - must represent missing metrics explicitly
+- Python validates and compiles the spec before rendering
 
 ## Operation: History Summarization
 

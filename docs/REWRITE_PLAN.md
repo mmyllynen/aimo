@@ -19,7 +19,7 @@ The product intent is not "an LLM with arbitrary tools". The product intent is a
 
 The architecture should avoid these failure modes:
 
-- Routing, data selection, chart planning, and response generation are too tightly coupled to live model/tool loops.
+- Routing, data selection, visualization spec writing, and response generation are too tightly coupled to live model/tool loops.
 - Large tool outputs can accidentally become model input in later steps.
 - Clarification behavior is inconsistent because the model is allowed to ask even when the workflow is already determined.
 - Some behavior relies on prompt discipline instead of explicit workflow contracts.
@@ -38,7 +38,7 @@ The implementation should preserve the product intent in `PRODUCT_SPEC.md`.
 5. The app chooses allowed actions from workflow context. The model may classify and fill structured slots, but it does not decide arbitrary control flow.
 6. Discord UX should be concise and practical: public answers for mentions, ephemeral responses for slash/admin/debug where appropriate.
 7. All persistent data has ownership, retention, and schema versioning.
-8. Visualization is a compiled artifact pipeline: request -> interpreted chart intent -> resolved dataset -> validated chart plan -> rendered image.
+8. Visualization is a compiled artifact pipeline: request -> visualization intent -> resolved dataset -> validated visualization spec -> rendered image.
 9. Failures should be specific and recoverable. The bot should say what it can do next, not leak internal implementation errors.
 
 ## Proposed High-Level Architecture
@@ -116,7 +116,7 @@ Recommended services:
 - `WorkoutLibraryService`: list, retrieve, activate, delete, filter workouts
 - `GpxIngestService`: validate attachment, parse GPX, derive canonical workout record
 - `WorkoutAnalysisService`: metrics, splits, HR zones, streams, derived summaries
-- `VisualizationService`: resolve chart request, build datasets, validate plan, render image
+- `VisualizationService`: resolve visualization request, build datasets, validate spec, render image
 - `DebugTraceService`: structured traces and admin/debug exports
 
 ### 5. LLM Gateway
@@ -125,7 +125,7 @@ The LLM gateway should expose only a few narrow operations:
 
 - `classify_intent(request_summary) -> structured intent`
 - `extract_workout_reference(text, candidates) -> structured selection`
-- `plan_visualization(text, dataset_manifest) -> chart plan`
+- `write_visualization_spec(intent, dataset_manifest) -> visualization spec`
 - `write_chat_reply(context, facts) -> text`
 - `write_workout_reply(context, facts) -> text`
 - `summarize_history(turns) -> summary`
@@ -237,8 +237,8 @@ Visualization should be a multi-stage deterministic pipeline.
    - units
    - missing metrics
    - allowed transforms
-5. LLM may produce a chart plan using only the manifest, not raw points.
-6. Python validates and compiles the plan.
+5. LLM may propose a `VisualizationSpec` using only the manifest, not raw points.
+6. Python validates and compiles the spec.
 7. Python fetches raw series data internally and applies transforms.
 8. Renderer creates the image.
 9. Bot sends image plus short caption.
@@ -249,36 +249,37 @@ Important rule: clarification is a workflow decision. If the user explicitly say
 
 Use two separate specs:
 
-### Chart Intent
+### Visualization Intent
 
 Produced from the user request. Small and semantic.
 
 ```text
 workout_selector
-chart_family
 x_metric
-y_metrics
-transforms
+requested_metrics
+transform_hints
 comparison_mode
 notes_requested
 ```
 
-### Render Plan
+### Visualization Spec
 
 Produced after data is resolved. Fully deterministic and validated.
 
 ```text
 datasets
-series
-axes
+marks
+encodings
+transforms
+filters
+aggregation
 scales
-colors
 annotations
 layout
 output
 ```
 
-The LLM can help create the render plan, but it only sees a dataset manifest. Python owns the final compilation, alias resolution, unit handling, transform application, and render validation.
+The LLM can help propose the visualization spec, but it only sees a dataset manifest. Python owns the final compilation, alias resolution, unit handling, transform application, and render validation.
 
 ## Clarification Policy
 
@@ -362,7 +363,7 @@ Test at four levels:
    - HR zone derivation
    - workout selection
    - chart transforms
-   - render plan validation
+   - visualization spec validation
 
 2. Workflow tests:
    - latest workout visualization does not clarify
@@ -422,10 +423,10 @@ Use fake LLM clients for deterministic tests. Do not make normal tests depend on
 
 ### Phase 6: Visualization Pipeline
 
-- Implement chart intent extraction.
+- Implement visualization intent extraction.
 - Implement workout and dataset resolution.
 - Implement dataset manifest generation.
-- Implement render plan compilation and validation.
+- Implement visualization spec compilation and validation.
 - Implement renderer and image delivery.
 
 ### Phase 7: Hardening
