@@ -421,7 +421,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await send_outbound(channel, outbound, discord_module=FakeDiscordModule)
 
         view = channel.sent[0]["view"]
-        self.assertEqual(view.timeout, 60)
+        self.assertEqual(view.timeout, 24 * 60 * 60)
         self.assertEqual(view.items[0].label, "Poista")
         self.assertEqual(view.items[0].style, "danger")
         self.assertEqual(view.items[0].custom_id, "treenit:workout_delete_confirm:pending-1")

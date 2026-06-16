@@ -27,7 +27,9 @@ from core.i18n import TranslationKey
 DiscordAttachment = Any
 DiscordInteraction = Any
 logger = logging.getLogger(__name__)
-COMPONENT_VIEW_TIMEOUT_SECONDS = 60
+# Keep Discord callbacks alive longer than the workflow's business TTL so
+# expired button presses can still return a controlled user-facing response.
+COMPONENT_VIEW_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
 class DiscordRuntimeError(RuntimeError):
