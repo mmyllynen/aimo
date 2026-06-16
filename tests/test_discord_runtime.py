@@ -23,6 +23,7 @@ class FakeChannel:
 
     async def send(self, **kwargs):
         self.sent.append(kwargs)
+        return FakeSentMessage()
 
 
 class FakeResponse:
@@ -49,6 +50,7 @@ class FakeFollowup:
 
     async def send(self, **kwargs) -> None:
         self.sent.append(kwargs)
+        return FakeSentMessage()
 
 
 class FakeAdminUser:
@@ -58,6 +60,14 @@ class FakeAdminUser:
 
     async def send(self, **kwargs) -> None:
         self.sent.append(kwargs)
+
+
+class FakeSentMessage:
+    def __init__(self) -> None:
+        self.edits = []
+
+    async def edit(self, **kwargs) -> None:
+        self.edits.append(kwargs)
 
 
 class FakeDiscordClient:
@@ -106,6 +116,7 @@ class FakeDiscordModule:
                 self.label = label
                 self.style = style
                 self.custom_id = custom_id
+                self.disabled = False
 
     class AllowedMentions:
         def __init__(self, *, everyone: bool = False, users: bool = False, roles: bool = False) -> None:
@@ -420,6 +431,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await send_outbound(channel, outbound, discord_module=FakeDiscordModule)
 
+        self.assertTrue(channel.sent[0]["wait"])
         view = channel.sent[0]["view"]
         self.assertEqual(view.timeout, 24 * 60 * 60)
         self.assertEqual(view.items[0].label, "Poista")
@@ -439,11 +451,14 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await send_outbound(channel, outbound, discord_module=FakeDiscordModule, component_callback=callback)
         button = channel.sent[0]["view"].items[0]
-        interaction = SimpleNamespace(id="interaction-1")
+        message = FakeSentMessage()
+        interaction = SimpleNamespace(id="interaction-1", message=message)
 
         await button.callback(interaction)
 
         self.assertEqual(handled, [interaction])
+        self.assertTrue(button.disabled)
+        self.assertEqual(message.edits, [{"view": channel.sent[0]["view"]}])
 
     async def test_handle_interaction_extracts_namespace_options_and_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

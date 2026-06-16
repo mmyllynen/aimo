@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # Keep Discord callbacks alive longer than the workflow's business TTL so
 # expired button presses can still return a controlled user-facing response.
 COMPONENT_VIEW_TIMEOUT_SECONDS = 24 * 60 * 60
+COMPONENT_DISABLE_AFTER_SECONDS = 60
 
 
 class DiscordRuntimeError(RuntimeError):
@@ -330,7 +331,9 @@ async def send_outbound(
     view = _discord_view(outbound, discord_module=discord_module, component_callback=component_callback)
     if view is not None:
         kwargs["view"] = view
-    await destination.send(**kwargs)
+    message = await _send_destination(destination, kwargs, wait_for_message=view is not None)
+    if view is not None and message is not None:
+        _schedule_component_disable(message, view, delay_seconds=COMPONENT_DISABLE_AFTER_SECONDS)
 
 
 def _discord_view(
@@ -354,9 +357,76 @@ def _discord_view(
             custom_id=component.component_id,
         )
         if component_callback is not None:
-            button.callback = component_callback
+            button.callback = _component_callback(component_callback, view)
         view.add_item(button)
     return view
+
+
+async def _send_destination(destination: Any, kwargs: dict[str, Any], *, wait_for_message: bool) -> Any | None:
+    if wait_for_message and not isinstance(destination, _InteractionResponseSender):
+        try:
+            return await destination.send(**kwargs, wait=True)
+        except TypeError:
+            pass
+    return await destination.send(**kwargs)
+
+
+def _component_callback(callback: Callable[[Any], Awaitable[None]], view: Any) -> Callable[[Any], Awaitable[None]]:
+    async def wrapped(interaction: Any) -> None:
+        await callback(interaction)
+        await _disable_interaction_message(interaction, view)
+
+    return wrapped
+
+
+def _schedule_component_disable(message: Any, view: Any, *, delay_seconds: int) -> None:
+    try:
+        asyncio.get_running_loop().create_task(_disable_component_message_after(message, view, delay_seconds=delay_seconds))
+    except RuntimeError:
+        logger.debug("Could not schedule component disable outside a running event loop.")
+
+
+async def _disable_component_message_after(message: Any, view: Any, *, delay_seconds: int) -> None:
+    await asyncio.sleep(delay_seconds)
+    await _disable_message_components(message, view)
+
+
+async def _disable_interaction_message(interaction: Any, view: Any) -> None:
+    message = getattr(interaction, "message", None)
+    if message is None:
+        return
+    await _disable_message_components(message, view)
+
+
+async def _disable_message_components(message: Any, view: Any) -> None:
+    if _view_components_disabled(view):
+        return
+    _set_view_components_disabled(view)
+    edit = getattr(message, "edit", None)
+    if edit is None:
+        return
+    try:
+        await edit(view=view)
+    except Exception:
+        logger.exception("Failed to disable Discord message components.")
+
+
+def _set_view_components_disabled(view: Any) -> None:
+    for item in _view_items(view):
+        if hasattr(item, "disabled"):
+            item.disabled = True
+
+
+def _view_components_disabled(view: Any) -> bool:
+    items = _view_items(view)
+    return bool(items) and all(bool(getattr(item, "disabled", False)) for item in items)
+
+
+def _view_items(view: Any) -> tuple[Any, ...]:
+    children = getattr(view, "children", None)
+    if children is not None:
+        return tuple(children)
+    return tuple(getattr(view, "items", ()) or ())
 
 
 def _button_style(style: str, button_style: Any) -> Any:
