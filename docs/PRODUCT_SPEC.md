@@ -1,118 +1,115 @@
-# Aimo v3 Product Spec
+# Aimo Product Spec
 
-## Product Definition
+## Definition
 
-Aimo v3 is a multilingual Discord bot for conversation, workout tracking, GPX-based activity analysis, and workout visualization.
+Aimo is a multilingual Discord bot for channel conversation, workout coaching, GPX-based workout storage, workout management, and natural-language workout visualizations.
 
-The bot serves one Discord community at a time but stores user-owned data. Aimo should feel like a practical assistant in the channel, not a dashboard or a generic chatbot.
+Aimo should feel like a practical assistant in the channel: concise, useful, and dependable. It may use an LLM for language interpretation and prose, but deterministic application code owns state changes, validation, storage, rendering, permissions, and error handling.
 
-## Product Goals
+## Goals
 
-- Reply naturally and concisely to normal mentions.
-- Act as a credible, concise workout coach when the topic is training.
-- Accept GPX attachments and turn them into stored workouts.
+- Reply naturally and concisely to `@Aimo` mentions.
+- Store GPX uploads as user-owned workouts.
 - Let users manage workouts through deterministic slash commands.
-- Let users ask for charts in natural language and receive rendered image files.
-- Maintain enough history and profile context for follow-up messages.
-- Provide debug traces for troubleshooting without exposing secrets or excessive data.
+- Answer workout questions from bounded, validated workout facts.
+- Render workout charts from natural-language requests.
+- Maintain bounded channel history and user profile context.
+- Provide structured debug traces without exposing secrets or raw data.
 
-## Core User Workflows
+## Discord Policy
 
-### Normal Chat
+- Direct messages are rejected.
+- Guild and optional channel allowlists are enforced before dispatch.
+- The bot responds only to mentions and slash commands.
+- Normal guild messages may be stored as history and produce no response.
+- A user can be passively observed in history before their first active interaction.
+- Admin users receive a DM on the first accepted mention/slash interaction from a user.
 
-User mentions Aimo with a normal conversational message.
+## Core Workflows
+
+### Chat
+
+User mentions Aimo with a general message.
 
 Expected behavior:
 
-- Aimo replies publicly in the channel.
-- Reply language comes from `aimo.conf`; Finnish is the default when no language is configured.
-- Reply is usually 1-4 sentences.
-- The reply should not mention internal routing, JSON, prompts, models, or traces.
-- The bot should keep follow-up context when recent channel history makes the reference clear.
+- Public channel reply.
+- Configured language from `aimo.conf`.
+- Usually 1-4 sentences.
+- No mention of internal routing, JSON, prompts, model details, or traces.
+- Uses bounded recent context when it helps.
 
 ### Workout Chat
 
-User asks about training, workouts, pace, heart rate, route, recovery, or saved activity data.
+User asks about training, workouts, pace, heart rate, route, recovery, or saved workout data.
 
 Expected behavior:
 
-- Aimo answers as a concise coach.
-- If stored workout data is relevant, Aimo uses it.
-- If stored data is missing, Aimo says so and can still give general guidance when appropriate.
-- Aimo must not invent workout details.
-- Follow-ups should keep workout context unless the user clearly changes topic.
+- Concise coach-like answer.
+- Uses stored workout facts when relevant.
+- States clearly when data is missing.
+- Does not invent workout details.
+- Keeps follow-up context when recent channel history makes it clear.
 
 ### GPX Upload
 
-User attaches one or more GPX files in a mention or supported slash command.
+User attaches GPX through a supported mention or slash command.
 
 Expected behavior:
 
-- Aimo validates each attachment.
-- Valid GPX files are stored as user-owned workouts.
-- Duplicate files are detected by content hash.
-- Aimo replies with a compact summary of accepted and rejected files.
-- Uploading a workout may update the user's active workout according to policy.
+- Validate size/type/content.
+- Store valid GPX as a user-owned workout.
+- Detect duplicate uploads by owner and content hash.
+- Store raw GPX under configured storage root.
+- Return a compact accepted/rejected summary.
 
 ### Workout Management
 
-User uses slash commands to manage saved workouts.
+User manages saved workouts with `/treenit`.
 
 Expected behavior:
 
-- Users can list workouts.
-- Users can inspect a workout.
-- Users can set active workout.
-- Users can delete their own workout.
-- Users can configure heart-rate zones.
-- Commands are deterministic and do not require the LLM.
+- List recent workouts.
+- Show one workout.
+- Show or set active workout.
+- Delete a user-owned workout.
+- Show or update heart-rate zones.
+- Avoid LLM dependency.
 
 ### Visualization
 
-User asks Aimo to draw or visualize workout data.
+User asks for a chart in natural language.
 
 Expected behavior:
 
-- Aimo resolves the requested workout selection.
-- Aimo builds a chart using available data.
-- Aimo sends an image file and a short caption.
-- Aimo does not ask which workout to use if the user explicitly says latest, active, or a specific workout.
-- Missing data is handled with a precise note or error.
-
-Example:
-
-```text
-@Aimo piirrä viimeisimmästä treenistä syke ajan funktiona, ja samaan kuvaajaan vauhti ja korkeus skaalattuna sykkeen alueelle
-```
-
-Expected result:
-
-- Uses the latest eligible workout owned by the user.
-- Draws heart rate against time or elapsed time.
-- Adds pace and elevation as scaled overlay series if those metrics exist.
-- If one overlay metric is missing, draws available data and notes the missing metric.
-- Does not ask whether the user meant latest or a specific workout.
+- Resolve the requested user-owned workout or workout collection.
+- Build a validated visualization spec.
+- Render a PNG artifact.
+- Send the image with a short caption.
+- Handle missing metrics precisely.
+- Never send raw workout point rows to the model for planning.
 
 ### Debug
 
-User or admin invokes debug command.
+User or admin invokes `/debug`.
 
 Expected behavior:
 
-- Aimo returns the latest relevant trace as a structured artifact.
-- Debug output is ephemeral or otherwise restricted.
-- Secrets and large raw payloads are redacted or summarized.
+- Return the latest relevant trace as a restricted JSON artifact.
+- Non-admins see only traces relevant to themselves.
+- Admin users may access broader traces.
+- Secrets and large payloads are redacted or summarized.
 
-## Supported Languages And Tone
+## Language And Tone
 
-Initial supported languages:
+Supported languages:
 
 - Finnish (`fi`)
 - English (`en`)
 
-The active language is configured in `aimo.conf` under `[bot] language`.
+The active language is configured in `aimo.conf` under `[bot] language`; Finnish is the default.
 
-All deterministic bot-owned messages must use translation keys and catalogs. LLM-generated prose must be explicitly instructed to answer in the configured language.
+Deterministic bot-owned messages must use translation keys. LLM-generated prose must be instructed to answer in the configured language.
 
 Tone:
 
@@ -120,69 +117,31 @@ Tone:
 - direct
 - helpful
 - credible for training topics
-- light playfulness is allowed when the user is playful
+- no exaggerated certainty
 
-Workout tone:
+## Privacy And Ownership
 
-- coach-like
-- practical
-- specific when data exists
-- no exaggerated hype
-- no invented certainty
-
-## Public vs Ephemeral Behavior
-
-Public channel replies:
-
-- mention chat replies
-- workout chat replies
-- visualization captions and image files
-- GPX ingest summaries when uploaded publicly
-
-Ephemeral replies:
-
-- debug output
-- slash help where appropriate
-- administrative status
-- potentially destructive command confirmations
+- Workout data belongs to the Discord user who uploaded it.
+- Users cannot access another user's workouts unless explicit sharing is added later.
+- Channel history is operational context and must be bounded by retention policy.
+- Debug traces are operational data and must be redacted.
+- Raw GPX and full point streams stay in deterministic storage/services, not model planning inputs.
 
 ## Clarification Policy
 
-Aimo should clarify only when it cannot proceed safely.
+Clarify only when the bot cannot proceed safely or usefully.
 
 Do not clarify when:
 
-- user says latest workout
-- user says active workout
-- user names a specific workout id/reference
-- there is exactly one plausible candidate
-- a best-effort answer can be produced with a clear note
+- the user says latest workout
+- the user says active workout
+- the user gives a specific id/date/list reference
+- exactly one plausible candidate exists
+- a best-effort result can be produced with a clear missing-data note
 
 Clarify when:
 
 - multiple workouts match equally and the result would materially differ
-- a destructive command needs confirmation
-- requested data is impossible to identify
+- a destructive command is ambiguous
+- requested data cannot be identified
 - permission is missing
-
-## Data Ownership
-
-- Workout data belongs to the Discord user who uploaded it.
-- One user cannot access another user's workout data unless future explicit sharing support is added.
-- Channel history belongs to the bot's operational context and should be bounded by retention policy.
-- Debug traces are operational data and should be redacted.
-
-## Feature Parity Acceptance
-
-Aimo v3 is product-complete when:
-
-- public mention chat works
-- workout chat works
-- GPX ingest works
-- workout slash management works
-- HR zone configuration works
-- latest/active/specific workout references work
-- natural-language visualizations produce images
-- `/debug` returns useful traces
-- all model calls are bounded and validated
-- common failures produce stable localized user messages

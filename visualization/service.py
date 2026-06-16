@@ -13,16 +13,22 @@ from visualization.render import (
     LineChart,
     LinePanel,
     MultiPanelLineChart,
+    PieChart,
+    PieSlice,
     RenderSeries,
     render_bar_chart_png,
     render_line_chart_png,
     render_multi_panel_line_chart_png,
+    render_pie_chart_png,
 )
 from visualization.specs import (
     MissingRenderableDataError,
+    VisualizationValidationIssue,
     VisualizationSpec,
     VisualizationSpecError,
+    allowed_visualization_primitives,
     compile_visualization_spec,
+    visualization_validation_issue,
 )
 
 
@@ -36,6 +42,13 @@ class VisualizationArtifact:
     scaled_metrics: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class VisualizationValidationContext:
+    dataset_manifest: dict[str, Any]
+    validation_errors: tuple[dict[str, Any], ...]
+    allowed_primitives: dict[str, Any]
+
+
 class VisualizationError(ValueError):
     pass
 
@@ -47,8 +60,9 @@ class MissingPrimaryMetricError(VisualizationError):
 
 
 class VisualizationSpecInvalidError(VisualizationError):
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, validation_errors: tuple[dict[str, Any], ...] = ()) -> None:
         self.reason = reason
+        self.validation_errors = validation_errors
         super().__init__(reason)
 
 
@@ -65,6 +79,7 @@ def render_workout_visualization(
         y_metrics=intent.y_metrics,
         transforms=intent.transforms,
         comparison=_is_comparison_intent(intent),
+        chart_kind=intent.chart_kind,
     )
     manifest = resolve_datasets(
         request,
@@ -78,7 +93,8 @@ def render_workout_visualization(
     except MissingRenderableDataError as exc:
         raise MissingPrimaryMetricError(exc.column_id) from exc
     except VisualizationSpecError as exc:
-        raise VisualizationSpecInvalidError(type(exc).__name__) from exc
+        issue = visualization_validation_issue(exc, manifest)
+        raise VisualizationSpecInvalidError(type(exc).__name__, validation_errors=(issue.to_model_error(),)) from exc
 
     dataset = manifest.dataset(spec.x.dataset_id)
     if dataset is None:
@@ -95,9 +111,43 @@ def render_workout_visualization(
     )
 
 
+def visualization_validation_context(
+    workout: WorkoutRecord,
+    points: tuple[WorkoutPointRecord, ...],
+    intent: VisualizationIntent,
+    *,
+    heart_rate_zones: tuple[HeartRateZoneRecord, ...] = (),
+    comparison_workouts: tuple[WorkoutRecord, ...] = (),
+) -> VisualizationValidationContext:
+    request = dataset_request_from_metrics(
+        x_metric=intent.x_metric,
+        y_metrics=intent.y_metrics,
+        transforms=intent.transforms,
+        comparison=_is_comparison_intent(intent),
+        chart_kind=intent.chart_kind,
+    )
+    manifest = resolve_datasets(
+        request,
+        points=points,
+        heart_rate_zones=heart_rate_zones,
+        workout=workout,
+        comparison_workouts=comparison_workouts,
+    )
+    issues: tuple[VisualizationValidationIssue, ...] = ()
+    try:
+        compile_visualization_spec(request, manifest)
+    except VisualizationSpecError as exc:
+        issues = (visualization_validation_issue(exc, manifest),)
+    return VisualizationValidationContext(
+        dataset_manifest=manifest.to_model_manifest(),
+        validation_errors=tuple(issue.to_model_error() for issue in issues),
+        allowed_primitives=allowed_visualization_primitives(),
+    )
+
+
 def _render_spec(workout: WorkoutRecord, spec: VisualizationSpec, dataset: Dataset, *, layout_mode: str = "single_axis") -> bytes:
     rows = _transformed_rows(spec, dataset)
-    chart_title = _chart_title(workout.title, spec)
+    chart_title = _chart_title(workout.title, spec, dataset)
     chart_subtitle = _chart_subtitle(workout)
     x_label = _metric_label(spec.x.column_id)
     y_label = _y_axis_label(spec)
@@ -112,6 +162,23 @@ def _render_spec(workout: WorkoutRecord, spec: VisualizationSpec, dataset: Datas
                 bars=_aggregate_bars(spec, rows),
             )
         )
+    if spec.mark == "pie":
+        return render_pie_chart_png(
+            PieChart(
+                title=chart_title,
+                subtitle=chart_subtitle,
+                value_label=y_label,
+                value_format=_bar_tick_format(spec),
+                slices=tuple(
+                    PieSlice(
+                        label=str(row.get(spec.x.column_id, "")),
+                        value=_numeric(row.get(spec.y[0].column_id)),
+                        color=_color_hint(row.get("color_hint")),
+                    )
+                    for row in rows
+                ),
+            )
+        )
     if spec.mark == "bar":
         return render_bar_chart_png(
             BarChart(
@@ -119,9 +186,13 @@ def _render_spec(workout: WorkoutRecord, spec: VisualizationSpec, dataset: Datas
                 subtitle=chart_subtitle,
                 x_label=x_label,
                 y_label=y_label,
-                y_tick_format=_y_tick_format(spec.y[0].column_id),
+                y_tick_format=_bar_tick_format(spec),
                 bars=tuple(
-                    Bar(label=str(row.get(spec.x.column_id, "")), value=_numeric(row.get(spec.y[0].column_id)))
+                    Bar(
+                        label=str(row.get(spec.x.column_id, "")),
+                        value=_numeric(row.get(spec.y[0].column_id)),
+                        color=_color_hint(row.get("color_hint")),
+                    )
                     for row in rows
                 ),
             )
@@ -177,7 +248,19 @@ def _transformed_rows(spec: VisualizationSpec, dataset: Dataset) -> tuple[dict[s
     if "filter_non_null" in spec.transforms:
         required_columns = (spec.x.column_id,) + tuple(encoding.column_id for encoding in spec.y)
         rows = tuple(row for row in rows if all(row.get(column_id) is not None for column_id in required_columns))
+    if "as_percentage_of_total" in spec.transforms:
+        rows = _as_percentage_of_total_rows(spec, rows)
     return rows
+
+
+def _as_percentage_of_total_rows(spec: VisualizationSpec, rows: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
+    if len(spec.y) != 1:
+        return rows
+    column_id = spec.y[0].column_id
+    total = sum(_numeric(row.get(column_id)) for row in rows)
+    if total <= 0:
+        return tuple({**row, column_id: 0.0} for row in rows)
+    return tuple({**row, column_id: (_numeric(row.get(column_id)) / total) * 100.0} for row in rows)
 
 
 def _aggregate_bars(spec: VisualizationSpec, rows: tuple[dict[str, Any], ...]) -> tuple[Bar, ...]:
@@ -197,10 +280,10 @@ def _aggregate_bars(spec: VisualizationSpec, rows: tuple[dict[str, Any], ...]) -
 def _should_render_metric_aggregate_bars(spec: VisualizationSpec, dataset: Dataset) -> bool:
     if "aggregate_sum" not in spec.transforms and "aggregate_avg" not in spec.transforms:
         return False
-    if spec.mark != "bar":
-        return True
     x_column = next((column for column in dataset.columns if column.column_id == spec.x.column_id), None)
-    return x_column is None or x_column.semantic_type not in {"nominal", "ordinal"}
+    if spec.mark in {"bar", "pie"} and x_column is not None and x_column.semantic_type in {"nominal", "ordinal"}:
+        return False
+    return True
 
 
 def _aggregate_values(values: tuple[float | None, ...], *, aggregation: str) -> float:
@@ -238,11 +321,20 @@ def _metrics_share_unit(spec: VisualizationSpec) -> bool:
     return len({_metric_unit(encoding.column_id) for encoding in spec.y}) <= 1
 
 
-def _chart_title(workout_title: str, spec: VisualizationSpec) -> str:
+def _chart_title(workout_title: str, spec: VisualizationSpec, dataset: Dataset | None = None) -> str:
     if len(spec.y) > 1:
         return f"Workout metrics - {workout_title}"
+    if dataset is not None and "as_percentage_of_total" in spec.transforms:
+        x_column = _column_semantic_type(dataset, spec.x.column_id)
+        if x_column in {"nominal", "ordinal"}:
+            return f"{_series_label(spec.x.column_id)} share - {workout_title}"
     metric = _metric_label(spec.y[0].column_id) if spec.y else "Chart"
     return f"{metric} - {workout_title}"
+
+
+def _column_semantic_type(dataset: Dataset, column_id: str) -> str:
+    column = next((candidate for candidate in dataset.columns if candidate.column_id == column_id), None)
+    return column.semantic_type if column is not None else ""
 
 
 def _chart_subtitle(workout: WorkoutRecord) -> str:
@@ -257,9 +349,17 @@ def _chart_subtitle(workout: WorkoutRecord) -> str:
 
 
 def _y_axis_label(spec: VisualizationSpec) -> str:
+    if "as_percentage_of_total" in spec.transforms:
+        return "Share of total (%)"
     if len(spec.y) == 1:
         return _metric_label(spec.y[0].column_id)
     return "Value"
+
+
+def _bar_tick_format(spec: VisualizationSpec) -> str:
+    if "as_percentage_of_total" in spec.transforms:
+        return "percentage"
+    return _y_tick_format(spec.y[0].column_id)
 
 
 def _metric_label(metric: str) -> str:
@@ -283,6 +383,34 @@ def _metric_label(metric: str) -> str:
         "point_count": "Point count",
     }
     return labels.get(metric, metric.replace("_", " ").title())
+
+
+def _color_hint(value: object) -> tuple[int, int, int] | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    named = {
+        "blue": (37, 99, 235),
+        "green": (22, 163, 74),
+        "yellow": (234, 179, 8),
+        "orange": (249, 115, 22),
+        "red": (220, 38, 38),
+        "purple": (124, 58, 237),
+        "cyan": (8, 145, 178),
+        "pink": (190, 24, 93),
+    }
+    if normalized in named:
+        return named[normalized]
+    if len(normalized) == 7 and normalized.startswith("#"):
+        try:
+            return (
+                int(normalized[1:3], 16),
+                int(normalized[3:5], 16),
+                int(normalized[5:7], 16),
+            )
+        except ValueError:
+            return None
+    return None
 
 
 def _metric_unit(metric: str) -> str:

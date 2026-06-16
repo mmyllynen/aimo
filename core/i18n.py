@@ -33,6 +33,10 @@ class TranslationKey(StrEnum):
     WORKOUT_DETAILS = "workout.details"
     WORKOUT_ACTIVE_EMPTY = "workout.active_empty"
     WORKOUT_ACTIVE_SET = "workout.active_set"
+    WORKOUT_DELETE_PENDING = "workout.delete_pending"
+    WORKOUT_DELETE_CONFIRMATION_INVALID = "workout.delete_confirmation_invalid"
+    WORKOUT_DELETE_CONFIRMATION_EXPIRED = "workout.delete_confirmation_expired"
+    WORKOUT_DELETE_CANCELLED = "workout.delete_cancelled"
     WORKOUT_DELETED = "workout.deleted"
     HR_ZONES_EMPTY = "hr_zones.empty"
     HR_ZONES_INVALID = "hr_zones.invalid"
@@ -73,9 +77,29 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.WORKOUT_MISSING_METRIC: "Treenissä ei ole pyydettyä mittaria: {metric}.",
         TranslationKey.WORKOUT_LIST_EMPTY: "Sinulla ei ole vielä tallennettuja treenejä.",
         TranslationKey.WORKOUT_LIST_SUMMARY: "Löysin {count}:\n{items}",
-        TranslationKey.WORKOUT_DETAILS: "{title}\nPäivä: {date}\nMatka: {distance_km} km\nKesto: {duration}",
+        TranslationKey.WORKOUT_DETAILS: (
+            "{title}\n"
+            "Aika: {date}\n"
+            "Laji: {kind}\n"
+            "Matka: {distance_km} km\n"
+            "Kesto: {duration}\n"
+            "Keskisyke: {avg_hr}\n"
+            "Nousu: {ascent}"
+        ),
         TranslationKey.WORKOUT_ACTIVE_EMPTY: "Sinulla ei ole aktiivista treeniä.",
         TranslationKey.WORKOUT_ACTIVE_SET: "Asetin aktiiviseksi treeniksi: {title}.",
+        TranslationKey.WORKOUT_DELETE_PENDING: (
+            "Poisto vaatii vahvistuksen.\n"
+            "Poistettava treeni: {title}\n"
+            "Vahvista tai peruuta poisto painikkeella 60 sekunnin sisällä."
+        ),
+        TranslationKey.WORKOUT_DELETE_CONFIRMATION_INVALID: (
+            "Poiston vahvistus ei täsmää. Aloita poisto uudelleen /treenit poista -komennolla."
+        ),
+        TranslationKey.WORKOUT_DELETE_CONFIRMATION_EXPIRED: (
+            "Poiston vahvistus vanheni. Aloita poisto uudelleen /treenit poista -komennolla."
+        ),
+        TranslationKey.WORKOUT_DELETE_CANCELLED: "Peruin poiston.",
         TranslationKey.WORKOUT_DELETED: "Poistin treenin: {title}.",
         TranslationKey.HR_ZONES_EMPTY: "Sinulle ei ole vielä asetettu sykerajoja.",
         TranslationKey.HR_ZONES_INVALID: (
@@ -114,9 +138,29 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.WORKOUT_MISSING_METRIC: "The workout does not contain the requested metric: {metric}.",
         TranslationKey.WORKOUT_LIST_EMPTY: "You do not have any saved workouts yet.",
         TranslationKey.WORKOUT_LIST_SUMMARY: "I found {count}:\n{items}",
-        TranslationKey.WORKOUT_DETAILS: "{title}\nDate: {date}\nDistance: {distance_km} km\nDuration: {duration}",
+        TranslationKey.WORKOUT_DETAILS: (
+            "{title}\n"
+            "Time: {date}\n"
+            "Kind: {kind}\n"
+            "Distance: {distance_km} km\n"
+            "Duration: {duration}\n"
+            "Avg HR: {avg_hr}\n"
+            "Ascent: {ascent}"
+        ),
         TranslationKey.WORKOUT_ACTIVE_EMPTY: "You do not have an active workout.",
         TranslationKey.WORKOUT_ACTIVE_SET: "Set active workout to: {title}.",
+        TranslationKey.WORKOUT_DELETE_PENDING: (
+            "Deletion requires confirmation.\n"
+            "Workout to delete: {title}\n"
+            "Confirm or cancel deletion with the buttons within 60 seconds."
+        ),
+        TranslationKey.WORKOUT_DELETE_CONFIRMATION_INVALID: (
+            "The delete confirmation did not match. Start deletion again with /treenit poista."
+        ),
+        TranslationKey.WORKOUT_DELETE_CONFIRMATION_EXPIRED: (
+            "The delete confirmation expired. Start deletion again with /treenit poista."
+        ),
+        TranslationKey.WORKOUT_DELETE_CANCELLED: "Cancelled deletion.",
         TranslationKey.WORKOUT_DELETED: "Deleted workout: {title}.",
         TranslationKey.HR_ZONES_EMPTY: "You do not have heart-rate zones configured yet.",
         TranslationKey.HR_ZONES_INVALID: (

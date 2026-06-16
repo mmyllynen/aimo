@@ -9,10 +9,11 @@ from uuid import uuid4
 from app.policy import AdminPolicy
 from app.redaction import redact_payload
 from core.events import CanonicalEvent, EventKind
-from core.i18n import DEFAULT_LANGUAGE, SupportedLanguage
+from core.errors import AppError, ErrorCategory
+from core.i18n import DEFAULT_LANGUAGE, LocalizedText, SupportedLanguage, TranslationKey
 from core.routing import RouteConfidence, RouteDecision, WorkflowTarget
 from core.trace import TraceLevel, TraceStage
-from core.workflows import WorkflowResult
+from core.workflows import OutgoingKind, OutgoingMessage, StateUpdate, WorkflowResult, WorkflowStatus
 from llm.gateway import LLMCallTrace, LLMGateway, LLMGatewayError
 from llm.operations import IntentClassificationInput, classify_intent
 from storage.repositories import DebugTraceEventRecord, HistoryEventRecord
@@ -63,12 +64,18 @@ class Dispatcher:
 
     def dispatch(self, event: CanonicalEvent, context: DispatchContext) -> WorkflowResult:
         with context.unit_of_work as repositories:
+            existing_user = repositories.users.get(event.user_id)
+            user_metadata, first_interaction_payload = _user_metadata_for_event(
+                existing_user.metadata if existing_user is not None else {},
+                event,
+            )
             repositories.users.touch(
                 user_id=event.user_id,
                 discord_user_name=event.user_name,
                 discord_display_name=str(event.metadata.get("discord_display_name", "")),
                 seen_at=event.created_at,
                 source=event.source.value,
+                metadata=user_metadata,
             )
             repositories.channels.upsert(
                 channel_id=event.channel_id,
@@ -76,7 +83,10 @@ class Dispatcher:
             )
             repositories.history.add(_history_record(event))
 
-            route = route_event(event, llm_gateway=context.llm_gateway)
+            try:
+                route = route_event(event, llm_gateway=context.llm_gateway)
+            except LLMGatewayError:
+                return _routing_model_unavailable_result(event, repositories, context)
             trace_id = _trace_id(event)
             repositories.debug_traces.create(
                 trace_id=trace_id,
@@ -195,6 +205,15 @@ class Dispatcher:
                 )
             else:
                 result = self.noop_workflow.handle(event, route)
+            if first_interaction_payload is not None:
+                result = _with_state_update(
+                    result,
+                    StateUpdate(
+                        namespace="users",
+                        operation="first_interaction",
+                        payload=first_interaction_payload,
+                    ),
+                )
 
             _add_workflow_trace_events(repositories.debug_traces, trace_id, result)
             _add_trace_event(
@@ -276,6 +295,12 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
             confidence=RouteConfidence.HIGH,
             reason="Explicit help request.",
         )
+    if command_name in {"visualisointi", "visualization"}:
+        return RouteDecision(
+            target=WorkflowTarget.VISUALIZATION,
+            confidence=RouteConfidence.HIGH,
+            reason="Explicit visualization command.",
+        )
     if event.attachments and _has_gpx_attachment(event):
         return RouteDecision(
             target=WorkflowTarget.GPX_INGEST,
@@ -296,38 +321,120 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
             reason="Attachment present but no supported GPX attachment found.",
         )
     if _should_use_llm_routing(event, command_name, llm_gateway):
-        try:
-            return classify_intent(
-                llm_gateway,
-                IntentClassificationInput(
-                    event_kind=event.kind.value,
-                    user_text=event.text,
-                    has_attachments=bool(event.attachments),
-                    compact_channel_state={
-                        "guild_id_present": event.guild_id is not None,
-                        "source": event.source.value,
-                        "command_name": command_name,
-                    },
-                ),
+        return classify_intent(
+            llm_gateway,
+            IntentClassificationInput(
+                event_kind=event.kind.value,
+                user_text=event.text,
+                has_attachments=bool(event.attachments),
+                compact_channel_state={
+                    "guild_id_present": event.guild_id is not None,
+                    "source": event.source.value,
+                    "command_name": command_name,
+                },
             )
-        except LLMGatewayError:
-            pass
-    if _is_visualization_request(event):
-        return RouteDecision(
-            target=WorkflowTarget.VISUALIZATION,
-            confidence=RouteConfidence.MEDIUM,
-            reason="Visualization request skeleton matched chart language.",
-        )
-    if _is_workout_chat_request(event):
-        return RouteDecision(
-            target=WorkflowTarget.WORKOUT_CHAT,
-            confidence=RouteConfidence.MEDIUM,
-            reason="Workout chat request skeleton matched workout language.",
         )
     return RouteDecision(
         target=WorkflowTarget.CHAT,
         confidence=RouteConfidence.LOW,
         reason="No deterministic skeleton route matched.",
+    )
+
+
+def _user_metadata_for_event(
+    existing_metadata: dict[str, Any],
+    event: CanonicalEvent,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    metadata = dict(existing_metadata)
+    created_at = event.created_at.isoformat()
+    metadata.setdefault("first_observed_at", created_at)
+    is_interaction = event.kind in {EventKind.MENTION, EventKind.SLASH_COMMAND, EventKind.COMPONENT}
+    if not is_interaction:
+        metadata.setdefault("interaction_state", "observed")
+        return metadata, None
+
+    if metadata.get("interaction_state") == "interacted":
+        return metadata, None
+
+    metadata["interaction_state"] = "interacted"
+    metadata.setdefault("first_interacted_at", created_at)
+    metadata.setdefault("first_interaction_kind", event.kind.value)
+    metadata.setdefault("first_interaction_source", event.source.value)
+    command_name = str(event.metadata.get("command_name", ""))
+    if command_name:
+        metadata.setdefault("first_interaction_command", command_name)
+    payload = {
+        "user_id": event.user_id,
+        "user_name": event.user_name,
+        "discord_display_name": str(event.metadata.get("discord_display_name", "")),
+        "guild_id": event.guild_id,
+        "channel_id": event.channel_id,
+        "event_id": event.event_id,
+        "interaction_kind": event.kind.value,
+        "source": event.source.value,
+        "command_name": command_name,
+        "created_at": created_at,
+    }
+    return metadata, payload
+
+
+def _with_state_update(result: WorkflowResult, update: StateUpdate) -> WorkflowResult:
+    return WorkflowResult(
+        status=result.status,
+        messages=result.messages,
+        state_updates=(*result.state_updates, update),
+        trace_events=result.trace_events,
+        error=result.error,
+    )
+
+
+def _routing_model_unavailable_result(
+    event: CanonicalEvent,
+    repositories: RepositoryBundle,
+    context: DispatchContext,
+) -> WorkflowResult:
+    del context
+    trace_id = _trace_id(event)
+    repositories.debug_traces.create(
+        trace_id=trace_id,
+        source_event_id=event.event_id,
+        workflow=WorkflowTarget.CHAT.value,
+        status=WorkflowStatus.SYSTEM_ERROR.value,
+        started_at=event.created_at,
+        payload={
+            "user_id": event.user_id,
+            "channel_id": event.channel_id,
+            "guild_id": event.guild_id,
+            "route_confidence": RouteConfidence.LOW.value,
+        },
+    )
+    _add_trace_event(
+        repositories.debug_traces,
+        trace_id=trace_id,
+        stage=TraceStage.ROUTE,
+        level=TraceLevel.ERROR,
+        message="LLM routing failed.",
+        payload={"error_category": ErrorCategory.MODEL_UNAVAILABLE.value},
+        created_at=event.created_at.isoformat(),
+    )
+    repositories.debug_traces.finish(
+        trace_id,
+        status=WorkflowStatus.SYSTEM_ERROR.value,
+        finished_at=event.created_at,
+    )
+    return WorkflowResult(
+        status=WorkflowStatus.SYSTEM_ERROR,
+        messages=(
+            OutgoingMessage(
+                kind=OutgoingKind.TEXT,
+                localized_text=LocalizedText(key=TranslationKey.ERROR_MODEL_UNAVAILABLE),
+            ),
+        ),
+        error=AppError(
+            category=ErrorCategory.MODEL_UNAVAILABLE,
+            message="LLM routing failed",
+            user_message_key=TranslationKey.ERROR_MODEL_UNAVAILABLE.value,
+        ),
     )
 
 
@@ -366,35 +473,6 @@ def _has_gpx_attachment(event: CanonicalEvent) -> bool:
         or attachment.content_type.strip().lower() in {"application/gpx+xml", "application/xml", "text/xml"}
         for attachment in event.attachments
     )
-
-
-def _is_visualization_request(event: CanonicalEvent) -> bool:
-    command_name = str(event.metadata.get("command_name", "")).lower()
-    if command_name in {"visualisointi", "visualization"}:
-        return True
-    text = event.text.strip().lower()
-    markers = ("piirrä", "piirra", "kuvaaja", "käyrä", "kayra", "plot", "draw", "chart", "vertaa", "compare")
-    return any(marker in text for marker in markers)
-
-
-def _is_workout_chat_request(event: CanonicalEvent) -> bool:
-    text = event.text.strip().lower()
-    workout_markers = ("treeni", "harjoitus", "lenkki", "workout", "run", "training")
-    question_markers = (
-        "miten",
-        "miltä",
-        "milta",
-        "kerro",
-        "analysoi",
-        "arvioi",
-        "palaut",
-        "onnistu",
-        "how",
-        "analyze",
-        "review",
-        "recover",
-    )
-    return any(marker in text for marker in workout_markers) and any(marker in text for marker in question_markers)
 
 
 def _history_record(event: CanonicalEvent) -> HistoryEventRecord:
@@ -530,6 +608,13 @@ def _trace_repository_bundle(
         users=_RepositoryTraceProxy("users", repositories.users, debug_traces, trace_id, created_at),
         channels=_RepositoryTraceProxy("channels", repositories.channels, debug_traces, trace_id, created_at),
         history=_RepositoryTraceProxy("history", repositories.history, debug_traces, trace_id, created_at),
+        pending_workout_deletes=_RepositoryTraceProxy(
+            "pending_workout_deletes",
+            repositories.pending_workout_deletes,
+            debug_traces,
+            trace_id,
+            created_at,
+        ),
         heart_rate_zones=_RepositoryTraceProxy(
             "heart_rate_zones",
             repositories.heart_rate_zones,

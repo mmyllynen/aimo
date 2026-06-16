@@ -16,6 +16,7 @@ from llm.operations import (
     IntentClassificationInput,
     VisualizationIntent,
     VisualizationIntentInput,
+    VisualizationIntentRevisionInput,
     WorkoutReply,
     WorkoutReplyInput,
     WorkoutReference,
@@ -23,6 +24,7 @@ from llm.operations import (
     classify_intent,
     extract_visualization_intent,
     extract_workout_reference,
+    revise_visualization_intent,
     write_chat_reply,
     write_workout_reply,
 )
@@ -44,6 +46,7 @@ __all__ = [
     "build_openai_gateway",
     "VisualizationIntent",
     "VisualizationIntentInput",
+    "VisualizationIntentRevisionInput",
     "WorkoutReply",
     "WorkoutReplyInput",
     "WorkoutReference",
@@ -51,6 +54,7 @@ __all__ = [
     "classify_intent",
     "extract_visualization_intent",
     "extract_workout_reference",
+    "revise_visualization_intent",
     "write_chat_reply",
     "write_workout_reply",
 ]

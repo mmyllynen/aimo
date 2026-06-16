@@ -24,10 +24,11 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
     def test_latest_workout_visualization_returns_png_file(self) -> None:
         self._seed_workout(with_heart_rate=True)
+        client = _visualization_client(_intent(("heart_rate_bpm",)))
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "piirrä viimeisimmästä treenistä syke ajan funktiona"),
-            DispatchContext(UnitOfWork(self.connection)),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
@@ -40,10 +41,11 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
     def test_latest_workout_visualization_writes_artifact_when_root_is_configured(self) -> None:
         self._seed_workout(with_heart_rate=True)
+        client = _visualization_client(_intent(("heart_rate_bpm",)))
         with tempfile.TemporaryDirectory() as tmpdir:
             result = self.dispatcher.dispatch(
                 _mention("event-1", "piirrä viimeisimmästä treenistä syke ajan funktiona"),
-                DispatchContext(UnitOfWork(self.connection), artifact_path=Path(tmpdir)),
+                DispatchContext(UnitOfWork(self.connection), artifact_path=Path(tmpdir), llm_gateway=LLMGateway(client)),
             )
 
             self.assertEqual(result.status, WorkflowStatus.SUCCESS)
@@ -53,15 +55,42 @@ class VisualizationWorkflowTests(unittest.TestCase):
             self.assertEqual(Path(artifacts[0].storage_path).read_bytes(), result.messages[0].content)
             self.assertEqual(artifacts[0].metadata["storage_status"], "written")
 
+    def test_visualization_artifact_stores_compact_revision_context(self) -> None:
+        self._seed_workout(with_heart_rate=True)
+        client = _visualization_client(_intent(("heart_rate_bpm",)))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä viimeisimmästä treenistä syke ajan funktiona"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        with UnitOfWork(self.connection) as repositories:
+            artifact = repositories.rendered_artifacts.latest_visualization_for_user("user-1", channel_id="channel-1")
+        self.assertIsNotNone(artifact)
+        self.assertEqual(artifact.metadata["channel_id"], "channel-1")
+        self.assertEqual(artifact.metadata["workout_id"], "workout-1")
+        self.assertEqual(artifact.metadata["intent"]["x_metric"], "elapsed_s")
+        self.assertEqual(artifact.metadata["intent"]["y_metrics"], ["heart_rate_bpm"])
+        self.assertNotIn("workout_points", artifact.metadata)
+        self.assertNotIn("raw_points", artifact.metadata)
+
     def test_latest_workout_visualization_scales_secondary_series(self) -> None:
         self._seed_workout(with_heart_rate=True)
+        client = _visualization_client(
+            _intent(
+                ("heart_rate_bpm", "pace_s_per_km", "elevation_m"),
+                transforms=("normalize_to_primary_range",),
+                layout_mode="single_axis",
+            )
+        )
 
         result = self.dispatcher.dispatch(
             _mention(
                 "event-1",
                 "piirrä viimeisimmästä treenistä syke ajan funktiona, piirrä samaan kuvaajaan myös vauhti ja maaston korkeuskäyrät skaalattuna samalle alueelle",
             ),
-            DispatchContext(UnitOfWork(self.connection)),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
@@ -73,10 +102,11 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
     def test_latest_workout_hr_zone_distribution_returns_png_file(self) -> None:
         self._seed_workout(with_heart_rate=True, with_zones=True)
+        client = _visualization_client(_intent(("heart_rate_zone_seconds",)))
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "piirrä viimeisimmän treenin sykealuejakauma"),
-            DispatchContext(UnitOfWork(self.connection)),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
@@ -86,12 +116,44 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.messages[0].filename, "workout-1-hr-zone-distribution.png")
         self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_zone_seconds",))
 
+    def test_latest_workout_hr_zone_distribution_percentage_returns_png_file(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_zones=True)
+        client = _visualization_client(_intent(("heart_rate_zone_seconds",), transforms=("as_percentage_of_total",)))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä viimeisimmän treenin sykealuejakauma prosentuaalisesti"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.FILE)
+        self.assertEqual(result.messages[0].content_type, "image/png")
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_zone_seconds",))
+
+    def test_latest_workout_hr_zone_distribution_pie_returns_png_file(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_zones=True)
+        client = _visualization_client(
+            _intent(("heart_rate_zone_seconds",), transforms=("as_percentage_of_total",), chart_kind="pie")
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "tee viimeisimmän treenin sykealuejakaumasta piirakkagraafi prosentteina"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.FILE)
+        self.assertEqual(result.messages[0].content_type, "image/png")
+        self.assertTrue(result.messages[0].content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_zone_seconds",))
+
     def test_latest_workout_hr_zone_distribution_requires_configured_zones(self) -> None:
         self._seed_workout(with_heart_rate=True, with_zones=False)
+        client = _visualization_client(_intent(("heart_rate_zone_seconds",)))
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "piirrä viimeisimmän treenin sykealuejakauma"),
-            DispatchContext(UnitOfWork(self.connection)),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
@@ -100,10 +162,11 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
     def test_latest_workout_missing_primary_metric_returns_specific_error_without_clarification(self) -> None:
         self._seed_workout(with_heart_rate=False)
+        client = _visualization_client(_intent(("heart_rate_bpm",)))
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "piirrä viimeisimmästä treenistä syke ajan funktiona"),
-            DispatchContext(UnitOfWork(self.connection)),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
@@ -113,19 +176,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
     def test_visualization_intent_llm_input_does_not_include_workout_points(self) -> None:
         self._seed_workout(with_heart_rate=True)
-        client = FakeLLMClient(
-            {
-                LLMOperation.VISUALIZATION_INTENT: {
-                    "workout_selector": {"type": "latest"},
-                    "x_metric": "elapsed_s",
-                    "requested_metrics": ["heart_rate_bpm"],
-                    "transform_hints": [],
-                    "date_range": {},
-                    "comparison_mode": "",
-                    "layout_mode": "auto",
-                }
-            }
-        )
+        client = _visualization_client(_intent(("heart_rate_bpm",)))
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "draw latest heart rate chart"),
@@ -143,10 +194,66 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertNotIn("workout_points", visualization_request.user_payload)
         self.assertNotIn("raw_points", visualization_request.user_payload)
 
-    def test_invalid_render_plan_returns_user_error(self) -> None:
+    def test_visualization_refinement_sends_previous_context_to_llm_without_raw_points(self) -> None:
+        self._seed_workout(with_heart_rate=True)
+        first_client = _visualization_client(_intent(("heart_rate_bpm",)))
+        first_result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä viimeisimmästä treenistä syke ajan funktiona"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(first_client)),
+        )
+        self.assertEqual(first_result.status, WorkflowStatus.SUCCESS)
+        client = _visualization_client(_intent(("heart_rate_bpm", "pace_s_per_km")))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-2", "lisää edelliseen kuvaajaan vauhti"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        visualization_request = next(
+            request for request in client.requests if request.operation == LLMOperation.VISUALIZATION_INTENT
+        )
+        previous = visualization_request.user_payload["previous_visualization"]
+        self.assertEqual(previous["workout_id"], "workout-1")
+        self.assertEqual(previous["channel_id"], "channel-1")
+        self.assertEqual(previous["intent"]["y_metrics"], ["heart_rate_bpm"])
+        self.assertNotIn("workout_points", visualization_request.user_payload)
+        self.assertNotIn("raw_points", visualization_request.user_payload)
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_bpm", "pace_s_per_km"))
+
+    def test_same_chart_pie_refinement_uses_llm_previous_context(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_zones=True)
+        first_client = _visualization_client(_intent(("heart_rate_zone_seconds",)))
+        first_result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä viimeisimmästä treenistä sykealuejakauma"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(first_client)),
+        )
+        self.assertEqual(first_result.status, WorkflowStatus.SUCCESS)
+        client = _visualization_client(
+            _intent(("heart_rate_zone_seconds",), transforms=("as_percentage_of_total",), chart_kind="pie")
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-2", "piirrä sama piirakkakuviona jakauma prosentuaalisesti"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.FILE)
+        self.assertEqual(result.messages[0].content_type, "image/png")
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_zone_seconds",))
+        visualization_request = next(
+            request for request in client.requests if request.operation == LLMOperation.VISUALIZATION_INTENT
+        )
+        previous = visualization_request.user_payload["previous_visualization"]
+        self.assertEqual(previous["intent"]["y_metrics"], ["heart_rate_zone_seconds"])
+        self.assertEqual(visualization_request.user_payload["compact_routing_context"]["has_previous_visualization"], True)
+
+    def test_invalid_render_plan_is_revised_once_with_safe_context(self) -> None:
         self._seed_workout(with_heart_rate=True)
         client = FakeLLMClient(
             {
+                LLMOperation.INTENT_CLASSIFICATION: _classification(),
                 LLMOperation.VISUALIZATION_INTENT: {
                     "workout_selector": {"type": "latest"},
                     "x_metric": "elapsed_s",
@@ -155,7 +262,70 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     "date_range": {},
                     "comparison_mode": "",
                     "layout_mode": "auto",
+                    "chart_kind": "auto",
+                    "context_update": {"set_current_workout": False},
+                },
+                LLMOperation.VISUALIZATION_INTENT_REVISION: {
+                    "workout_selector": {"type": "latest"},
+                    "x_metric": "elapsed_s",
+                    "requested_metrics": ["heart_rate_bpm"],
+                    "transform_hints": [],
+                    "date_range": {},
+                    "comparison_mode": "",
+                    "layout_mode": "auto",
+                    "chart_kind": "auto",
+                    "context_update": {"set_current_workout": False},
                 }
+            }
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "draw latest heart rate chart"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_bpm",))
+        revision_request = next(
+            request for request in client.requests if request.operation == LLMOperation.VISUALIZATION_INTENT_REVISION
+        )
+        self.assertEqual(revision_request.user_payload["failed_intent"]["y_metrics"], ["invented_metric"])
+        self.assertEqual(revision_request.user_payload["validation_errors"][0]["code"], "unsupported_column")
+        self.assertIn("heart_rate_bpm", revision_request.user_payload["validation_errors"][0]["allowed_values"])
+        self.assertIn("chart_kinds", revision_request.user_payload["allowed_primitives"])
+        dataset_manifest = revision_request.user_payload["dataset_manifest"]
+        self.assertIn("datasets", dataset_manifest)
+        self.assertNotIn("rows", str(dataset_manifest))
+        self.assertNotIn("workout_points", revision_request.user_payload)
+        self.assertNotIn("raw_points", revision_request.user_payload)
+
+    def test_invalid_render_plan_after_revision_returns_user_error(self) -> None:
+        self._seed_workout(with_heart_rate=True)
+        client = FakeLLMClient(
+            {
+                LLMOperation.INTENT_CLASSIFICATION: _classification(),
+                LLMOperation.VISUALIZATION_INTENT: {
+                    "workout_selector": {"type": "latest"},
+                    "x_metric": "elapsed_s",
+                    "requested_metrics": ["invented_metric"],
+                    "transform_hints": [],
+                    "date_range": {},
+                    "comparison_mode": "",
+                    "layout_mode": "auto",
+                    "chart_kind": "auto",
+                    "context_update": {"set_current_workout": False},
+                },
+                LLMOperation.VISUALIZATION_INTENT_REVISION: {
+                    "workout_selector": {"type": "latest"},
+                    "x_metric": "elapsed_s",
+                    "requested_metrics": ["invented_metric"],
+                    "transform_hints": [],
+                    "date_range": {},
+                    "comparison_mode": "",
+                    "layout_mode": "auto",
+                    "chart_kind": "auto",
+                    "context_update": {"set_current_workout": False},
+                },
             }
         )
 
@@ -168,10 +338,17 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.error.category.value, "visualization_plan_invalid")
         self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID)
 
-    def test_route_event_marks_chart_language_as_visualization(self) -> None:
-        route = route_event(_mention("event-1", "piirrä kuvaaja viimeisimmästä treenistä"))
+    def test_route_event_uses_llm_for_chart_language(self) -> None:
+        client = FakeLLMClient({LLMOperation.INTENT_CLASSIFICATION: _classification()})
+
+        route = route_event(_mention("event-1", "piirrä kuvaaja viimeisimmästä treenistä"), llm_gateway=LLMGateway(client))
 
         self.assertEqual(route.target, WorkflowTarget.VISUALIZATION)
+
+    def test_route_event_does_not_parse_chart_language_without_llm(self) -> None:
+        route = route_event(_mention("event-1", "piirrä kuvaaja viimeisimmästä treenistä"))
+
+        self.assertEqual(route.target, WorkflowTarget.CHAT)
 
     def test_comparison_visualization_uses_recent_owned_workouts(self) -> None:
         self._seed_workout(
@@ -217,16 +394,42 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     created_at="2026-06-14T10:30:00Z",
                 )
             )
+        client = _visualization_client(
+            _intent(
+                ("distance_km",),
+                comparison_mode="recent",
+                workout_selector={"type": "latest", "count": 2, "limit": 2},
+            )
+        )
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "vertaa kahta viimeisintä treeniä matkan perusteella"),
-            DispatchContext(UnitOfWork(self.connection)),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
         self.assertEqual(result.messages[0].kind, OutgoingKind.FILE)
         self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("distance_km",))
         self.assertEqual(result.messages[0].metadata["workout_id"], "workout-2")
+
+    def test_visualization_sets_current_workout_when_llm_requests_context_update(self) -> None:
+        self._seed_workout(with_heart_rate=True)
+        client = _visualization_client(
+            _intent(
+                ("heart_rate_bpm",),
+                context_update={"set_current_workout": True},
+            )
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä tästä treenistä syke"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        with UnitOfWork(self.connection) as repositories:
+            active = repositories.active_workouts.get("user-1")
+        self.assertEqual(active.workout_id, "workout-1")
 
     def _seed_workout(
         self,
@@ -337,6 +540,49 @@ def _mention(event_id: str, text: str) -> CanonicalEvent:
         user_id="user-1",
         user_name="runner",
         text=text,
+    )
+
+
+def _classification() -> dict[str, object]:
+    return {
+        "workflow": "visualization",
+        "confidence": "high",
+        "slots": {},
+        "clarification": "",
+        "reason": "LLM classified the request as visualization.",
+    }
+
+
+def _intent(
+    metrics: tuple[str, ...],
+    *,
+    x_metric: str = "elapsed_s",
+    transforms: tuple[str, ...] = (),
+    comparison_mode: str = "",
+    layout_mode: str = "auto",
+    chart_kind: str = "auto",
+    workout_selector: dict[str, object] | None = None,
+    context_update: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "workout_selector": workout_selector or {"type": "latest"},
+        "x_metric": x_metric,
+        "requested_metrics": list(metrics),
+        "transform_hints": list(transforms),
+        "date_range": {},
+        "comparison_mode": comparison_mode,
+        "layout_mode": layout_mode,
+        "chart_kind": chart_kind,
+        "context_update": context_update or {"set_current_workout": False},
+    }
+
+
+def _visualization_client(intent: dict[str, object]) -> FakeLLMClient:
+    return FakeLLMClient(
+        {
+            LLMOperation.INTENT_CLASSIFICATION: _classification(),
+            LLMOperation.VISUALIZATION_INTENT: intent,
+        }
     )
 
 

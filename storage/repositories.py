@@ -159,6 +159,20 @@ class RenderedArtifactRecord:
     metadata: JsonObject = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PendingWorkoutDeleteRecord:
+    pending_id: str
+    user_id: str
+    guild_id: str | None
+    channel_id: str
+    workout_id: str
+    token: str
+    created_at: str
+    expires_at: str
+    source_event_id: str | None = None
+    metadata: JsonObject = field(default_factory=dict)
+
+
 class UsersRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
@@ -306,6 +320,92 @@ class HistoryRepository:
             (channel_id, limit),
         ).fetchall()
         return tuple(reversed([_history_from_row(row) for row in rows]))
+
+
+class PendingWorkoutDeleteRepository:
+    EVENT_TYPE = "pending_workout_delete"
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+
+    def create(self, record: PendingWorkoutDeleteRecord) -> PendingWorkoutDeleteRecord:
+        self.clear_for_user(record.user_id)
+        self.connection.execute(
+            """
+            INSERT INTO history_events (
+                history_id,
+                guild_id,
+                channel_id,
+                user_id,
+                role,
+                event_type,
+                content,
+                source_event_id,
+                created_at,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.pending_id,
+                record.guild_id,
+                record.channel_id,
+                record.user_id,
+                "system",
+                self.EVENT_TYPE,
+                record.token,
+                record.source_event_id,
+                record.created_at,
+                _to_json(
+                    {
+                        **record.metadata,
+                        "workout_id": record.workout_id,
+                        "expires_at": record.expires_at,
+                    }
+                ),
+            ),
+        )
+        return record
+
+    def latest_for_user(self, user_id: str) -> PendingWorkoutDeleteRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM history_events
+            WHERE user_id = ?
+              AND event_type = ?
+            ORDER BY created_at DESC, history_id DESC
+            LIMIT 1
+            """,
+            (user_id, self.EVENT_TYPE),
+        ).fetchone()
+        if row is None:
+            return None
+        return _pending_workout_delete_from_row(row)
+
+    def get_for_user(self, user_id: str, pending_id: str) -> PendingWorkoutDeleteRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM history_events
+            WHERE user_id = ?
+              AND history_id = ?
+              AND event_type = ?
+            """,
+            (user_id, pending_id, self.EVENT_TYPE),
+        ).fetchone()
+        if row is None:
+            return None
+        return _pending_workout_delete_from_row(row)
+
+    def clear_for_user(self, user_id: str) -> None:
+        self.connection.execute(
+            """
+            DELETE FROM history_events
+            WHERE user_id = ?
+              AND event_type = ?
+            """,
+            (user_id, self.EVENT_TYPE),
+        )
 
 
 class HeartRateZonesRepository:
@@ -716,6 +816,31 @@ class RenderedArtifactsRepository:
         ).fetchall()
         return tuple(_rendered_artifact_from_row(row) for row in rows)
 
+    def latest_visualization_for_user(
+        self,
+        owner_user_id: str,
+        *,
+        channel_id: str | None = None,
+    ) -> RenderedArtifactRecord | None:
+        where = "owner_user_id = ? AND artifact_type = 'visualization'"
+        params: list[str] = [owner_user_id]
+        if channel_id is not None:
+            where = f"{where} AND json_extract(metadata_json, '$.channel_id') = ?"
+            params.append(channel_id)
+        row = self.connection.execute(
+            f"""
+            SELECT *
+            FROM rendered_artifacts
+            WHERE {where}
+            ORDER BY created_at DESC, artifact_id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        if row is None:
+            return None
+        return _rendered_artifact_from_row(row)
+
 
 class DebugTraceRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
@@ -956,6 +1081,22 @@ def _history_from_row(row: sqlite3.Row) -> HistoryEventRecord:
         source_event_id=row["source_event_id"],
         created_at=row["created_at"],
         metadata=_from_json(row["metadata_json"]),
+    )
+
+
+def _pending_workout_delete_from_row(row: sqlite3.Row) -> PendingWorkoutDeleteRecord:
+    metadata = _from_json(row["metadata_json"])
+    return PendingWorkoutDeleteRecord(
+        pending_id=row["history_id"],
+        user_id=row["user_id"],
+        guild_id=row["guild_id"],
+        channel_id=row["channel_id"],
+        workout_id=str(metadata.get("workout_id", "")),
+        token=row["content"],
+        created_at=row["created_at"],
+        expires_at=str(metadata.get("expires_at", "")),
+        source_event_id=row["source_event_id"],
+        metadata=metadata,
     )
 
 

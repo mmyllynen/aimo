@@ -8,6 +8,7 @@ from adapters.discord.normalization import DiscordMessageSnapshot, DiscordSlashS
 from app.dispatcher import DispatchContext, Dispatcher
 from app.policy import AdminPolicy
 from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
+from core.i18n import TranslationKey
 from core.workflows import OutgoingKind, WorkflowStatus
 from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
 from storage.repositories import DebugTraceEventRecord
@@ -38,12 +39,50 @@ class DispatcherTests(unittest.TestCase):
 
         self.assertEqual(result.status, WorkflowStatus.NOOP)
         with UnitOfWork(self.connection) as repositories:
-            self.assertIsNotNone(repositories.users.get("user-1"))
+            user = repositories.users.get("user-1")
+            self.assertIsNotNone(user)
             history = repositories.history.list_recent_for_channel("channel-1")
             trace = repositories.debug_traces.latest_for_user("user-1")
         self.assertEqual(history[0].content, "not for Aimo")
+        self.assertEqual(user.metadata["interaction_state"], "observed")
         self.assertEqual(trace.workflow, "chat")
         self.assertEqual(trace.status, "noop")
+
+    def test_first_interaction_is_distinct_from_observed_history_user(self) -> None:
+        observed = CanonicalEvent(
+            event_id="event-1",
+            source=EventSource.DISCORD_MESSAGE,
+            kind=EventKind.MESSAGE,
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user_id="user-1",
+            user_name="runner",
+            text="not for Aimo",
+        )
+        mention = replace(
+            observed,
+            event_id="event-2",
+            kind=EventKind.MENTION,
+            text="apua",
+        )
+
+        first_result = self.dispatcher.dispatch(observed, DispatchContext(UnitOfWork(self.connection)))
+        second_result = self.dispatcher.dispatch(mention, DispatchContext(UnitOfWork(self.connection)))
+        third_result = self.dispatcher.dispatch(
+            replace(mention, event_id="event-3"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(first_result.state_updates, ())
+        self.assertEqual(len(second_result.state_updates), 1)
+        self.assertEqual(second_result.state_updates[0].namespace, "users")
+        self.assertEqual(second_result.state_updates[0].operation, "first_interaction")
+        self.assertEqual(second_result.state_updates[0].payload["interaction_kind"], "mention")
+        self.assertEqual(third_result.state_updates, ())
+        with UnitOfWork(self.connection) as repositories:
+            user = repositories.users.get("user-1")
+        self.assertEqual(user.metadata["interaction_state"], "interacted")
+        self.assertEqual(user.metadata["first_interaction_kind"], "mention")
 
     def test_dispatcher_redacts_trace_slots_and_prunes_old_traces(self) -> None:
         event = CanonicalEvent(
@@ -54,8 +93,8 @@ class DispatcherTests(unittest.TestCase):
             channel_id="channel-1",
             user_id="user-1",
             user_name="runner",
-            text="listaa",
-            metadata={"command_name": "treenit", "options": {"toiminto": "listaa", "token": "secret-token"}},
+            text="/treenit listaa",
+            metadata={"command_name": "treenit", "subcommand": "listaa", "options": {"token": "secret-token"}},
         )
 
         self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection), trace_keep_limit=10))
@@ -179,6 +218,8 @@ class DispatcherTests(unittest.TestCase):
                     "date_range": {},
                     "comparison_mode": "",
                     "layout_mode": "auto",
+                    "chart_kind": "auto",
+                    "context_update": {"set_current_workout": False},
                 },
             }
         )
@@ -204,7 +245,7 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(client.requests[0].user_payload["user_text"], "tee se sama juttu viimeisestä lenkistä")
         self.assertNotIn("workout_points", client.requests[0].user_payload)
 
-    def test_llm_routing_failure_falls_back_to_deterministic_chat_route(self) -> None:
+    def test_llm_routing_failure_returns_model_unavailable_without_chat_fallback(self) -> None:
         client = FakeLLMClient({})
         event = CanonicalEvent(
             event_id="event-1",
@@ -223,6 +264,8 @@ class DispatcherTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, WorkflowStatus.SYSTEM_ERROR)
+        self.assertEqual(result.error.category.value, "model_unavailable")
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_MODEL_UNAVAILABLE)
         with UnitOfWork(self.connection) as repositories:
             trace = repositories.debug_traces.latest_for_user("user-1")
         self.assertEqual(trace.workflow, "chat")

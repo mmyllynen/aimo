@@ -26,6 +26,13 @@ class OutgoingKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class OutgoingComponent:
+    component_id: str
+    label: str
+    style: str = "secondary"
+
+
+@dataclass(frozen=True)
 class OutgoingMessage:
     kind: OutgoingKind
     text: str = ""
@@ -35,6 +42,7 @@ class OutgoingMessage:
     filename: str = ""
     content_type: str = ""
     content: bytes | None = None
+    components: tuple[OutgoingComponent, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

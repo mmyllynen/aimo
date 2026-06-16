@@ -1,12 +1,18 @@
-# Aimo v3 Visualization Spec
+# Aimo Visualization Spec
 
 ## Goal
 
-Aimo turns natural-language workout visualization requests into rendered image files.
+Aimo turns natural-language workout visualization requests into rendered PNG image files.
 
-The visualization pipeline must be reliable, bounded, and deterministic after initial language interpretation.
+The visualization pipeline is deterministic after language interpretation: Python owns data access, ownership checks, canonical ids, spec validation, transforms, and rendering.
 
-## Supported User Requests
+The implementation must stay generic. New visualization capability is added as reusable datasets, column metadata, transforms, marks, encodings, validators, or renderer primitives. Do not add metric-specific or use-case-specific Python branches such as a dedicated heart-rate chart path. Heart-rate-zone distribution, workout comparisons, and future distributions should all flow through the same dataset/manifest/spec/mark machinery.
+
+The LLM is the interpretation layer: it maps user language to selectors, metrics, transforms, chart kind, and layout hints from bounded context. Python is the engine: it validates the spec, resolves data safely, runs generic transforms, and renders generic marks. Python should not grow open-ended `if user asked X then draw Y this special way` logic.
+
+Follow-up visualization requests may use previous visualization context. Python may provide that context for every visualization request when it is safely available; the LLM decides whether the user's language refers to it. The context must be compact: previous intent/spec metadata, selected workout ids, chart kind, layout, transforms, and rendered metric ids. It must be scoped at least by owner and preferably by owner plus channel. It must not include raw GPX, raw point rows, image bytes, or unrelated channel history. A follow-up produces a complete new generic intent/spec and then goes through the same validation/rendering pipeline.
+
+## Supported Requests
 
 Examples:
 
@@ -15,28 +21,18 @@ piirrä viimeisimmästä treenistä syke ajan funktiona
 ```
 
 ```text
-piirrä viimeisimmästä treenistä syke, vauhti ja korkeus samaan kuvaajaan, vauhti ja korkeus skaalattuna sykkeen alueelle
+piirrä viimeisimmästä treenistä syke, vauhti ja korkeus samaan kuvaajaan
 ```
 
 ```text
-näytä kuluvan kuukauden sykevyöhykejakauma
+näytä sykevyöhykejakauma
 ```
 
 ```text
 vertaa kahta viimeisintä juoksua
 ```
 
-```text
-piirrä reitin korkeuskäyrä
-```
-
-## Architecture Principle
-
-Aimo is a generic workout visualizer.
-
-The implementation must not grow by adding workflow-specific branches for each new chart request. Rendering marks are primitives, not product features. Product behavior is expressed through a validated visualization spec that references resolved datasets.
-
-Required boundary:
+## Pipeline
 
 ```text
 natural language
@@ -50,52 +46,15 @@ natural language
 -> PNG artifact
 ```
 
-Python owns:
+The model may help interpret user text and propose a bounded spec from compact manifests. It must not receive raw workout point rows, raw GPX, secrets, or unrelated private data.
 
-- dataset resolution
-- workout ownership checks
-- metric alias resolution
-- manifest generation
-- spec validation
-- transform execution
-- rendering
+Pipeline stages must not bypass each other for specific chart requests. If a request cannot be represented by the current generic spec, add the missing generic primitive or return an unsupported/invalid-plan response.
 
-The language model may help interpret user text and propose a bounded spec, but only from compact manifests. It must not receive raw workout point rows, raw GPX, secrets, or user-private data that is not required for the requested visualization.
+If model output cannot be compiled into a supported spec, Python may make one bounded revision request to the LLM. The revision input contains the original user text, the failed intent/spec metadata, compact dataset manifest, allowed generic primitives, and structured validation errors. It must not include raw rows, GPX, image bytes, stack traces, or workflow internals. The LLM must return a complete replacement intent/spec. Python validates the replacement through the same compiler; a second failure returns a controlled invalid-plan response.
 
-## Pipeline
+## Selectors
 
-1. Route request to visualization workflow.
-2. Extract visualization intent from user text.
-3. Compile a dataset request.
-4. Resolve datasets and workout selectors with owner checks.
-5. Build a compact dataset manifest.
-6. Produce a visualization spec from the intent and manifest.
-7. Validate and compile the spec.
-8. Fetch or use raw series internally only after validation.
-9. Apply transforms in Python.
-10. Render image through renderer adapter.
-11. Send image and concise caption.
-
-## Visualization Intent
-
-Visualization intent is semantic and small. It is not the final render instruction.
-
-Fields:
-
-- `workout_selector`
-- requested datasets
-- requested metrics
-- grouping hints
-- `date_range`
-- transform hints
-- `comparison_mode`
-- `caption_preference`
-
-Visualization intent must not contain raw point rows.
-
-## Workout Selectors
-
-Supported selectors:
+Supported workout selectors:
 
 - latest
 - active
@@ -109,9 +68,9 @@ Supported selectors:
 
 Explicit latest/active/specific selectors must not trigger generic workout-choice clarification.
 
-## Supported Metrics
+## Metrics
 
-Canonical metric ids:
+Canonical metric ids include:
 
 - `timestamp_utc`
 - `elapsed_s`
@@ -127,82 +86,44 @@ Canonical metric ids:
 - `time_in_zone_s`
 - `zone_share`
 
-Metric aliases:
+Common language aliases are interpreted by the LLM and must be returned to Python as canonical metric ids:
 
 - `syke`, `heart_rate`, `hr` -> `heart_rate_bpm`
 - `vauhti`, `pace` -> `pace_s_per_km`
-- `korkeus`, `maasto`, `elevation`, `altitude` -> `elevation_m`
-- `aika`, `time` -> `elapsed_s` for workout point charts
+- `korkeus`, `elevation`, `altitude` -> `elevation_m`
+- `aika`, `time` -> `elapsed_s` for point charts
 - `matka`, `distance` -> `distance_km`
 - `kadenssi`, `cadence` -> `cadence_spm`
 
-Alias resolution is deterministic and owned by Python.
-
-## Dataset Request
-
-Dataset request is the deterministic Python-owned description of what data is needed.
-
-Fields:
-
-- dataset ids
-- dataset source type:
-  - workout points
-  - workout streams
-  - workout summary
-  - HR zones
-  - workout collection
-- owner user id
-- workout selector
-- date range
-- requested metrics
-- requested dimensions
-- comparison scope
-
-Dataset request may be derived from LLM output, but Python validates and normalizes it before repository access.
+Python does not infer metrics, transforms, chart types, or previous-chart references from natural-language substrings.
 
 ## Dataset Manifest
 
-Dataset manifest is the only dataset description the model may see for visualization planning.
+The manifest is the model-visible dataset description.
 
-Fields:
+It may include:
 
 - dataset id
 - row count
 - available columns
-- canonical metric ids
-- unit
-- semantic type:
-  - quantitative
-  - temporal
-  - ordinal
-  - nominal
-- null count
-- min/max for safe numeric fields
+- units
+- semantic types
+- null counts
+- safe min/max stats
 - allowed transforms
 - allowed grouping dimensions
 
-Dataset manifest must not contain raw rows.
+It must not include raw rows.
 
 ## Visualization Spec
 
-Visualization spec is concrete and validated before rendering.
+The spec references only dataset ids and canonical column ids.
 
 Fields:
 
 - datasets
-- mark:
-  - line
-  - point
-  - bar
-  - area
-  - interval
-  - arc
-- encodings:
-  - x
-  - y
-  - color
-  - group
-  - size
+- mark
+- encodings
 - transforms
 - filters
 - aggregation
@@ -213,63 +134,38 @@ Fields:
 - layout
 - output filename
 
-Visualization spec references only dataset ids and canonical column ids.
-
-## Rendering Marks
-
-V1 supported:
+Supported marks:
 
 - `line`
-- `point`
 - `bar`
-- `area`
-- `interval`
-- `arc`
+- `pie`
 
-Common use:
+Supported chart kinds:
 
-- `line`: time series, HR, pace, elevation
-- `point`: relationships between two metrics
-- `bar`: workout summaries and comparisons
-- `area`: cumulative or filled trend
-- `interval`: distributions and bins
-- `arc`: part-to-whole distributions such as HR zones
+- `auto`
+- `line`
+- `bar`
+- `pie`
 
-Unsupported marks should return a user-level unsupported request or fall back to a close supported mark when safe.
-
-## Transforms
-
-Supported V1 transforms:
+Supported transforms:
 
 - `normalize_to_primary_range`
 - `smooth`
 - `rolling_average`
 - `aggregate_sum`
 - `aggregate_avg`
+- `as_percentage_of_total`
 - `filter_non_null`
 
-### Normalize To Primary Range
+## Missing Data
 
-Used when user asks to scale multiple metrics into the same visible range.
+- Missing primary metric: return a specific missing-metric message.
+- Missing secondary metric: render available series and note the missing metric.
+- No requested metric exists: return a specific error.
 
-Policy:
+Do not ask which workout the user meant when the selected workout is explicit but lacks data.
 
-- first requested y metric is primary unless otherwise specified
-- primary series keeps original values
-- secondary series are linearly scaled to primary min/max
-- caption or legend should indicate scaled series
-
-## Missing Data Policy
-
-If requested metric is missing:
-
-- If primary metric is missing, return a specific missing metric message.
-- If secondary metric is missing, render available series and note missing metric.
-- If no requested metric exists, return a specific error.
-
-Do not ask "which workout?" when the selected workout is explicit but lacks data.
-
-## Validation Rules
+## Validation
 
 Before rendering:
 
@@ -278,26 +174,33 @@ Before rendering:
 - spec references existing dataset ids
 - encodings reference existing columns
 - required columns have renderable values
-- mark supports requested data shape
-- transforms are allowed for metric types
-- aggregation is allowed for selected metric and grouping
+- mark supports the data shape
+- transforms are allowed for selected metric types
+- chart kind is one of the supported generic chart kinds
 - output size is within limits
 
-## Caption Requirements
+## Rendering
 
-Caption should be short and include:
+All chart types use the same renderer frame:
 
-- selected workout/date when useful
-- important missing data note
-- scaled-series note if normalization was applied
+- a readable title and compact workout subtitle
+- one plot area for the mark
+- one fixed right sidebar for legends and per-series/category values; the sidebar background extends to the top, bottom, and right image edges while content keeps internal padding
+- a subtle background gradient that must not reduce contrast
+- shared tick, duration, pace, and percentage value formatting
+- generic supersampling/downsampling antialiasing for rendered marks and chart edges
+- native-resolution text overlay after downsampling so title, axes, ticks, labels, and legend text stay crisp
 
-Do not include internal plan JSON or model reasoning.
+Legend content is driven by render metadata, not chart-specific text assembly. Percentage values are shown once, for example `PK1 12.5%`, not as duplicate value/share pairs. Categorical zero-value rows remain renderable legend entries when they are part of the resolved dataset, even if the mark itself has no visible geometry for zero.
 
-## Image Requirements
+Color is generic metadata. Datasets may expose optional `color_hint` values such as named palette entries or hex RGB values; renderers may use them for any categorical bar or pie chart. Python must not infer colors from natural-language user text or add metric-specific color branches. If no hint exists, the renderer uses the shared default palette.
 
-- PNG output for v1
-- non-empty render
-- stable dimensions
-- readable labels
-- legend when multiple series exist
-- no raw data dump in the message
+The dependency-free bitmap renderer owns font size hierarchy and text placement. Title, subtitle, axes, ticks, labels, and sidebar entries must use stable layout constraints so new data does not resize or overlap the chart frame. Text is not downsampled; mark antialiasing must not make labels blurry.
+
+## Output
+
+- PNG image.
+- Short caption.
+- Readable labels and legend when needed.
+- Note scaled secondary series.
+- No raw data dump.

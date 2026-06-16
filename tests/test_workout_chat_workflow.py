@@ -22,7 +22,7 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
 
     def test_latest_workout_chat_uses_bounded_facts_and_persists_reply(self) -> None:
         self._seed_workouts()
-        client = _workout_client("Hyvä aerobinen treeni.")
+        client = _workout_client("Hyvä aerobinen treeni.", selector_type="latest", selector_value="latest")
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "analysoi viimeisin treeni"),
@@ -53,7 +53,7 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
                 workout_id="workout-1",
                 updated_at="2026-06-13T11:00:00Z",
             )
-        client = _workout_client("Aktiivinen treeni oli kevyt.")
+        client = _workout_client("Aktiivinen treeni oli kevyt.", selector_type="active", selector_value="active")
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "miten aktiivinen treeni meni?"),
@@ -65,7 +65,7 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
 
     def test_workout_chat_resolves_list_index_reference(self) -> None:
         self._seed_workouts()
-        client = _workout_client("Listan ensimmäinen treeni.")
+        client = _workout_client("Listan ensimmäinen treeni.", matched_workout_ids=("workout-2",), set_current_workout=True)
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "analysoi treeni #1"),
@@ -74,10 +74,19 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
         self.assertEqual(_request_payload(client, LLMOperation.WORKOUT_REPLY)["resolved_workout_facts"]["workout_id"], "workout-2")
+        with UnitOfWork(self.connection) as repositories:
+            active = repositories.active_workouts.get("user-1")
+        self.assertEqual(active.workout_id, "workout-2")
 
     def test_workout_chat_reports_ambiguous_date_reference(self) -> None:
         self._seed_workouts()
-        client = _workout_client("Ei käytetä.")
+        client = _workout_client(
+            "Ei käytetä.",
+            selector_type="date",
+            selector_value="2026-06-13",
+            matched_workout_ids=("workout-1", "workout-2"),
+            requires_clarification=True,
+        )
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "analysoi 2026-06-13 treeni"),
@@ -90,7 +99,7 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
 
     def test_missing_summary_facts_are_explicit_in_llm_input(self) -> None:
         self._seed_workouts(avg_hr=None)
-        client = _workout_client("Sykedata puuttuu, mutta matka ja kesto löytyvät.")
+        client = _workout_client("Sykedata puuttuu, mutta matka ja kesto löytyvät.", selector_type="latest", selector_value="latest")
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "arvioi viimeisin treeni"),
@@ -111,8 +120,10 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, WorkflowStatus.SYSTEM_ERROR)
         self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_MODEL_UNAVAILABLE)
 
-    def test_route_event_marks_workout_question_as_workout_chat(self) -> None:
-        route = route_event(_mention("event-1", "miten viimeisin treeni meni?"))
+    def test_route_event_uses_llm_for_workout_question(self) -> None:
+        client = FakeLLMClient({LLMOperation.INTENT_CLASSIFICATION: _classification()})
+
+        route = route_event(_mention("event-1", "miten viimeisin treeni meni?"), llm_gateway=LLMGateway(client))
 
         self.assertEqual(route.target, WorkflowTarget.WORKOUT_CHAT)
 
@@ -184,9 +195,26 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
             )
 
 
-def _workout_client(reply_text: str) -> FakeLLMClient:
+def _workout_client(
+    reply_text: str,
+    *,
+    selector_type: str = "general",
+    selector_value: str = "",
+    matched_workout_ids: tuple[str, ...] = (),
+    requires_clarification: bool = False,
+    set_current_workout: bool = False,
+) -> FakeLLMClient:
     return FakeLLMClient(
         {
+            LLMOperation.INTENT_CLASSIFICATION: _classification(),
+            LLMOperation.WORKOUT_REFERENCE_EXTRACTION: {
+                "selector_type": selector_type,
+                "selector_value": selector_value,
+                "matched_workout_ids": list(matched_workout_ids),
+                "ambiguity_reason": "ambiguous" if requires_clarification else "",
+                "requires_clarification": requires_clarification,
+                "set_current_workout": set_current_workout,
+            },
             LLMOperation.WORKOUT_REPLY: {
                 "reply_text": reply_text,
                 "claims_used": ["distance_km", "duration_s"],
@@ -194,6 +222,16 @@ def _workout_client(reply_text: str) -> FakeLLMClient:
             }
         }
     )
+
+
+def _classification() -> dict[str, object]:
+    return {
+        "workflow": "workout_chat",
+        "confidence": "high",
+        "slots": {},
+        "clarification": "",
+        "reason": "LLM classified the request as workout chat.",
+    }
 
 
 def _request_payload(client: FakeLLMClient, operation: LLMOperation):

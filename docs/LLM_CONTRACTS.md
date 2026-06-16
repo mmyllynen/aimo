@@ -1,27 +1,27 @@
-# Aimo v3 LLM Contracts
+# Aimo LLM Contracts
 
 ## Purpose
 
-LLM use in v3 is limited to narrow operations. Workflows own control flow, validation, data access, and error handling.
+LLM use is limited to narrow typed operations. Workflows own control flow, validation, data access, permissions, rendering, and state changes.
 
 ## Global Rules
 
 - Every structured operation has a schema.
-- Every operation has a token budget.
-- Large raw workout point arrays are never model input.
-- Routing/classification cannot access data providers that return large payloads.
-- Model output is advisory until validated.
+- Every operation has a token budget and timeout.
+- Model inputs are bounded before the call.
+- Raw GPX and full workout point arrays are never model planning input.
+- Model output is advisory until parsed and validated.
 - Invalid output maps to a typed application error or deterministic fallback.
+- User-visible LLM prose must be instructed to use the configured language.
 
-## Operation: Intent Classification
+## Intent Classification
 
 Input:
 
 - event kind
 - user text
-- whether attachments exist
+- attachment presence
 - compact channel state
-- optional recent summary
 
 Output:
 
@@ -48,40 +48,16 @@ Forbidden input:
 - raw GPX
 - workout point rows
 - full channel history
+- secrets
 
-## Operation: Workout Reference Extraction
-
-Input:
-
-- user text
-- compact candidate workouts
-- active workout summary if any
-
-Output:
-
-```text
-selector_type
-selector_value
-matched_workout_ids
-ambiguity_reason
-requires_clarification
-```
-
-Rules:
-
-- exact id wins
-- latest and active are explicit selectors
-- do not reinterpret latest as ambiguous
-
-## Operation: Chat Reply
+## Chat Reply
 
 Input:
 
 - user text
 - bounded recent context
-- channel summary
-- profile facts
-- optional workflow facts
+- optional profile facts
+- workflow capability facts
 
 Output:
 
@@ -93,19 +69,19 @@ should_update_summary
 
 Rules:
 
-- the configured bot language from `aimo.conf`
 - concise
-- no internal implementation details
 - no broad mentions
+- no internal implementation details
+- no claims about unavailable stored data
 
-## Operation: Workout Reply
+## Workout Reply
 
 Input:
 
 - user text
 - resolved workout facts
 - missing data facts
-- profile facts such as HR zones
+- profile facts such as selector type or HR zones
 - bounded recent context
 
 Output:
@@ -119,36 +95,43 @@ missing_data_notes
 Rules:
 
 - do not invent workout facts
-- use coach-like tone
-- keep reply concise
+- use practical coach-like tone
+- state missing data plainly
 
-## Operation: Visualization Intent Extraction
+## Visualization Intent
 
 Input:
 
 - user text
 - compact routing context
+- optional previous visualization context
 
 Output:
 
 ```text
 workout_selector
-requested_datasets
 requested_metrics
-grouping_hints
 transform_hints
 date_range
 comparison_mode
+layout_mode
+chart_kind
+context_update
 ```
 
 Rules:
 
 - semantic intent only
 - no dataset rows
-- canonical metric aliases preferred when possible
-- not the final render instruction
+- map user-language metric aliases to canonical ids before returning output
+- Python validates and normalizes before repository access
+- `chart_kind` is a generic mark hint such as `auto`, `line`, `bar`, or `pie`; it must not encode metric-specific behavior
+- previous visualization context may be present even for new requests; use it only when the user refers to the previous/current/same chart or asks for a refinement
+- when using previous visualization context, return a complete updated intent rather than a partial patch
+- previous visualization context may contain prior intent/spec metadata and selected ids, but never raw rows, raw GPX, or image bytes
+- `context_update.set_current_workout` may be true only when the request concretely selects one workout that should become the current workout context; Python performs the update only after safe owner-scoped resolution and successful workflow execution
 
-## Operation: Visualization Spec Writing
+## Visualization Spec
 
 Input:
 
@@ -166,12 +149,73 @@ caption_draft
 
 Rules:
 
-- may reference only manifest columns
-- must not invent columns
-- must represent missing metrics explicitly
-- Python validates and compiles the spec before rendering
+- reference only manifest dataset ids and columns
+- do not invent columns or metrics
+- represent missing metrics explicitly
+- Python validates/compiles before rendering
+- choose generic marks and transforms from allowed capabilities instead of describing custom chart logic
 
-## Operation: History Summarization
+## Visualization Revision
+
+Input:
+
+- original user text
+- failed intent/spec metadata
+- structured validation errors
+- dataset manifest
+- allowed generic primitives
+- optional previous visualization context
+
+Output:
+
+```text
+workout_selector
+requested_metrics
+transform_hints
+date_range
+comparison_mode
+layout_mode
+chart_kind
+context_update
+```
+
+Rules:
+
+- one revision attempt per visualization request
+- return a complete replacement, not a patch
+- fix only the reported validation failures within allowed primitives
+- do not invent metrics, columns, datasets, transforms, chart kinds, or metric-specific chart logic
+- input must not include raw rows, raw GPX, image bytes, secrets, stack traces, or unrelated history
+- Python validates the replacement exactly like the first attempt
+
+## Workout Reference Extraction
+
+Input:
+
+- user text
+- compact candidate workout facts
+- optional current workout facts
+
+Output:
+
+```text
+selector_type
+selector_value
+matched_workout_ids
+ambiguity_reason
+requires_clarification
+set_current_workout
+```
+
+Rules:
+
+- identify concrete workout references without raw point data
+- use `matched_workout_ids` when the candidate list clearly identifies the referenced workout
+- set `requires_clarification` for ambiguous references
+- set `set_current_workout` only when the user is concretely referring to one workout that should become the current workout context
+- Python owns owner checks, selector resolution, ambiguity handling, and the actual current-workout update
+
+## Future: History Summary
 
 Input:
 
@@ -189,14 +233,12 @@ discarded_noise_categories
 Rules:
 
 - preserve stable context
-- avoid storing secrets
+- avoid secrets
 - keep summary short
 
 ## Error Mapping
 
-LLM operation errors map to:
-
-- malformed structured output -> `model_unavailable` or workflow-specific fallback
+- malformed structured output -> workflow-specific fallback or `model_unavailable`
 - timeout -> `model_unavailable`
-- context budget exceeded -> implementation error; must be prevented by input bounding
-- safety refusal -> user-facing inability response when relevant
+- context budget exceeded -> implementation bug; prevent with input bounding
+- safety refusal -> concise user-facing inability response when relevant

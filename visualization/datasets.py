@@ -64,6 +64,7 @@ class DatasetRequest:
     x_metric: str
     transforms: tuple[str, ...] = ()
     comparison: bool = False
+    chart_kind: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,7 @@ SUMMARY_OUTPUT_COLUMNS = frozenset(column.column_id for column in SUMMARY_COLUMN
 DERIVED_DATASETS = (
     DatasetDefinition(
         dataset_id="hr_zone_distribution",
-        output_columns=frozenset({"zone_key", "zone_label", "heart_rate_zone_seconds", "lower_bpm", "upper_bpm"}),
+        output_columns=frozenset({"zone_key", "zone_label", "heart_rate_zone_seconds", "lower_bpm", "upper_bpm", "color_hint"}),
         build=lambda points, zones, workout: _hr_zone_dataset(points, zones),
     ),
     DatasetDefinition(
@@ -119,6 +120,7 @@ def dataset_request_from_metrics(
     y_metrics: tuple[str, ...],
     transforms: tuple[str, ...],
     comparison: bool = False,
+    chart_kind: str = "auto",
 ) -> DatasetRequest:
     metrics = tuple(dict.fromkeys(canonical_metric(metric) for metric in y_metrics))
     return DatasetRequest(
@@ -126,6 +128,7 @@ def dataset_request_from_metrics(
         x_metric=canonical_metric(x_metric or "elapsed_s"),
         transforms=tuple(transform.strip().lower() for transform in transforms if transform.strip()),
         comparison=comparison,
+        chart_kind=chart_kind.strip().lower() or "auto",
     )
 
 
@@ -190,12 +193,14 @@ def _hr_zone_dataset(
             "heart_rate_zone_seconds": seconds_by_zone[zone.zone_key],
             "lower_bpm": zone.lower_bpm,
             "upper_bpm": zone.upper_bpm,
+            "color_hint": _ordered_color_hint(index, len(zones)),
         }
-        for zone in zones
+        for index, zone in enumerate(zones)
     )
     columns = (
         DatasetColumn("zone_label", semantic_type="nominal"),
         DatasetColumn("zone_key", semantic_type="nominal"),
+        DatasetColumn("color_hint", semantic_type="nominal"),
         _with_stats(DatasetColumn("heart_rate_zone_seconds", unit="s"), rows),
         _with_stats(DatasetColumn("lower_bpm", unit="bpm"), rows),
         _with_stats(DatasetColumn("upper_bpm", unit="bpm"), rows),
@@ -250,6 +255,14 @@ def _zone_for_heart_rate(
     return None
 
 
+def _ordered_color_hint(index: int, count: int) -> str:
+    if count <= 1:
+        return "green"
+    palette = ("blue", "green", "yellow", "orange", "red")
+    position = round(index * (len(palette) - 1) / max(count - 1, 1))
+    return palette[position]
+
+
 def _with_stats(column: DatasetColumn, rows: tuple[dict[str, Any], ...]) -> DatasetColumn:
     values = tuple(row.get(column.column_id) for row in rows)
     numeric = tuple(value for value in values if isinstance(value, (int, float)))
@@ -271,4 +284,5 @@ def _allowed_transforms(column: DatasetColumn) -> tuple[str, ...]:
         transforms.append("rolling_average")
         transforms.append("aggregate_sum")
         transforms.append("aggregate_avg")
+        transforms.append("as_percentage_of_total")
     return tuple(transforms)

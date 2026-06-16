@@ -121,6 +121,8 @@ class OpenAIResponsesClientTests(unittest.TestCase):
                         "date_range": {"start": "", "end": ""},
                         "comparison_mode": "",
                         "layout_mode": "auto",
+                        "chart_kind": "auto",
+                        "context_update": {"set_current_workout": False},
                     }
                 ),
             }
@@ -133,6 +135,7 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         properties = body["text"]["format"]["schema"]["properties"]
         workout_selector = properties["workout_selector"]
         date_range = properties["date_range"]
+        context_update = properties["context_update"]
         self.assertFalse(workout_selector["additionalProperties"])
         self.assertEqual(workout_selector["required"], ["type", "value", "count", "limit"])
         self.assertIn("latest", workout_selector["properties"]["type"]["enum"])
@@ -140,6 +143,11 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         self.assertIn("heart_rate_bpm", properties["requested_metrics"]["items"]["enum"])
         self.assertNotIn("heart_rate", properties["requested_metrics"]["items"]["enum"])
         self.assertEqual(properties["layout_mode"]["enum"], ["auto", "single_axis", "small_multiples"])
+        self.assertEqual(properties["chart_kind"]["enum"], ["auto", "line", "bar", "pie"])
+        self.assertIn("chart_kind", body["text"]["format"]["schema"]["required"])
+        self.assertIn("context_update", body["text"]["format"]["schema"]["required"])
+        self.assertFalse(context_update["additionalProperties"])
+        self.assertEqual(context_update["required"], ["set_current_workout"])
         self.assertFalse(date_range["additionalProperties"])
         self.assertEqual(date_range["required"], ["start", "end"])
 

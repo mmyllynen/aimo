@@ -25,16 +25,26 @@ class DiscordCommandSpec:
     name: str
     description: str
     options: tuple[DiscordCommandOptionSpec, ...] = ()
+    subcommands: tuple["DiscordSubcommandSpec", ...] = ()
 
 
-TREENIT_ACTIONS = (
-    "listaa",
-    "nayta",
-    "aktiivinen",
-    "aseta_aktiivinen",
-    "poista",
-    "sykerajat",
-    "aseta_sykerajat",
+@dataclass(frozen=True)
+class DiscordSubcommandSpec:
+    name: str
+    description: str
+    options: tuple[DiscordCommandOptionSpec, ...] = ()
+
+
+WORKOUT_REFERENCE_OPTION = DiscordCommandOptionSpec(
+    name="viite",
+    description="Treeni-id, listanumero, päivämäärä tai hakuteksti.",
+    option_type=DiscordCommandOptionType.STRING,
+)
+
+HEART_RATE_ZONES_OPTION = DiscordCommandOptionSpec(
+    name="zones",
+    description="Maksimisyke tai viisi ylärajaa, esim. 190 tai 114,133,152,171,190.",
+    option_type=DiscordCommandOptionType.STRING,
 )
 
 
@@ -58,23 +68,21 @@ COMMAND_SPECS = (
     DiscordCommandSpec(
         name="treenit",
         description="Listaa, näytä ja hallitse tallennettuja treenejä.",
-        options=(
-            DiscordCommandOptionSpec(
-                name="toiminto",
-                description="Treenitoiminto.",
-                option_type=DiscordCommandOptionType.STRING,
-                required=True,
-                choices=TREENIT_ACTIONS,
+        subcommands=(
+            DiscordSubcommandSpec(name="listaa", description="Listaa tallennetut treenit."),
+            DiscordSubcommandSpec(name="nayta", description="Näytä treenin tiedot.", options=(WORKOUT_REFERENCE_OPTION,)),
+            DiscordSubcommandSpec(name="aktiivinen", description="Näytä aktiivinen treeni."),
+            DiscordSubcommandSpec(
+                name="aseta_aktiivinen",
+                description="Aseta treeni aktiiviseksi.",
+                options=(WORKOUT_REFERENCE_OPTION,),
             ),
-            DiscordCommandOptionSpec(
-                name="viite",
-                description="Treeni-id, listanumero, päivämäärä tai hakuteksti.",
-                option_type=DiscordCommandOptionType.STRING,
-            ),
-            DiscordCommandOptionSpec(
-                name="zones",
-                description="Maksimisyke tai viisi ylärajaa, esim. 190 tai 114,133,152,171,190.",
-                option_type=DiscordCommandOptionType.STRING,
+            DiscordSubcommandSpec(name="poista", description="Aloita treenin poisto.", options=(WORKOUT_REFERENCE_OPTION,)),
+            DiscordSubcommandSpec(name="sykerajat", description="Näytä sykerajat."),
+            DiscordSubcommandSpec(
+                name="aseta_sykerajat",
+                description="Aseta sykerajat.",
+                options=(HEART_RATE_ZONES_OPTION,),
             ),
         ),
     ),
@@ -111,14 +119,24 @@ def _to_mapping(spec: DiscordCommandSpec) -> dict[str, Any]:
     return {
         "name": spec.name,
         "description": spec.description,
-        "options": [
+        "options": [_option_mapping(option) for option in spec.options]
+        + [
             {
-                "name": option.name,
-                "description": option.description,
-                "type": option.option_type.value,
-                "required": option.required,
-                "choices": list(option.choices),
+                "name": subcommand.name,
+                "description": subcommand.description,
+                "type": "subcommand",
+                "options": [_option_mapping(option) for option in subcommand.options],
             }
-            for option in spec.options
+            for subcommand in spec.subcommands
         ],
+    }
+
+
+def _option_mapping(option: DiscordCommandOptionSpec) -> dict[str, Any]:
+    return {
+        "name": option.name,
+        "description": option.description,
+        "type": option.option_type.value,
+        "required": option.required,
+        "choices": list(option.choices),
     }

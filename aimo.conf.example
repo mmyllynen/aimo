@@ -6,6 +6,12 @@ enabled = true
 [discord]
 # Local production config only. Do not commit real tokens.
 token =
+# Required with --run-discord/--preflight. Comma-separated Discord server ids.
+allowed_guild_ids =
+# Optional channel allowlist inside allowed guilds. Empty means all channels in allowed guilds.
+allowed_channel_ids =
+# DMs are rejected by runtime policy. This legacy field must not be used to enable DMs.
+allow_direct_messages = false
 
 [openai]
 # Local production config only. Do not commit real API keys.

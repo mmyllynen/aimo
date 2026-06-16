@@ -4,10 +4,12 @@
 
 This directory is the standalone source of truth for Aimo.
 
-Use the specifications in this directory as the source of truth. Do not use code or documents outside the files and packages described here as guidance unless the user explicitly asks for import or comparison work.
+Use the specifications and active packages in this directory as guidance. Do not use `legacy/` or documents outside this tree as implementation guidance unless the user explicitly asks for import or comparison work.
 
-The goal is to build Aimo from these local specifications:
+Authoritative project documents:
 
+- `README.md`
+- `TODO.md`
 - `docs/PRODUCT_SPEC.md`
 - `docs/COMMAND_SPEC.md`
 - `docs/WORKOUT_SPEC.md`
@@ -15,10 +17,7 @@ The goal is to build Aimo from these local specifications:
 - `docs/LLM_CONTRACTS.md`
 - `docs/OPERATIONS_SPEC.md`
 - `docs/I18N_SPEC.md`
-- `docs/REWRITE_FOUNDATION.md`
-- `docs/REWRITE_PLAN.md`
-- `docs/V3_ROADMAP.md`
-- `TODO.md`
+- `docs/DATA_IMPORT_SPEC.md`
 
 ## Product Intent
 
@@ -38,15 +37,15 @@ The bot should be dependable and workflow-driven. LLMs may interpret language an
 
 ## Current State
 
-The project currently contains:
+The project contains a production-capable Discord runtime, SQLite storage, typed workflow dispatcher, GPX ingest, workout management, workout chat, visualization, debug traces, LLM gateway, and tests.
 
-- architecture and product specs
-- foundation dataclasses/enums
-- internationalization foundation
-- config/runtime bootstrap foundation
-- initial SQLite schema draft
+Important runtime rules:
 
-It is not yet wired into production and must remain independent until an explicit cutover phase.
+- Direct messages are rejected.
+- Guild/channel allowlists are enforced before dispatch.
+- The bot replies only to mentions and slash commands.
+- Normal guild messages may be stored as history but remain no-op responses.
+- First active user interaction is tracked separately from passive observation.
 
 ## Development Rules
 
@@ -59,31 +58,19 @@ It is not yet wired into production and must remain independent until an explici
 - Keep Discord-specific objects at the adapter boundary.
 - Make workflow code operate on canonical events and workflow results.
 - Fail with typed error categories and stable localized user-facing responses.
+- Do not use live OpenAI calls in normal tests.
 
 ## Roadmap
 
-Follow `docs/V3_ROADMAP.md`.
+Use `TODO.md` as the current prioritized backlog.
 
-Use `TODO.md` as the short current-status handoff checklist.
-
-The immediate next phase is Phase 1: Foundation Hardening:
-
-- test foundation models
-- add storage helper
-- test `schema.sql`
-- test import hygiene
+Avoid work that only polishes internal structure without moving a product, reliability, data-quality, or testability goal forward.
 
 ## Verification
 
 When changing Aimo:
 
 - run Python syntax checks for touched modules
-- run tests once they exist
+- run relevant tests, and the full test suite for shared dispatcher/storage/runtime changes
 - validate internationalization catalogs when user-facing text changes
-- verify SQLite schema loading when schema changes
-
-## Non-Goals
-
-- Do not preserve behavior unless it is required by the product specs.
-- Do not wire the bot into live Discord before roadmap cutover phases.
-- Do not use live OpenAI calls in normal tests.
+- verify SQLite schema loading/migrations when schema changes

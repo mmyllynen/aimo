@@ -1,52 +1,49 @@
-# Aimo v3 Operations Spec
+# Aimo Operations Spec
 
-## Runtime Configuration
+## Configuration
 
-Required configuration:
+Runtime config is loaded from `aimo.conf`.
 
-- bot language
-- bot enabled/disabled flag
-- Discord token
-- OpenAI API key or compatible model provider credentials
-- SQLite database path
-- artifact storage path
-- raw GPX storage path
-- admin user ids
-- guild/domain policy
-- model mapping per LLM operation
-- max attachment size
-- history retention window
-- debug enablement flags
+Important sections:
 
-Configuration should be loaded once at startup and passed as immutable runtime config.
+- `[bot]`: language and enabled flag
+- `[discord]`: token, allowed guild ids, optional allowed channel ids
+- `[openai]`: API key/model/timeout/token budget
+- `[storage]`: SQLite database, raw GPX root, artifact root
+- `[admin]`: Discord admin user ids
+- `[limits]`: attachment limits
+- `[history]`: retention policy
+- `[debug]`: debug enablement
 
-Foundation bootstrap may validate config and catalogs without requiring production secrets. Actual production startup must fail fast when required credentials are missing.
+Production startup must require Discord token, allowed guild ids, and OpenAI key. Local checks may run without secrets.
+
+Direct messages are rejected by runtime policy. `allow_direct_messages` may exist in older config files, but it must not enable DM use.
 
 ## Startup
 
 Startup sequence:
 
-1. Load config.
+1. Load and validate config.
 2. Initialize logging.
-3. Open SQLite.
-4. Apply migrations.
-5. Ensure artifact/raw storage directories exist.
-6. Build repositories and services.
-7. Build LLM gateway.
-8. Build Discord adapter.
-9. Register slash commands.
-10. Start Discord client.
+3. Open SQLite and apply migrations.
+4. Ensure raw GPX and artifact directories exist.
+5. Build repositories and application context.
+6. Build optional LLM gateway.
+7. Build Discord runtime.
+8. Register/sync slash commands.
+9. Start Discord client.
 
-Startup should fail fast on missing required secrets or invalid database migration.
+Startup should fail fast on invalid config, missing production secrets, invalid migrations, or missing `discord.py` in production mode.
 
-## Shutdown
+## Runtime Policy
 
-Shutdown should:
-
-- stop accepting new Discord events
-- finish or cancel in-flight workflows gracefully
-- close database connections
-- flush logs
+- One bot process per production config.
+- Discord events are normalized into canonical events at the adapter boundary.
+- Workflows do not receive Discord objects.
+- Guild/channel allowlists are checked before dispatch.
+- Normal guild messages may be stored as no-op history.
+- Mention/slash interactions can produce responses.
+- First active user interaction is tracked separately from passive observation and notifies admins by DM.
 
 ## Logging
 
@@ -54,11 +51,11 @@ Logs should include:
 
 - startup/shutdown
 - Discord connection lifecycle
-- request ids
-- workflow names
+- command sync results
+- event ids
+- workflow names/statuses
 - error categories
-- model operation names
-- token usage where available
+- model operation names and latency where available
 
 Logs must not include:
 
@@ -66,123 +63,74 @@ Logs must not include:
 - OpenAI API key
 - raw GPX content
 - full unbounded model payloads
+- full workout point arrays
 
 ## Debug Traces
 
-Every request should create a trace.
+Every dispatched event creates a bounded trace.
 
-Trace retention:
-
-- keep recent traces in SQLite
-- prune by count or age
-- summarize large payloads
-
-Debug export:
+Trace exports:
 
 - available through `/debug`
-- restricted to relevant user or admin
+- restricted to requester/admin policy
 - redacted
 - attached as JSON when large
+
+Trace retention should be pruned by count and later by configurable age.
 
 ## Data Retention
 
 Recommended defaults:
 
-- channel history: 1 year
-- summaries: until channel deletion or manual cleanup
+- channel history: configured retention window
 - debug traces: short operational window
-- raw GPX and workouts: until user deletes them
+- raw GPX/workouts: until user deletion or explicit retention policy
 - rendered artifacts: prune by age/count unless explicitly retained
 
-## Artifact Storage
+Retention jobs are a current backlog item.
 
-Artifacts:
+## Storage And Backups
 
-- raw GPX files
-- rendered images
-- debug exports if persisted
-
-Rules:
-
-- store under configured artifact roots
-- use ids, not user-provided filenames, for storage paths
-- preserve original filename as metadata
-- never expose local filesystem paths to users or models
-
-## Deployment
-
-Recommended production mode:
-
-- one bot process
-- SQLite database on persistent disk
-- supervised by systemd, screen, or equivalent process manager
-- health check command that verifies process and recent startup
-
-## Health Checks
-
-Health check should verify:
-
-- process is running
-- database opens
-- migrations are current
-- Discord client connected recently
-- slash commands registered
-
-## Backups
-
-Backup:
+Back up:
 
 - SQLite database
-- raw GPX storage
-- artifact metadata if not fully in database
+- raw GPX directory
+- rendered artifacts if they must remain reproducible
 
 Backup before:
 
-- migration
-- production cutover
+- migrations
 - destructive cleanup
+- large import
+- production deployment that changes schema or storage behavior
 
-## Restore And Recovery
+Restore should be tested against a copied database, never first against production.
 
-Recovery requirements before v3 cutover:
+## Health Checks
 
-- v3 can run in disabled or shadow mode during rollout
-- v3 can be disabled by config flag during rollout
-- import is one-way but source raw data is not deleted by the importer
+Health checks should verify:
 
-After final cutover:
+- bot process exists
+- database opens and migration version is current
+- configured storage roots are writable
+- Discord slash commands sync successfully
+- recent logs do not show startup loops
 
-- recovery means restoring from backup or disabling v3 public responses until fixed
+Current CLI checks:
+
+```bash
+python3 aimo.py --check --config aimo.conf.example
+python3 aimo.py --check-services --config aimo.conf.example
+python3 aimo.py --preflight --config aimo.conf
+```
 
 ## Admin Operations
 
 Admin-only capabilities:
 
 - broader debug lookup
-- health report
-- migration dry-run/apply
-- trace pruning
+- future health report
+- future trace pruning
+- future migration/import commands that mutate shared state
 
 All admin operations must check configured admin user ids.
-
-## Common User-Facing Error Templates
-
-```text
-En saanut mallilta vastausta juuri nyt. Yritä hetken päästä uudelleen.
-```
-
-```text
-En löytänyt tuolla viitteellä treeniä.
-```
-
-```text
-Tässä treenissä ei ole pyydettyä mittaria: {metric}.
-```
-
-```text
-Tuo liite ei näytä kelvolliselta GPX-tiedostolta.
-```
-
-```text
-Visualisoinnin piirtäminen epäonnistui. Data tallessa, mutta kuvaa ei saatu muodostettua.
-```
