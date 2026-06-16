@@ -5,7 +5,7 @@ import importlib
 import logging
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from adapters.discord.commands import command_specs_by_name, register_command_specs
 from adapters.discord.normalization import (
@@ -284,7 +284,18 @@ async def handle_interaction(
         first = True
         for outgoing in (outgoing_to_discord(message, app_context.runtime.translator) for message in result.messages):
             responder = _interaction_responder(interaction, first=first)
-            await send_outbound(responder, outgoing, discord_module=discord_module, ephemeral_supported=True)
+            await send_outbound(
+                responder,
+                outgoing,
+                discord_module=discord_module,
+                ephemeral_supported=True,
+                component_callback=lambda component_interaction: handle_interaction(
+                    component_interaction,
+                    app_context,
+                    discord_module=discord_module,
+                    discord_client=discord_client or getattr(interaction, "client", None),
+                ),
+            )
             first = False
         await _send_first_interaction_admin_dm(
             result,
@@ -303,6 +314,7 @@ async def send_outbound(
     *,
     discord_module: Any | None = None,
     ephemeral_supported: bool = False,
+    component_callback: Callable[[Any], Awaitable[None]] | None = None,
 ) -> None:
     kwargs: dict[str, Any] = {
         "content": outbound.text or None,
@@ -313,13 +325,18 @@ async def send_outbound(
     if outbound.content is not None:
         module = discord_module or load_discord_module()
         kwargs["file"] = module.File(BytesIO(outbound.content), filename=outbound.filename or "aimo-output.bin")
-    view = _discord_view(outbound, discord_module=discord_module)
+    view = _discord_view(outbound, discord_module=discord_module, component_callback=component_callback)
     if view is not None:
         kwargs["view"] = view
     await destination.send(**kwargs)
 
 
-def _discord_view(outbound: DiscordOutbound, *, discord_module: Any | None = None) -> Any | None:
+def _discord_view(
+    outbound: DiscordOutbound,
+    *,
+    discord_module: Any | None = None,
+    component_callback: Callable[[Any], Awaitable[None]] | None = None,
+) -> Any | None:
     if not outbound.components:
         return None
     module = discord_module or load_discord_module()
@@ -334,6 +351,8 @@ def _discord_view(outbound: DiscordOutbound, *, discord_module: Any | None = Non
             style=_button_style(component.style, button_style),
             custom_id=component.component_id,
         )
+        if component_callback is not None:
+            button.callback = component_callback
         view.add_item(button)
     return view
 
