@@ -21,6 +21,13 @@ class ChatWorkflowTests(unittest.TestCase):
     def test_mention_chat_uses_llm_and_persists_assistant_reply(self) -> None:
         client = FakeLLMClient(
             {
+                LLMOperation.INTENT_CLASSIFICATION: {
+                    "workflow": "chat",
+                    "confidence": "high",
+                    "slots": {},
+                    "clarification": "",
+                    "reason": "general chat",
+                },
                 LLMOperation.CHAT_REPLY: {
                     "reply_text": "Tuo kuulostaa hyvältä suunnalta.",
                     "tone": "concise",
@@ -55,7 +62,9 @@ class ChatWorkflowTests(unittest.TestCase):
         self.assertIn("Respond in fi", chat_request.system_prompt)
         self.assertEqual(chat_request.user_payload["user_text"], "mitä kuuluu?")
         capabilities = chat_request.user_payload["workflow_facts"]["capabilities"]
-        self.assertEqual(capabilities["workout_management"]["list_command"], "/treenit toiminto:listaa")
+        self.assertTrue(capabilities["visualization"]["available_in_public_mention"])
+        self.assertIn("Chart requests should not be answered as generic chat", capabilities["visualization"]["behavior"])
+        self.assertEqual(capabilities["workout_management"]["list_command"], "/treenit listaa")
         self.assertTrue(capabilities["workout_management"]["private_by_default"])
         self.assertIn("public chat", capabilities["workout_management"]["public_chat_behavior"])
 
@@ -67,8 +76,15 @@ class ChatWorkflowTests(unittest.TestCase):
     def test_workout_management_like_mention_stays_generic_chat_with_capability_context(self) -> None:
         client = FakeLLMClient(
             {
+                LLMOperation.INTENT_CLASSIFICATION: {
+                    "workflow": "chat",
+                    "confidence": "high",
+                    "slots": {},
+                    "clarification": "",
+                    "reason": "public management guidance",
+                },
                 LLMOperation.CHAT_REPLY: {
-                    "reply_text": "Treenien listaamiseen kannattaa käyttää /treenit toiminto:listaa.",
+                    "reply_text": "Treenien listaamiseen kannattaa käyttää /treenit listaa.",
                     "tone": "concise",
                     "should_update_summary": False,
                 }
@@ -100,7 +116,7 @@ class ChatWorkflowTests(unittest.TestCase):
         self.assertEqual(chat_requests[0].user_payload["user_text"], "listaa mun treenit")
         self.assertEqual(
             chat_requests[0].user_payload["workflow_facts"]["capabilities"]["workout_management"]["list_command"],
-            "/treenit toiminto:listaa",
+            "/treenit listaa",
         )
 
     def test_normal_message_is_only_persisted_and_does_not_call_llm(self) -> None:

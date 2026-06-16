@@ -11,6 +11,7 @@ from storage.repositories import (
     DebugTraceRepository,
     HeartRateZonesRepository,
     HistoryRepository,
+    PendingWorkoutDeleteRepository,
     RenderedArtifactsRepository,
     UsersRepository,
     WorkoutStreamsRepository,
@@ -26,6 +27,7 @@ class RepositoryBundle:
     heart_rate_zones: HeartRateZonesRepository
     channels: ChannelsRepository
     history: HistoryRepository
+    pending_workout_deletes: PendingWorkoutDeleteRepository
     attachments: AttachmentsRepository
     workouts: WorkoutsRepository
     active_workouts: ActiveWorkoutRepository
@@ -40,6 +42,7 @@ def build_repositories(connection: sqlite3.Connection) -> RepositoryBundle:
         heart_rate_zones=HeartRateZonesRepository(connection),
         channels=ChannelsRepository(connection),
         history=HistoryRepository(connection),
+        pending_workout_deletes=PendingWorkoutDeleteRepository(connection),
         attachments=AttachmentsRepository(connection),
         workouts=WorkoutsRepository(connection),
         active_workouts=ActiveWorkoutRepository(connection),

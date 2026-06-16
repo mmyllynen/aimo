@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.errors import AppError, ErrorCategory
-from core.events import CanonicalEvent
+from core.events import CanonicalEvent, EventKind
 from core.i18n import TranslationKey
 from core.routing import RouteDecision
-from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
+from core.workflows import OutgoingComponent, OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
+from storage.repositories import PendingWorkoutDeleteRecord
 from storage.repositories import HeartRateZoneRecord, WorkoutRecord
 from storage.unit_of_work import RepositoryBundle
 from workout.references import WorkoutReferenceResolution, WorkoutReferenceStatus, resolve_workout_reference
@@ -22,10 +24,13 @@ SUPPORTED_ACTIONS = {
     "sykerajat",
     "aseta_sykerajat",
 }
+DELETE_CONFIRM_COMPONENT = "workout_delete_confirm"
+DELETE_CANCEL_COMPONENT = "workout_delete_cancel"
 
 HR_ZONE_KEYS = ("z1", "z2", "z3", "z4", "z5")
 HR_ZONE_LABELS = ("pk1", "pk2", "vk1", "vk2", "mk")
 HR_MAX_ZONE_MULTIPLIERS = (0.60, 0.70, 0.80, 0.90, 1.00)
+DELETE_CONFIRMATION_TTL_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -37,7 +42,14 @@ class WorkoutManagementWorkflow:
         repositories: RepositoryBundle,
     ) -> WorkflowResult:
         options = _options(event)
-        action = str(options.get("toiminto") or event.text).strip().lower()
+        action = _action(event)
+        if event.kind == EventKind.COMPONENT:
+            if action == DELETE_CONFIRM_COMPONENT:
+                return self._confirm_delete(event, repositories)
+            if action == DELETE_CANCEL_COMPONENT:
+                return self._cancel_delete(event, repositories)
+            return _user_error(TranslationKey.ERROR_UNEXPECTED, ErrorCategory.UNEXPECTED)
+
         if action not in SUPPORTED_ACTIONS:
             action = "listaa"
 
@@ -61,7 +73,9 @@ class WorkoutManagementWorkflow:
         workouts = repositories.workouts.list_for_user(event.user_id)
         if not workouts:
             return _message(TranslationKey.WORKOUT_LIST_EMPTY)
-        items = "\n".join(_workout_line(index, workout) for index, workout in enumerate(workouts, start=1))
+        active = repositories.active_workouts.get(event.user_id)
+        active_id = active.workout_id if active is not None else ""
+        items = "\n".join(_workout_line(index, workout, active_id=active_id) for index, workout in enumerate(workouts, start=1))
         items = f"{items}\n\nVoit viitata treeniin numerolla, päivämäärällä tai nimellä."
         return _message(
             TranslationKey.WORKOUT_LIST_SUMMARY,
@@ -74,6 +88,7 @@ class WorkoutManagementWorkflow:
         if error := _reference_error(resolved):
             return error
         assert resolved.workout is not None
+        _set_current_workout(event, repositories, resolved.workout)
         return _workout_details(resolved.workout)
 
     def _active(self, event: CanonicalEvent, repositories: RepositoryBundle) -> WorkflowResult:
@@ -93,21 +108,75 @@ class WorkoutManagementWorkflow:
             return error
         assert resolved.workout is not None
         workout = resolved.workout
-        repositories.active_workouts.set(
-            user_id=event.user_id,
-            workout_id=workout.workout_id,
-            updated_at=event.created_at,
-        )
+        _set_current_workout(event, repositories, workout)
         return _message(TranslationKey.WORKOUT_ACTIVE_SET, title=workout.title)
 
-    def _delete(self, event: CanonicalEvent, repositories: RepositoryBundle, workout_id: str) -> WorkflowResult:
+    def _delete(
+        self,
+        event: CanonicalEvent,
+        repositories: RepositoryBundle,
+        workout_id: str,
+    ) -> WorkflowResult:
         resolved = resolve_workout_reference(repositories, event.user_id, workout_id, default="latest")
         if error := _reference_error(resolved):
             return error
         assert resolved.workout is not None
         workout = resolved.workout
+        pending_id = f"{event.event_id}:pending-delete"
+        expires_at = _timestamp_after(event.created_at, DELETE_CONFIRMATION_TTL_SECONDS)
+        repositories.pending_workout_deletes.create(
+            PendingWorkoutDeleteRecord(
+                pending_id=pending_id,
+                user_id=event.user_id,
+                guild_id=event.guild_id,
+                channel_id=event.channel_id,
+                workout_id=workout.workout_id,
+                token="button",
+                created_at=_timestamp(event.created_at),
+                expires_at=expires_at,
+                source_event_id=event.event_id,
+                metadata={"title": workout.title},
+            )
+        )
+        return _message(
+            TranslationKey.WORKOUT_DELETE_PENDING,
+            title=workout.title or workout.workout_id,
+            reference=workout_id or workout.workout_id,
+            components=(
+                OutgoingComponent(
+                    component_id=_delete_component_id(DELETE_CONFIRM_COMPONENT, pending_id),
+                    label="Poista",
+                    style="danger",
+                ),
+                OutgoingComponent(
+                    component_id=_delete_component_id(DELETE_CANCEL_COMPONENT, pending_id),
+                    label="Peruuta",
+                    style="secondary",
+                ),
+            ),
+        )
+
+    def _confirm_delete(self, event: CanonicalEvent, repositories: RepositoryBundle) -> WorkflowResult:
+        pending = _pending_delete(event, repositories)
+        if pending is None:
+            return _user_error(TranslationKey.WORKOUT_DELETE_CONFIRMATION_INVALID, ErrorCategory.PERMISSION_DENIED)
+        if _timestamp(event.created_at) > pending.expires_at:
+            repositories.pending_workout_deletes.clear_for_user(event.user_id)
+            return _user_error(TranslationKey.WORKOUT_DELETE_CONFIRMATION_EXPIRED, ErrorCategory.PERMISSION_DENIED)
+        workout = repositories.workouts.get_for_user(event.user_id, pending.workout_id)
+        if workout is None:
+            repositories.pending_workout_deletes.clear_for_user(event.user_id)
+            return _user_error(TranslationKey.ERROR_NO_MATCHING_WORKOUT, ErrorCategory.NO_MATCHING_WORKOUT)
         repositories.workouts.delete_for_user(event.user_id, workout.workout_id)
+        repositories.pending_workout_deletes.clear_for_user(event.user_id)
         return _message(TranslationKey.WORKOUT_DELETED, title=workout.title)
+
+    def _cancel_delete(self, event: CanonicalEvent, repositories: RepositoryBundle) -> WorkflowResult:
+        pending = _pending_delete(event, repositories)
+        if pending is None:
+            return _user_error(TranslationKey.WORKOUT_DELETE_CONFIRMATION_INVALID, ErrorCategory.PERMISSION_DENIED)
+        repositories.pending_workout_deletes.clear_for_user(event.user_id)
+        return _message(TranslationKey.WORKOUT_DELETE_CANCELLED)
 
     def _list_hr_zones(self, event: CanonicalEvent, repositories: RepositoryBundle) -> WorkflowResult:
         zones = repositories.heart_rate_zones.list_for_user(event.user_id)
@@ -139,6 +208,21 @@ def _options(event: CanonicalEvent) -> dict[str, Any]:
     if isinstance(options, dict):
         return options
     return {}
+
+
+def _action(event: CanonicalEvent) -> str:
+    return str(event.metadata.get("subcommand", "")).strip().lower()
+
+
+def _pending_delete(event: CanonicalEvent, repositories: RepositoryBundle) -> PendingWorkoutDeleteRecord | None:
+    pending_id = str(event.metadata.get("pending_id", "")).strip()
+    if not pending_id:
+        return None
+    return repositories.pending_workout_deletes.get_for_user(event.user_id, pending_id)
+
+
+def _delete_component_id(action: str, pending_id: str) -> str:
+    return f"treenit:{action}:{pending_id}"
 
 
 def _parse_zone_upper_limits(payload: Any) -> tuple[int, ...] | None:
@@ -177,7 +261,12 @@ def _strictly_increasing(values: tuple[int, ...]) -> bool:
     return all(current > previous for previous, current in zip(values, values[1:]))
 
 
-def _message(key: TranslationKey, **params: Any) -> WorkflowResult:
+def _message(
+    key: TranslationKey,
+    *,
+    components: tuple[OutgoingComponent, ...] = (),
+    **params: Any,
+) -> WorkflowResult:
     return WorkflowResult(
         status=WorkflowStatus.SUCCESS,
         messages=(
@@ -185,6 +274,7 @@ def _message(key: TranslationKey, **params: Any) -> WorkflowResult:
                 kind=OutgoingKind.EPHEMERAL_TEXT,
                 text_key=key.value,
                 text_params=params,
+                components=components,
             ),
         ),
     )
@@ -219,19 +309,31 @@ def _workout_details(workout: WorkoutRecord) -> WorkflowResult:
     return _message(
         TranslationKey.WORKOUT_DETAILS,
         title=workout.title or workout.workout_id,
-        date=workout.local_date or "",
+        date=_format_datetime(workout.start_time_local, workout.local_date),
+        kind=_format_kind(workout.primary_kind or workout.kind) or "-",
         distance_km=_format_number(workout.distance_km),
         duration=_format_duration(workout.duration_s),
+        avg_hr=_format_heart_rate(workout.avg_hr_bpm),
+        ascent=_format_ascent(workout.ascent_m),
     )
 
 
-def _workout_line(index: int, workout: WorkoutRecord) -> str:
+def _set_current_workout(event: CanonicalEvent, repositories: RepositoryBundle, workout: WorkoutRecord) -> None:
+    repositories.active_workouts.set(
+        user_id=event.user_id,
+        workout_id=workout.workout_id,
+        updated_at=event.created_at,
+    )
+
+
+def _workout_line(index: int, workout: WorkoutRecord, *, active_id: str = "") -> str:
     title = workout.title or "Nimetön treeni"
-    date = _format_date(workout.local_date)
+    date = _format_datetime(workout.start_time_local, workout.local_date)
     metrics = ", ".join(_workout_metric_parts(workout))
+    marker = " *" if workout.workout_id == active_id else ""
     if metrics:
-        return f"{index}. {date} - {title}\n   {metrics}"
-    return f"{index}. {date} - {title}"
+        return f"{index}. {date} - {title}{marker}\n   {metrics}"
+    return f"{index}. {date} - {title}{marker}"
 
 
 def _workout_metric_parts(workout: WorkoutRecord) -> tuple[str, ...]:
@@ -242,6 +344,8 @@ def _workout_metric_parts(workout: WorkoutRecord) -> tuple[str, ...]:
         parts.append(_format_duration(workout.duration_s))
     if workout.avg_hr_bpm is not None:
         parts.append(f"keskisyke {int(round(workout.avg_hr_bpm))}")
+    if workout.ascent_m is not None:
+        parts.append(f"nousu {int(round(workout.ascent_m))} m")
     return tuple(part for part in parts if part)
 
 
@@ -259,6 +363,16 @@ def _format_date(value: str | None) -> str:
         year, month, day = parts
         return f"{int(day)}.{int(month)}.{year}"
     return value
+
+
+def _format_datetime(start_time_local: str | None, local_date: str | None) -> str:
+    date = _format_date(local_date)
+    if not start_time_local or "T" not in start_time_local:
+        return date
+    time_part = start_time_local.split("T", 1)[1][:5]
+    if not time_part or ":" not in time_part:
+        return date
+    return f"{date} {time_part}"
 
 
 def _format_kind(value: str) -> str:
@@ -307,6 +421,41 @@ def _format_number(value: float | None) -> str:
     if value is None:
         return "-"
     return _format_decimal(value, digits=2)
+
+
+def _format_heart_rate(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return str(int(round(value)))
+
+
+def _format_ascent(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{int(round(value))} m"
+
+
+def _timestamp_after(value: datetime | str, seconds: int) -> str:
+    return _format_timestamp(_parse_timestamp(value) + timedelta(seconds=seconds))
+
+
+def _timestamp(value: datetime | str) -> str:
+    return _format_timestamp(_parse_timestamp(value))
+
+
+def _parse_timestamp(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _format_decimal(value: float, *, digits: int) -> str:

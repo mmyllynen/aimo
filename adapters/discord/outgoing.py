@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.i18n import Translator
-from core.workflows import OutgoingKind, OutgoingMessage
+from core.workflows import OutgoingComponent, OutgoingKind, OutgoingMessage
 
 
 @dataclass(frozen=True)
@@ -14,6 +14,7 @@ class DiscordOutbound:
     filename: str = ""
     content_type: str = ""
     content: bytes | None = None
+    components: tuple[OutgoingComponent, ...] = ()
     allowed_mentions: dict[str, list[str]] = field(default_factory=lambda: {"parse": []})
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -33,6 +34,7 @@ def outgoing_to_discord(message: OutgoingMessage, translator: Translator) -> Dis
         filename=message.filename,
         content_type=message.content_type,
         content=message.content,
+        components=message.components,
         metadata=message.metadata,
     )
 
@@ -47,4 +49,3 @@ def _render_text(message: OutgoingMessage, translator: Translator) -> str:
 
 def _sanitize_broad_mentions(text: str) -> str:
     return text.replace("@everyone", "@ everyone").replace("@here", "@ here")
-

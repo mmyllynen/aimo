@@ -1,10 +1,10 @@
-# Aimo v3 Workout Spec
+# Aimo Workout Spec
 
-## Workout Domain
+## Domain
 
 A workout is a user-owned record derived from uploaded GPX data or future supported workout sources.
 
-A workout can represent:
+Workout kinds:
 
 - recorded activity
 - route plan
@@ -20,7 +20,7 @@ Every workout has:
 - created timestamp
 - schema version
 
-Only the owner can list, inspect, activate, delete, or visualize the workout.
+Only the owner can list, inspect, activate, delete, chat about, or visualize the workout.
 
 ## GPX Ingest
 
@@ -30,35 +30,20 @@ Input:
 - attachment metadata
 - uploader identity
 - guild/channel/message metadata
-- optional user HR zones
 
 Validation:
 
-- XML must parse.
-- Root must be GPX-compatible.
-- File must contain at least one useful track, route, or waypoint sequence.
-- Size must be within configured limits.
+- XML parses.
+- Root is GPX-compatible.
+- File contains useful track, route, or waypoint data.
+- Size is within configured limits.
 
 Duplicate detection:
 
-- SHA-256 hash of raw content.
-- Same owner + same hash is duplicate.
+- SHA-256 of raw content.
+- Duplicate key is same owner plus same hash.
 
-## GPX Classification
-
-Classify parsed GPX as:
-
-- `activity`: has timestamped track points or sensor data indicating recorded activity
-- `route_plan`: has route/track geometry but no activity timing/sensor data
-- `hybrid`: contains both meaningful recorded activity and route plan data
-
-Primary kind:
-
-- `activity`
-- `route`
-- `hybrid`
-
-## Canonical Workout Fields
+## Canonical Fields
 
 Required:
 
@@ -72,60 +57,43 @@ Required:
 
 Optional derived fields:
 
-- `start_time_utc`
-- `start_time_local`
-- `local_date`
-- `distance_km`
-- `duration_s`
-- `pace_s_per_km`
-- `ascent_m`
-- `avg_hr_bpm`
-- `max_hr_bpm`
-- `avg_cadence_spm`
-- `max_cadence_spm`
-- `point_count`
-- `tags`
+- start time UTC/local
+- local date
+- distance
+- duration
+- pace
+- ascent
+- average/max HR
+- cadence
+- point count
+- tags/metadata
 
-## Point Fields
+## Points And Streams
 
-Workout points may include:
+Point fields may include:
 
-- `point_index`
-- `segment_index`
-- `timestamp_utc`
-- `elapsed_s`
-- `distance_m`
-- `distance_km`
-- `latitude`
-- `longitude`
-- `elevation_m`
-- `heart_rate_bpm`
-- `cadence_spm`
-- `pace_s_per_km`
+- timestamp/elapsed time
+- distance
+- latitude/longitude
+- elevation
+- heart rate
+- cadence
+- pace
+- segment index
 
-Point streams must remain in storage and deterministic services. They must not be sent wholesale to routing or planning LLM calls.
+Supported stream summaries:
 
-## Streams
+- heart rate
+- cadence
+- pace
+- elevation
+- distance
 
-Supported stream keys:
-
-- `heart_rate`
-- `cadence`
-- `pace`
-- `elevation`
-- `distance`
-
-Stream summary should include:
-
-- unit
-- sample count
-- min
-- max
-- average where meaningful
+Point rows and raw GPX remain in deterministic services/storage. They must not be sent wholesale to routing or planning LLM calls.
 
 ## Heart-Rate Zones
 
-User HR zones are ordered named BPM ranges.
+User HR zones are ordered BPM ranges.
 
 Default labels may include:
 
@@ -135,19 +103,27 @@ Default labels may include:
 - `vk2`
 - `mk`
 
-The exact zone labels are user-configurable. Derived zone distribution should be calculated from HR samples when zones exist.
+Zone distribution output:
 
-Zone derivation output:
-
-- zone key
-- label
+- zone key/label
 - seconds
 - share
 - lower/upper BPM
 
 ## Workout References
 
-Supported user references:
+Aimo keeps a current workout context per user. This is internal workflow state used to make follow-up requests natural; users should not need to manage it explicitly in normal use.
+
+Current workout updates:
+
+- GPX ingest sets the imported workout as current.
+- `/treenit nayta` sets the shown workout as current.
+- Workout chat and visualization may set the resolved workout as current only when the LLM returns the explicit structured context-update flag and the selector resolves to exactly one user-owned workout.
+- Ambiguous, missing, general, or comparison requests must not update current workout.
+
+Python must not infer current-workout updates from natural-language substrings. It may only resolve structured selectors and execute explicit context-update fields returned by LLM contracts or deterministic slash-command choices.
+
+Supported references:
 
 - exact workout id
 - active workout
@@ -156,7 +132,7 @@ Supported user references:
 - date
 - date range
 - tag
-- workout type/kind
+- workout kind/type
 - title fragment
 
 Resolution policy:
@@ -167,42 +143,9 @@ Resolution policy:
 - ambiguous matches clarify
 - no match returns `no_matching_workout`
 
-## Latest Workout Policy
+Latest workout means newest user-owned workout by start time when available, otherwise create/upload time.
 
-"Latest workout" means the newest user-owned workout by workout start time when available, otherwise upload/create time.
-
-If the latest workout lacks a requested metric:
-
-- do not ask whether the user meant another workout
-- either produce a best-effort result with available metrics and a note
-- or return a specific missing metric message
-
-## Active Workout Policy
-
-Each user can have one active workout.
-
-Set active when:
-
-- user explicitly sets it
-- GPX ingest policy chooses to make latest upload active
-
-Active workout is a user convenience pointer, not a permission boundary.
-
-## Workout Summary Text
-
-Compact workout summaries should include, when available:
-
-- title
-- local date/time
-- distance
-- duration
-- pace
-- average/max HR
-- tags
-
-Keep summaries short enough for Discord lists.
-
-## Data Missing Policy
+## Missing Data
 
 Do not invent:
 
@@ -213,9 +156,8 @@ Do not invent:
 - splits
 - route details
 
-When missing:
+When data is missing:
 
-- say the metric is missing
-- offer useful alternative if possible
-- avoid broad clarification unless workflow truly cannot proceed
-
+- say which metric is missing
+- produce best effort when secondary data is missing
+- avoid clarification when the selected workout is explicit

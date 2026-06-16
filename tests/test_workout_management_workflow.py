@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import unittest
 
-from adapters.discord.normalization import DiscordSlashSnapshot, DiscordUserSnapshot, slash_to_event
+from adapters.discord.normalization import (
+    DiscordComponentSnapshot,
+    DiscordSlashSnapshot,
+    DiscordUserSnapshot,
+    component_to_event,
+    slash_to_event,
+)
 from adapters.discord.outgoing import outgoing_to_discord
 from app.dispatcher import DispatchContext, Dispatcher
 from core.i18n import SupportedLanguage, Translator
@@ -21,16 +28,16 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
 
     def test_treenit_listaa_returns_only_current_users_workouts(self) -> None:
         self._seed_workouts()
-        event = self._treenit_event("event-list", "user-1", {"toiminto": "listaa"})
+        event = self._treenit_event("event-list", "user-1", "listaa")
 
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
         text = _render_first(result)
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
         self.assertIn("Löysin 2 treeniä:", text)
-        self.assertIn("1. 13.6.2026 - Evening run", text)
-        self.assertIn("2. 13.6.2026 - Morning run", text)
-        self.assertIn("Juoksu, 6 km, 35:00, keskisyke 132", text)
+        self.assertIn("1. 13.6.2026 19:00 - Evening run", text)
+        self.assertIn("2. 13.6.2026 10:00 - Morning run", text)
+        self.assertIn("Juoksu, 6 km, 35:00, keskisyke 132, nousu 30 m", text)
         self.assertIn("Voit viitata treeniin numerolla, päivämäärällä tai nimellä.", text)
         self.assertIn("Morning run", text)
         self.assertIn("Evening run", text)
@@ -40,19 +47,19 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
 
     def test_treenit_listaa_uses_singular_count_for_one_workout(self) -> None:
         self._seed_single_workout()
-        event = self._treenit_event("event-list", "user-1", {"toiminto": "listaa"})
+        event = self._treenit_event("event-list", "user-1", "listaa")
 
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
         text = _render_first(result)
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
         self.assertIn("Löysin 1 treenin:", text)
-        self.assertIn("1. 13.6.2026 - Morning run", text)
+        self.assertIn("1. 13.6.2026 10:00 - Morning run", text)
         self.assertNotIn("workout-1", text)
 
     def test_treenit_nayta_rejects_other_users_workout(self) -> None:
         self._seed_workouts()
-        event = self._treenit_event("event-show", "user-1", {"toiminto": "nayta", "viite": "workout-3"})
+        event = self._treenit_event("event-show", "user-1", "nayta", {"viite": "workout-3"})
 
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
         text = _render_first(result)
@@ -60,12 +67,42 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
         self.assertEqual(text, "En löytänyt pyynnölle sopivaa treeniä.")
 
+    def test_treenit_nayta_sets_shown_workout_active(self) -> None:
+        self._seed_workouts()
+        event = self._treenit_event("event-show", "user-1", "nayta", {"viite": "2"})
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        with UnitOfWork(self.connection) as repositories:
+            active = repositories.active_workouts.get("user-1")
+        self.assertEqual(active.workout_id, "workout-1")
+
+    def test_treenit_listaa_marks_active_workout(self) -> None:
+        self._seed_workouts()
+        with UnitOfWork(self.connection) as repositories:
+            repositories.active_workouts.set(
+                user_id="user-1",
+                workout_id="workout-2",
+                updated_at="2026-06-13T20:00:00Z",
+            )
+
+        result = self.dispatcher.dispatch(
+            self._treenit_event("event-list", "user-1", "listaa"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+        text = _render_first(result)
+
+        self.assertIn("1. 13.6.2026 19:00 - Evening run *", text)
+        self.assertIn("2. 13.6.2026 10:00 - Morning run", text)
+
     def test_treenit_aseta_aktiivinen_sets_owned_active_workout(self) -> None:
         self._seed_workouts()
         event = self._treenit_event(
             "event-active-set",
             "user-1",
-            {"toiminto": "aseta_aktiivinen", "viite": "workout-2"},
+            "aseta_aktiivinen",
+            {"viite": "workout-2"},
         )
 
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
@@ -82,7 +119,8 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         event = self._treenit_event(
             "event-active-set",
             "user-1",
-            {"toiminto": "aseta_aktiivinen", "viite": "1"},
+            "aseta_aktiivinen",
+            {"viite": "1"},
         )
 
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
@@ -94,7 +132,7 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
 
     def test_treenit_nayta_reports_ambiguous_reference(self) -> None:
         self._seed_workouts()
-        event = self._treenit_event("event-show", "user-1", {"toiminto": "nayta", "viite": "run"})
+        event = self._treenit_event("event-show", "user-1", "nayta", {"viite": "run"})
 
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
         text = _render_first(result)
@@ -108,24 +146,48 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
             self._treenit_event(
                 "event-active-set",
                 "user-1",
-                {"toiminto": "aseta_aktiivinen", "viite": "workout-2"},
+                "aseta_aktiivinen",
+                {"viite": "workout-2"},
             ),
             DispatchContext(UnitOfWork(self.connection)),
         )
 
         result = self.dispatcher.dispatch(
-            self._treenit_event("event-active", "user-1", {"toiminto": "aktiivinen"}),
+            self._treenit_event("event-active", "user-1", "aktiivinen"),
             DispatchContext(UnitOfWork(self.connection)),
         )
         text = _render_first(result)
 
         self.assertIn("Evening run", text)
         self.assertIn("Matka: 6 km", text)
+        self.assertIn("Keskisyke: 132", text)
+        self.assertIn("Nousu: 30 m", text)
 
-    def test_treenit_poista_deletes_only_owned_workout(self) -> None:
+    def test_treenit_poista_requires_confirmation_before_deleting_owned_workout(self) -> None:
         self._seed_workouts()
+        start = datetime(2026, 6, 13, 21, 0, tzinfo=timezone.utc)
+
+        pending_result = self.dispatcher.dispatch(
+            self._treenit_event("event-delete", "user-1", "poista", {"viite": "workout-1"}, created_at=start),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        pending_text = _render_first(pending_result)
+        self.assertIn("Poisto vaatii vahvistuksen.", pending_text)
+        self.assertIn("Poistettava treeni: Morning run", pending_text)
+        with UnitOfWork(self.connection) as repositories:
+            self.assertIsNotNone(repositories.workouts.get_for_user("user-1", "workout-1"))
+            pending = repositories.pending_workout_deletes.latest_for_user("user-1")
+        self.assertEqual(pending.workout_id, "workout-1")
+        self.assertEqual([component.label for component in pending_result.messages[0].components], ["Poista", "Peruuta"])
+
         result = self.dispatcher.dispatch(
-            self._treenit_event("event-delete", "user-1", {"toiminto": "poista", "viite": "workout-1"}),
+            self._component_event(
+                "event-delete-confirm",
+                "user-1",
+                pending_result.messages[0].components[0].component_id,
+                created_at=start + timedelta(seconds=30),
+            ),
             DispatchContext(UnitOfWork(self.connection)),
         )
 
@@ -133,20 +195,83 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         with UnitOfWork(self.connection) as repositories:
             self.assertIsNone(repositories.workouts.get_for_user("user-1", "workout-1"))
             self.assertIsNotNone(repositories.workouts.get_for_user("user-2", "workout-3"))
+            self.assertIsNone(repositories.pending_workout_deletes.latest_for_user("user-1"))
+
+    def test_treenit_poista_rejects_confirmation_without_pending_delete(self) -> None:
+        self._seed_workouts()
+        result = self.dispatcher.dispatch(
+            self._component_event(
+                "event-delete-confirm",
+                "user-1",
+                "treenit:workout_delete_confirm:event-delete:pending-delete",
+            ),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertIn("vahvistus ei täsmää", _render_first(result))
+        with UnitOfWork(self.connection) as repositories:
+            self.assertIsNotNone(repositories.workouts.get_for_user("user-1", "workout-1"))
+
+    def test_treenit_poista_cancel_button_clears_pending_delete(self) -> None:
+        self._seed_workouts()
+        pending_result = self.dispatcher.dispatch(
+            self._treenit_event("event-delete", "user-1", "poista", {"viite": "workout-1"}),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        result = self.dispatcher.dispatch(
+            self._component_event(
+                "event-delete-cancel",
+                "user-1",
+                pending_result.messages[0].components[1].component_id,
+            ),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(_render_first(result), "Peruin poiston.")
+        with UnitOfWork(self.connection) as repositories:
+            self.assertIsNotNone(repositories.workouts.get_for_user("user-1", "workout-1"))
+            self.assertIsNone(repositories.pending_workout_deletes.latest_for_user("user-1"))
+
+    def test_treenit_poista_rejects_expired_confirmation(self) -> None:
+        self._seed_workouts()
+        start = datetime(2026, 6, 13, 21, 0, tzinfo=timezone.utc)
+        self.dispatcher.dispatch(
+            self._treenit_event("event-delete", "user-1", "poista", {"viite": "workout-1"}, created_at=start),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+        with UnitOfWork(self.connection) as repositories:
+            pending = repositories.pending_workout_deletes.latest_for_user("user-1")
+
+        result = self.dispatcher.dispatch(
+            self._component_event(
+                "event-delete-confirm",
+                "user-1",
+                f"treenit:workout_delete_confirm:{pending.pending_id}",
+                created_at=start + timedelta(seconds=61),
+            ),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertIn("vahvistus vanheni", _render_first(result))
+        with UnitOfWork(self.connection) as repositories:
+            self.assertIsNotNone(repositories.workouts.get_for_user("user-1", "workout-1"))
 
     def test_treenit_sykerajat_update_and_list(self) -> None:
         update = self._treenit_event(
             "event-zones-update",
             "user-1",
+            "aseta_sykerajat",
             {
-                "toiminto": "aseta_sykerajat",
                 "zones": "114,133,152,171,190",
             },
         )
 
         update_result = self.dispatcher.dispatch(update, DispatchContext(UnitOfWork(self.connection)))
         list_result = self.dispatcher.dispatch(
-            self._treenit_event("event-zones-list", "user-1", {"toiminto": "sykerajat"}),
+            self._treenit_event("event-zones-list", "user-1", "sykerajat"),
             DispatchContext(UnitOfWork(self.connection)),
         )
         text = _render_first(list_result)
@@ -162,15 +287,15 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         update = self._treenit_event(
             "event-zones-update",
             "user-1",
+            "aseta_sykerajat",
             {
-                "toiminto": "aseta_sykerajat",
                 "zones": "190",
             },
         )
 
         update_result = self.dispatcher.dispatch(update, DispatchContext(UnitOfWork(self.connection)))
         list_result = self.dispatcher.dispatch(
-            self._treenit_event("event-zones-list", "user-1", {"toiminto": "sykerajat"}),
+            self._treenit_event("event-zones-list", "user-1", "sykerajat"),
             DispatchContext(UnitOfWork(self.connection)),
         )
 
@@ -186,7 +311,8 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         event = self._treenit_event(
             "event-zones-invalid",
             "user-1",
-            {"toiminto": "aseta_sykerajat", "zones": "130,120"},
+            "aseta_sykerajat",
+            {"zones": "130,120"},
         )
 
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
@@ -198,7 +324,15 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
             "esim. 190 tai 114,133,152,171,190.",
         )
 
-    def _treenit_event(self, interaction_id: str, user_id: str, options: dict[str, object]):
+    def _treenit_event(
+        self,
+        interaction_id: str,
+        user_id: str,
+        subcommand: str,
+        options: dict[str, object] | None = None,
+        *,
+        created_at: datetime | None = None,
+    ):
         return slash_to_event(
             DiscordSlashSnapshot(
                 interaction_id=interaction_id,
@@ -206,7 +340,32 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
                 channel_id="channel-1",
                 user=DiscordUserSnapshot(user_id=user_id, user_name=f"name-{user_id}"),
                 command_name="treenit",
-                options=options,
+                subcommand=subcommand,
+                options=options or {},
+                created_at=created_at or datetime.now(timezone.utc),
+            )
+        )
+
+    def _component_event(
+        self,
+        interaction_id: str,
+        user_id: str,
+        component_id: str,
+        *,
+        created_at: datetime | None = None,
+    ):
+        command_name, subcommand, pending_id = component_id.split(":", 2)
+        return component_to_event(
+            DiscordComponentSnapshot(
+                interaction_id=interaction_id,
+                guild_id="guild-1",
+                channel_id="channel-1",
+                user=DiscordUserSnapshot(user_id=user_id, user_name=f"name-{user_id}"),
+                component_id=component_id,
+                command_name=command_name,
+                subcommand=subcommand,
+                pending_id=pending_id,
+                created_at=created_at or datetime.now(timezone.utc),
             )
         )
 

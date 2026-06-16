@@ -14,6 +14,8 @@ from storage.repositories import (
     HeartRateZonesRepository,
     HistoryEventRecord,
     HistoryRepository,
+    PendingWorkoutDeleteRecord,
+    PendingWorkoutDeleteRepository,
     RenderedArtifactRecord,
     RenderedArtifactsRepository,
     UsersRepository,
@@ -151,6 +153,45 @@ class RepositoryTests(unittest.TestCase):
         recent = history.list_recent_for_channel("channel-1", limit=2)
 
         self.assertEqual([record.content for record in recent], ["message 2", "message 3"])
+
+    def test_pending_workout_delete_replaces_previous_user_pending(self) -> None:
+        users = UsersRepository(self.connection)
+        pending = PendingWorkoutDeleteRepository(self.connection)
+
+        with transaction(self.connection):
+            users.touch(user_id="user-1", seen_at="2026-06-13T09:00:00Z")
+            pending.create(
+                PendingWorkoutDeleteRecord(
+                    pending_id="pending-1",
+                    user_id="user-1",
+                    guild_id="guild-1",
+                    channel_id="channel-1",
+                    workout_id="workout-1",
+                    token="AAAAAA",
+                    created_at="2026-06-13T10:00:00Z",
+                    expires_at="2026-06-13T10:01:00Z",
+                    source_event_id="event-1",
+                )
+            )
+            pending.create(
+                PendingWorkoutDeleteRecord(
+                    pending_id="pending-2",
+                    user_id="user-1",
+                    guild_id="guild-1",
+                    channel_id="channel-1",
+                    workout_id="workout-2",
+                    token="BBBBBB",
+                    created_at="2026-06-13T10:00:30Z",
+                    expires_at="2026-06-13T10:01:30Z",
+                    source_event_id="event-2",
+                )
+            )
+
+        latest = pending.latest_for_user("user-1")
+
+        self.assertEqual(latest.pending_id, "pending-2")
+        self.assertEqual(latest.workout_id, "workout-2")
+        self.assertEqual(latest.token, "BBBBBB")
 
     def test_attachments_find_duplicate_by_owner_and_hash(self) -> None:
         users = UsersRepository(self.connection)
@@ -308,6 +349,59 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(len(user_one_artifacts), 1)
         self.assertEqual(user_one_artifacts[0].artifact_id, "artifact-1")
         self.assertEqual(user_one_artifacts[0].metadata["workout_id"], "workout-1")
+
+    def test_latest_visualization_artifact_is_scoped_by_owner_and_channel(self) -> None:
+        users = UsersRepository(self.connection)
+        artifacts = RenderedArtifactsRepository(self.connection)
+
+        with transaction(self.connection):
+            users.touch(user_id="user-1", seen_at="2026-06-13T09:00:00Z")
+            users.touch(user_id="user-2", seen_at="2026-06-13T09:00:00Z")
+            artifacts.add(
+                RenderedArtifactRecord(
+                    artifact_id="artifact-1",
+                    owner_user_id="user-1",
+                    workflow_trace_id=None,
+                    artifact_type="visualization",
+                    filename="chart.png",
+                    content_type="image/png",
+                    storage_path="artifacts/chart.png",
+                    created_at="2026-06-13T10:00:00Z",
+                    metadata={"channel_id": "channel-1", "intent": {"x_metric": "elapsed_s"}},
+                )
+            )
+            artifacts.add(
+                RenderedArtifactRecord(
+                    artifact_id="artifact-2",
+                    owner_user_id="user-1",
+                    workflow_trace_id=None,
+                    artifact_type="visualization",
+                    filename="chart.png",
+                    content_type="image/png",
+                    storage_path="artifacts/chart-2.png",
+                    created_at="2026-06-13T10:01:00Z",
+                    metadata={"channel_id": "channel-2", "intent": {"x_metric": "distance_km"}},
+                )
+            )
+            artifacts.add(
+                RenderedArtifactRecord(
+                    artifact_id="artifact-3",
+                    owner_user_id="user-2",
+                    workflow_trace_id=None,
+                    artifact_type="visualization",
+                    filename="chart.png",
+                    content_type="image/png",
+                    storage_path="artifacts/chart-3.png",
+                    created_at="2026-06-13T10:02:00Z",
+                    metadata={"channel_id": "channel-1", "intent": {"x_metric": "pace_s_per_km"}},
+                )
+            )
+
+        latest_channel_one = artifacts.latest_visualization_for_user("user-1", channel_id="channel-1")
+        latest_any_channel = artifacts.latest_visualization_for_user("user-1")
+
+        self.assertEqual(latest_channel_one.artifact_id, "artifact-1")
+        self.assertEqual(latest_any_channel.artifact_id, "artifact-2")
 
     def test_debug_trace_repository_tracks_trace_lifecycle_and_events(self) -> None:
         traces = DebugTraceRepository(self.connection)

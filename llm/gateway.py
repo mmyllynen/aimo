@@ -15,6 +15,7 @@ class LLMOperation(StrEnum):
     CHAT_REPLY = "chat_reply"
     WORKOUT_REPLY = "workout_reply"
     VISUALIZATION_INTENT = "visualization_intent"
+    VISUALIZATION_INTENT_REVISION = "visualization_intent_revision"
     VISUALIZATION_PLAN = "visualization_plan"
     HISTORY_SUMMARY = "history_summary"
 

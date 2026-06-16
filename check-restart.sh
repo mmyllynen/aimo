@@ -2,10 +2,10 @@
 
 set -e
 
-BOT_DIR="/home/myllymik/chatgpt"
-BOT_SCRIPT="aimo.py"
-CONFIG_FILE="aimo.conf"
-SESSION_NAME="chatgpt"
+BOT_DIR="${AIMO_BOT_DIR:-/opt/aimo}"
+BOT_SCRIPT="${AIMO_BOT_SCRIPT:-aimo.py}"
+CONFIG_FILE="${AIMO_CONFIG_FILE:-aimo.conf}"
+SESSION_NAME="${AIMO_SESSION_NAME:-aimo}"
 FORCE_RESTART=0
 
 if [ "${1:-}" = "--force" ]; then
@@ -24,7 +24,7 @@ screen_session_exists() {
 }
 
 start_bot() {
-    echo "Starting Aimo v3..."
+    echo "Starting Aimo..."
     screen -dmS "$SESSION_NAME" bash -c "
 cd '$BOT_DIR'
 source venv/bin/activate
@@ -38,7 +38,7 @@ stop_bot() {
 }
 
 if [ "$FORCE_RESTART" -eq 1 ]; then
-    echo "Force restarting Aimo v3..."
+    echo "Force restarting Aimo..."
     stop_bot
     sleep 2
     start_bot
@@ -47,12 +47,12 @@ if [ "$FORCE_RESTART" -eq 1 ]; then
 fi
 
 if is_running && screen_session_exists; then
-    echo "Aimo v3 already running with active screen session; nothing to do."
+    echo "Aimo already running with active screen session; nothing to do."
     exit 0
 fi
 
 if screen_session_exists && ! is_running; then
-    echo "Screen session exists but Aimo v3 process is missing; restarting..."
+    echo "Screen session exists but Aimo process is missing; restarting..."
     screen -S "$SESSION_NAME" -X quit >/dev/null 2>&1 || true
     sleep 2
     start_bot
@@ -60,7 +60,7 @@ if screen_session_exists && ! is_running; then
     exit 0
 fi
 
-echo "Aimo v3 not running; starting it now..."
+echo "Aimo not running; starting it now..."
 start_bot
 
 echo "Start complete"

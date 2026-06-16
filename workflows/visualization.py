@@ -9,20 +9,26 @@ from core.i18n import LocalizedText, SupportedLanguage, TranslationKey
 from core.routing import RouteDecision
 from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
 from llm.gateway import LLMGateway, LLMGatewayError
-from llm.operations import VisualizationIntent, VisualizationIntentInput, extract_visualization_intent
-from storage.repositories import RenderedArtifactRecord, WorkoutRecord
+from llm.operations import (
+    VisualizationIntent,
+    VisualizationIntentInput,
+    VisualizationIntentRevisionInput,
+    extract_visualization_intent,
+    revise_visualization_intent,
+)
+from storage.repositories import HeartRateZoneRecord, RenderedArtifactRecord, WorkoutPointRecord, WorkoutRecord
 from storage.files import write_bytes_under
 from storage.unit_of_work import RepositoryBundle
-from visualization.metrics import (
-    infer_metrics_from_text,
-    infer_transforms_from_text,
-    infer_x_metric_from_text,
+from visualization.service import (
+    MissingPrimaryMetricError,
+    VisualizationArtifact,
+    VisualizationSpecInvalidError,
+    render_workout_visualization,
+    visualization_validation_context,
 )
-from visualization.service import MissingPrimaryMetricError, VisualizationSpecInvalidError, render_workout_visualization
 from workout.references import (
     WorkoutReferenceResolution,
     WorkoutReferenceStatus,
-    resolve_workout_reference,
     resolve_workout_selector,
 )
 
@@ -32,6 +38,11 @@ class ResolvedVisualizationRequest:
     workout: WorkoutRecord
     intent: VisualizationIntent
     comparison_workouts: tuple[WorkoutRecord, ...] = ()
+    previous_visualization: dict[str, object] | None = None
+
+
+class MissingHeartRateZonesError(ValueError):
+    pass
 
 
 class VisualizationWorkflow:
@@ -72,20 +83,20 @@ class VisualizationWorkflow:
 
         points = repositories.workout_streams.list_points(resolved.workout.workout_id)
         heart_rate_zones = repositories.heart_rate_zones.list_for_user(event.user_id)
-        if "heart_rate_zone_seconds" in resolved.intent.y_metrics and not heart_rate_zones:
+        try:
+            artifact, rendered_intent = _render_with_optional_revision(
+                event,
+                resolved,
+                points,
+                heart_rate_zones=heart_rate_zones,
+                gateway=gateway,
+            )
+        except MissingHeartRateZonesError:
             return _error_result(
                 WorkflowStatus.USER_ERROR,
                 ErrorCategory.MISSING_METRIC,
                 TranslationKey.HR_ZONES_EMPTY,
                 "Heart-rate zone visualization requested without configured zones",
-            )
-        try:
-            artifact = render_workout_visualization(
-                resolved.workout,
-                points,
-                resolved.intent,
-                heart_rate_zones=heart_rate_zones,
-                comparison_workouts=resolved.comparison_workouts,
             )
         except MissingPrimaryMetricError as exc:
             return _error_result(
@@ -101,6 +112,19 @@ class VisualizationWorkflow:
                 ErrorCategory.VISUALIZATION_PLAN_INVALID,
                 TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID,
                 f"Invalid visualization spec: {exc.reason}",
+            )
+        except LLMGatewayError:
+            return _error_result(
+                WorkflowStatus.SYSTEM_ERROR,
+                ErrorCategory.MODEL_UNAVAILABLE,
+                TranslationKey.ERROR_MODEL_UNAVAILABLE,
+                "Visualization intent revision failed",
+            )
+        if _should_set_current_workout(rendered_intent) and not _is_comparison_intent(rendered_intent):
+            repositories.active_workouts.set(
+                user_id=event.user_id,
+                workout_id=resolved.workout.workout_id,
+                updated_at=event.created_at,
             )
 
         storage_path = f"artifacts/{artifact.filename}"
@@ -121,6 +145,10 @@ class VisualizationWorkflow:
                 created_at=event.created_at.isoformat(),
                 metadata={
                     "workout_id": resolved.workout.workout_id,
+                    "channel_id": event.channel_id,
+                    "source_event_id": event.event_id,
+                    "intent": _intent_payload(rendered_intent),
+                    "comparison_workout_ids": [workout.workout_id for workout in resolved.comparison_workouts],
                     "rendered_metrics": list(artifact.rendered_metrics),
                     "missing_metrics": list(artifact.missing_metrics),
                     "scaled_metrics": list(artifact.scaled_metrics),
@@ -158,7 +186,8 @@ def _resolve_request(
     *,
     gateway: LLMGateway | None,
 ) -> ResolvedVisualizationRequest | str | None:
-    intent = _intent(event, route, gateway)
+    previous_visualization = _previous_visualization_context(event, repositories)
+    intent = _intent(event, route, gateway, previous_visualization=previous_visualization)
     resolved = _resolve_workout(event, intent, repositories)
     if resolved.status == WorkoutReferenceStatus.AMBIGUOUS:
         return "ambiguous"
@@ -171,10 +200,80 @@ def _resolve_request(
         workout=resolved.workout,
         intent=intent,
         comparison_workouts=comparison_workouts,
+        previous_visualization=previous_visualization,
     )
 
 
-def _intent(event: CanonicalEvent, route: RouteDecision, gateway: LLMGateway | None) -> VisualizationIntent:
+def _render_with_optional_revision(
+    event: CanonicalEvent,
+    resolved: ResolvedVisualizationRequest,
+    points: tuple[WorkoutPointRecord, ...],
+    *,
+    heart_rate_zones: tuple[HeartRateZoneRecord, ...],
+    gateway: LLMGateway | None,
+) -> tuple[VisualizationArtifact, VisualizationIntent]:
+    _validate_zone_prerequisite(resolved.intent, heart_rate_zones)
+    try:
+        return (
+            render_workout_visualization(
+                resolved.workout,
+                points,
+                resolved.intent,
+                heart_rate_zones=heart_rate_zones,
+                comparison_workouts=resolved.comparison_workouts,
+            ),
+            resolved.intent,
+        )
+    except VisualizationSpecInvalidError as exc:
+        if gateway is None:
+            raise
+        revision_context = visualization_validation_context(
+            resolved.workout,
+            points,
+            resolved.intent,
+            heart_rate_zones=heart_rate_zones,
+            comparison_workouts=resolved.comparison_workouts,
+        )
+        validation_errors = revision_context.validation_errors or exc.validation_errors
+        revised_intent = revise_visualization_intent(
+            gateway,
+            VisualizationIntentRevisionInput(
+                user_text=event.text,
+                failed_intent=_intent_payload(resolved.intent),
+                validation_errors=validation_errors,
+                dataset_manifest=revision_context.dataset_manifest,
+                allowed_primitives=revision_context.allowed_primitives,
+                previous_visualization=resolved.previous_visualization,
+            ),
+        )
+        _validate_zone_prerequisite(revised_intent, heart_rate_zones)
+        return (
+            render_workout_visualization(
+                resolved.workout,
+                points,
+                revised_intent,
+                heart_rate_zones=heart_rate_zones,
+                comparison_workouts=resolved.comparison_workouts,
+            ),
+            revised_intent,
+        )
+
+
+def _validate_zone_prerequisite(intent: VisualizationIntent, heart_rate_zones: tuple[HeartRateZoneRecord, ...]) -> None:
+    if "heart_rate_zone_seconds" in intent.y_metrics and not heart_rate_zones:
+        raise MissingHeartRateZonesError
+
+
+def _intent(
+    event: CanonicalEvent,
+    route: RouteDecision,
+    gateway: LLMGateway | None,
+    *,
+    previous_visualization: dict[str, object] | None = None,
+) -> VisualizationIntent:
+    structured_intent = _structured_intent(event)
+    if structured_intent is not None:
+        return structured_intent
     if gateway is not None:
         return extract_visualization_intent(
             gateway,
@@ -183,24 +282,91 @@ def _intent(event: CanonicalEvent, route: RouteDecision, gateway: LLMGateway | N
                 compact_routing_context={
                     "route_confidence": route.confidence.value,
                     "route_reason": route.reason,
+                    "has_previous_visualization": previous_visualization is not None,
                 },
+                previous_visualization=previous_visualization,
             ),
         )
-    selector = "active" if "aktiiv" in event.text.lower() or "active" in event.text.lower() else "latest"
-    comparison_mode = "recent" if _comparison_requested_by_text(event.text) else ""
-    metrics = infer_metrics_from_text(event.text)
-    if comparison_mode and metrics == ("heart_rate_bpm",):
-        metrics = ("distance_km",)
-    transforms = infer_transforms_from_text(event.text)
+    raise LLMGatewayError("Visualization intent extraction requires an LLM gateway or structured command options")
+
+
+def _structured_intent(event: CanonicalEvent) -> VisualizationIntent | None:
+    command_name = str(event.metadata.get("command_name", "")).strip().lower()
+    if command_name not in {"visualisointi", "visualization"}:
+        return None
+    options = event.metadata.get("options", {})
+    if not isinstance(options, dict):
+        return None
+    y_metrics = _string_tuple(options.get("y_metrics") or options.get("metrics"))
+    if not y_metrics:
+        return None
+    transforms = _string_tuple(options.get("transforms"))
     return VisualizationIntent(
-        workout_selector={"type": selector},
-        x_metric=infer_x_metric_from_text(event.text),
-        y_metrics=metrics,
+        workout_selector=_structured_selector(options.get("workout_selector") or options.get("selector")),
+        x_metric=str(options.get("x_metric") or "elapsed_s"),
+        y_metrics=y_metrics,
         transforms=transforms,
-        date_range={},
-        comparison_mode=comparison_mode,
-        layout_mode="single_axis" if "normalize_to_primary_range" in transforms else "auto",
+        date_range=options.get("date_range") if isinstance(options.get("date_range"), dict) else {},
+        comparison_mode=str(options.get("comparison_mode") or ""),
+        layout_mode=str(options.get("layout_mode") or "auto"),
+        chart_kind=str(options.get("chart_kind") or "auto"),
+        context_update={"set_current_workout": bool(options.get("set_current_workout", False))},
     )
+
+
+def _structured_selector(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        return {"type": "id", "value": value.strip()}
+    return {"type": "latest"}
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    if isinstance(value, list | tuple):
+        return tuple(str(part).strip() for part in value if str(part).strip())
+    return ()
+
+
+def _previous_visualization_context(
+    event: CanonicalEvent,
+    repositories: RepositoryBundle,
+) -> dict[str, object] | None:
+    artifact = repositories.rendered_artifacts.latest_visualization_for_user(
+        event.user_id,
+        channel_id=event.channel_id,
+    )
+    if artifact is None:
+        return None
+    metadata = artifact.metadata
+    intent = metadata.get("intent")
+    if not isinstance(intent, dict):
+        return None
+    return {
+        "artifact_id": artifact.artifact_id,
+        "workout_id": metadata.get("workout_id", ""),
+        "channel_id": metadata.get("channel_id", ""),
+        "intent": intent,
+        "rendered_metrics": metadata.get("rendered_metrics", []),
+        "scaled_metrics": metadata.get("scaled_metrics", []),
+        "comparison_workout_ids": metadata.get("comparison_workout_ids", []),
+    }
+
+
+def _intent_payload(intent: VisualizationIntent) -> dict[str, object]:
+    return {
+        "workout_selector": intent.workout_selector,
+        "x_metric": intent.x_metric,
+        "y_metrics": list(intent.y_metrics),
+        "transforms": list(intent.transforms),
+        "date_range": intent.date_range,
+        "comparison_mode": intent.comparison_mode,
+        "layout_mode": intent.layout_mode,
+        "chart_kind": intent.chart_kind,
+        "context_update": intent.context_update,
+    }
 
 
 def _resolve_workout(
@@ -210,8 +376,6 @@ def _resolve_workout(
 ) -> WorkoutReferenceResolution:
     selector = intent.workout_selector
     resolved = resolve_workout_selector(repositories, event.user_id, selector, default="latest")
-    if resolved.status == WorkoutReferenceStatus.NOT_FOUND and isinstance(selector, dict) and not selector.get("value"):
-        return resolve_workout_reference(repositories, event.user_id, event.text, default="latest")
     return resolved
 
 
@@ -222,11 +386,11 @@ def _comparison_workouts(
 ) -> tuple[WorkoutRecord, ...]:
     if not _is_comparison_intent(intent):
         return ()
-    count = _comparison_count(intent, event.text)
+    count = _comparison_count(intent)
     return repositories.workouts.list_for_user(event.user_id, limit=count)
 
 
-def _comparison_count(intent: VisualizationIntent, text: str) -> int:
+def _comparison_count(intent: VisualizationIntent) -> int:
     selector = intent.workout_selector
     if isinstance(selector, dict):
         count = selector.get("count") or selector.get("limit")
@@ -234,9 +398,6 @@ def _comparison_count(intent: VisualizationIntent, text: str) -> int:
             return min(count, 10)
         if isinstance(count, str) and count.isdecimal() and int(count) > 1:
             return min(int(count), 10)
-    normalized = text.lower()
-    if "three" in normalized or "kolme" in normalized:
-        return 3
     return 2
 
 
@@ -245,17 +406,9 @@ def _is_comparison_intent(intent: VisualizationIntent) -> bool:
     return comparison not in {"", "none", "single"}
 
 
-def _comparison_requested_by_text(text: str) -> bool:
-    normalized = text.lower()
-    return (
-        "vertaa" in normalized
-        or "compare" in normalized
-        or "comparison" in normalized
-        or "kahta" in normalized
-        or "kaksi" in normalized
-        or "two " in normalized
-        or "last two" in normalized
-    )
+def _should_set_current_workout(intent: VisualizationIntent) -> bool:
+    update = intent.context_update
+    return isinstance(update, dict) and update.get("set_current_workout") is True
 
 
 def _error_result(

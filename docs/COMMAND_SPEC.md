@@ -1,16 +1,16 @@
-# Aimo v3 Command Spec
+# Aimo Command Spec
 
-## Command Surfaces
+## Surfaces
 
 Aimo supports:
 
-- public mentions
-- GPX attachments on supported inputs
+- public `@Aimo` mentions in allowed guild channels
+- GPX attachments on supported mention/slash inputs
 - `/aimo`
 - `/treenit`
 - `/debug`
 
-All slash commands must be deterministic unless they explicitly forward text to a workflow that uses the LLM.
+Direct messages are rejected. Slash commands should be registered for configured allowed guilds when a guild allowlist exists.
 
 ## Mentions
 
@@ -23,27 +23,26 @@ Pattern:
 Behavior:
 
 - Normalize to a canonical mention event.
+- Strip Aimo's own mention before workflow handling.
 - Store inbound history.
-- Route to chat, workout chat, GPX ingest, visualization, help, or debug as appropriate.
-- Send public response unless workflow requires ephemeral output.
-
-Mention safety:
-
-- Strip Aimo's own mention from text before workflow handling.
+- Route to help, chat, workout chat, GPX ingest, visualization, or debug as appropriate.
+- Send a public response unless the workflow requires restricted output.
 - Disable broad mentions in outgoing messages.
+
+Normal non-mention guild messages may be persisted as history but must not produce a response.
 
 ## Attachments
 
 Supported:
 
 - `.gpx`
-- GPX XML content with common GPX content types
+- common GPX/XML content types
 
 Behavior:
 
 - Attachment handling is deterministic.
-- Invalid attachments produce a stable error summary.
-- Multiple attachments are processed independently.
+- Invalid attachments produce stable localized errors.
+- Multiple attachments should be processed independently when supported by the command surface.
 
 ## `/aimo`
 
@@ -51,129 +50,67 @@ Purpose: general Aimo command surface.
 
 Parameters:
 
-- `liite`: attachment, optional
-- `syote`: string, optional
+- `syote`: optional text request
+- `liite`: optional GPX attachment
 
 Behavior:
 
-- If no useful parameter is present, return help text.
-- If `liite` is present, run GPX ingest for that attachment.
-- If `syote` is present, route it as a canonical user request.
-
-Visibility:
-
-- Help may be ephemeral.
-- Routed text may be public or ephemeral depending on adapter mode.
-- Attachment ingest response follows command visibility policy.
+- No useful parameter: return help.
+- `liite`: run GPX ingest.
+- `syote`: route as a canonical user request.
 
 ## `/treenit`
 
 Purpose: deterministic workout management.
 
-Parameter:
-
-- `toiminto`: one of the supported actions
-- optional `viite`: workout id, list number, date, tag, or search reference
-- optional HR zone fields for zone configuration
-
-Supported actions:
+Subcommands:
 
 - `listaa`
-- `nayta`
+- `nayta` with optional `viite`: workout id, list number, date, tag, kind, or title/search text
 - `aktiivinen`
-- `aseta_aktiivinen`
-- `poista`
+- `aseta_aktiivinen` with optional `viite`
+- `poista` with optional `viite`
 - `sykerajat`
-- `aseta_sykerajat`
+- `aseta_sykerajat` with optional `zones`: max heart rate or five increasing BPM upper limits
 
-Action behavior:
+Action rules:
 
-### `listaa`
+- `listaa`: recent workouts for the current user with numbering, compact metrics, and a marker for the current workout when one is set.
+- `nayta`: details for one resolved workout; the shown workout becomes the current workout context.
+- `aktiivinen`: current active workout.
+- `aseta_aktiivinen`: set active workout by reference.
+- `poista`: first request creates a delete confirmation for one safely resolved user-owned workout; deletion happens only when the same user presses the confirm button within 60 seconds. The cancel button clears the pending delete.
+- `sykerajat`: show current HR zones.
+- `aseta_sykerajat`: update zones from one max-HR value or five increasing BPM upper limits.
 
-Returns recent workouts for the current user.
+Workout management replies should usually be ephemeral unless an explicit public mode is added later.
 
-### `nayta`
-
-Shows details for one workout resolved by `viite`.
-
-### `aktiivinen`
-
-Shows the active workout.
-
-### `aseta_aktiivinen`
-
-Sets active workout by `viite`.
-
-### `poista`
-
-Deletes a user-owned workout by exact id or safely resolved reference.
-
-Deletion policy:
-
-- If ambiguous, clarify.
-- If exact and command semantics are explicit, delete.
-- If future UI supports confirmation, prefer confirmation for destructive actions.
-
-### `sykerajat`
-
-Shows current HR zones.
-
-### `aseta_sykerajat`
-
-Updates HR zones from explicit numeric limits.
-
-Accepted input forms:
-
-- one integer: max heart rate; Aimo derives pk1, pk2, vk1, vk2, and mk upper limits from it
-- five increasing integers: manual upper limits for pk1, pk2, vk1, vk2, and mk
-
-Validation:
-
-- Zone limits must be increasing.
-- Values must be plausible positive BPM values.
-
-Visibility:
-
-- Workout management slash replies should usually be ephemeral unless a public mode is explicitly requested later.
+The current workout is primarily a background context, not a concept users must manage explicitly. The explicit active commands may remain available for deterministic control, but normal selection should happen through GPX ingest, `nayta`, or LLM-resolved workout references.
 
 ## `/debug`
 
-Purpose: return structured trace information.
+Purpose: restricted trace export.
 
 Parameters:
 
-- optional `tila` or mode selector
+- optional mode selector (`tila`)
 
 Behavior:
 
-- Return latest trace relevant to the user/channel.
-- Admin users may access broader traces if configured.
-- Output is an attached JSON artifact when large.
-- Secrets and large raw data must be redacted.
+- Return latest relevant trace.
+- Admin users may access broader traces.
+- Output JSON artifact when large.
+- Redact secrets and large raw payloads.
+- Always restricted/ephemeral where Discord supports it.
 
-Visibility:
-
-- Always ephemeral or restricted.
-
-## Help Text Requirements
-
-Help text must explain:
-
-- how to mention Aimo
-- how to upload GPX
-- how to list/manage workouts
-- how to ask for visualizations
-- that Aimo stores operational user/workout/history data
-- that answers and visualizations are best-effort
-
-## Error Response Requirements
+## Error Responses
 
 Command errors should be:
 
 - short
 - in the configured bot language
-- specific
-- non-technical unless debug mode is requested
+- specific enough to act on
+- non-technical unless debug output is requested
 
 Examples:
 
@@ -186,5 +123,5 @@ Tuo liite ei näytä kelvolliselta GPX-tiedostolta.
 ```
 
 ```text
-Viimeisimmässä treenissä ei ole sykedataa, joten en voi piirtää sykekäyrää siitä.
+Treenistä puuttuu tarvittava mittari: heart_rate_bpm.
 ```

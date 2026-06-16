@@ -2,15 +2,16 @@
 
 ## Purpose
 
-This document defines the one-way JSON import format for bringing previously exported user/runtime data into Aimo v3 storage.
+This document defines the one-way JSON import format for bringing exported user/runtime data into Aimo storage.
 
-The importer is intentionally conservative:
+The importer is conservative:
 
-- it validates ownership before writing
-- it supports dry-run mode
-- it produces a count-based report
-- it does not delete source data
-- it does not copy, move, rewrite, or delete raw GPX files
+- validates ownership before writing
+- supports dry-run mode
+- reports imported counts
+- rejects conflicting primary keys
+- does not delete source data
+- does not copy, move, or mutate raw GPX files
 
 ## Format
 
@@ -30,7 +31,7 @@ Top-level JSON object:
 }
 ```
 
-All collections are optional lists. Unknown top-level keys are ignored.
+`aimo.v3.import.v1` is the current stable import format id. Collections are optional lists. Unknown top-level keys are ignored.
 
 ## Collections
 
@@ -133,7 +134,7 @@ Optional:
 
 The owner must exist in `users`. If `channel_id` is present, the channel must exist in `channels`.
 
-`raw_path` is stored as a reference only. `source_path` may be included for operator reporting, but the importer does not read or mutate the referenced file.
+`raw_path` is stored as a reference only. `source_path` may be included for operator reporting, but the importer does not read or mutate it.
 
 ### workouts
 

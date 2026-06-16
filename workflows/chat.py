@@ -131,6 +131,13 @@ def _capability_facts() -> dict[str, object]:
             "available_in_public_mention": True,
             "behavior": "Answer coaching questions from stored workout summaries when the workflow provides them.",
         },
+        "visualization": {
+            "available_in_public_mention": True,
+            "behavior": (
+                "Render workout charts from stored workout data when the router selects the visualization workflow. "
+                "Chart requests should not be answered as generic chat."
+            ),
+        },
         "workout_management": {
             "available_via": "/treenit",
             "actions": (
@@ -142,7 +149,7 @@ def _capability_facts() -> dict[str, object]:
                 "sykerajat",
                 "aseta_sykerajat",
             ),
-            "list_command": "/treenit toiminto:listaa",
+            "list_command": "/treenit listaa",
             "private_by_default": True,
             "public_chat_behavior": (
                 "Do not list or expose a user's workout library in public chat. "

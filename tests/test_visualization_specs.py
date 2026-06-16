@@ -5,35 +5,45 @@ import unittest
 from llm.operations import VisualizationIntent
 from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
 from visualization.datasets import dataset_request_from_metrics, resolve_datasets
-from visualization.metrics import infer_transforms_from_text
 from visualization.render import (
     MARKER_POINT_LIMIT,
     Axis,
+    PieChart,
+    PieSlice,
     RenderSeries,
     _background,
+    _chart_frame,
+    _downsample,
+    _pie_radius,
     _show_markers,
     _axis,
-    _format_tick,
     _fill_short_gaps,
+    _format_tick,
     _prepare_render_series,
     _robust_axis,
     _scale_y,
     _time_axis,
+    render_pie_chart_png,
 )
 from visualization.specs import (
     Encoding,
     MissingRenderableDataError,
+    TransformNotApplicableError,
     UnsupportedColumnError,
+    UnsupportedMarkError,
     UnsupportedTransformError,
     VisualizationSpec,
     compile_visualization_spec,
+    visualization_validation_issue,
 )
 from visualization.service import (
     _aggregate_bars,
     _apply_rolling_average,
+    _color_hint,
     _effective_layout_mode,
     _explicit_smooth_window,
     _invert_y_axis,
+    _bar_tick_format,
     _should_render_metric_aggregate_bars,
     _transformed_rows,
     render_workout_visualization,
@@ -46,7 +56,7 @@ class VisualizationSpecTests(unittest.TestCase):
         pixels = _background(1, 3)
 
         self.assertNotEqual(bytes(pixels[0:3]), bytes(pixels[-3:]))
-        self.assertGreaterEqual(min(pixels), 244)
+        self.assertGreaterEqual(min(pixels), 232)
 
     def test_dense_series_hides_markers_without_metric_specific_rule(self) -> None:
         dense = tuple(float(index) for index in range(MARKER_POINT_LIMIT + 1))
@@ -79,6 +89,47 @@ class VisualizationSpecTests(unittest.TestCase):
     def test_pace_ticks_render_as_minutes_per_kilometer(self) -> None:
         self.assertEqual(_format_tick(330, tick_format="pace"), "5:30")
         self.assertEqual(_format_tick(360, tick_format="pace"), "6:00")
+
+    def test_percentage_ticks_render_with_percent_suffix(self) -> None:
+        self.assertEqual(_format_tick(25, tick_format="percentage"), "25%")
+        self.assertEqual(_format_tick(12.5, tick_format="percentage"), "12.5%")
+
+    def test_chart_frame_reserves_right_sidebar(self) -> None:
+        frame = _chart_frame(900, 520)
+
+        self.assertGreaterEqual(frame.sidebar_left, 650)
+        self.assertLess(frame.plot_right, frame.sidebar_left)
+        self.assertGreaterEqual(frame.sidebar_right - frame.sidebar_left, 220)
+        self.assertEqual(frame.sidebar_top, 0)
+        self.assertEqual(frame.sidebar_right, 899)
+        self.assertEqual(frame.sidebar_bottom, 519)
+
+    def test_downsample_averages_supersampled_pixels(self) -> None:
+        pixels = bytearray(
+            (
+                0,
+                0,
+                0,
+                100,
+                0,
+                0,
+                0,
+                100,
+                0,
+                0,
+                0,
+                100,
+            )
+        )
+
+        self.assertEqual(tuple(_downsample(pixels, 1, 1, scale=2)), (25, 25, 25))
+
+    def test_pie_radius_uses_available_plot_area(self) -> None:
+        frame = _chart_frame(900, 520)
+        center_x = (frame.plot_left + frame.plot_right) // 2
+        center_y = (frame.plot_top + frame.plot_bottom) // 2 + 8
+
+        self.assertGreater(_pie_radius(frame, center_x, center_y, scale=1, has_value_label=True), 170)
 
     def test_inverted_y_scale_places_smaller_values_higher(self) -> None:
         normal_fast = _scale_y(300, (300, 600), 100, 0, invert=False)
@@ -146,10 +197,10 @@ class VisualizationSpecTests(unittest.TestCase):
 
         self.assertFalse(series.smoothed)
 
-    def test_dataset_request_canonicalizes_metric_aliases(self) -> None:
+    def test_dataset_request_normalizes_canonical_metric_ids(self) -> None:
         request = dataset_request_from_metrics(
-            x_metric="aika",
-            y_metrics=("syke", "vauhti"),
+            x_metric=" ELAPSED_S ",
+            y_metrics=(" HEART_RATE_BPM ", "PACE_S_PER_KM"),
             transforms=("normalize_to_primary_range",),
         )
 
@@ -218,8 +269,93 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(spec.x.column_id, "zone_label")
         self.assertEqual(spec.y[0].column_id, "heart_rate_zone_seconds")
 
+    def test_percentage_transform_is_valid_for_categorical_numeric_bars(self) -> None:
+        request = dataset_request_from_metrics(
+            x_metric="heart_rate_zone_seconds",
+            y_metrics=("heart_rate_zone_seconds",),
+            transforms=("as_percentage_of_total",),
+        )
+        manifest = resolve_datasets(
+            request,
+            points=(
+                WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, heart_rate_bpm=120),
+                WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=60, heart_rate_bpm=130),
+                WorkoutPointRecord(workout_id="w", point_index=2, elapsed_s=180, heart_rate_bpm=140),
+            ),
+            heart_rate_zones=(
+                HeartRateZoneRecord(user_id="u", zone_key="z1", label="pk1", upper_bpm=124),
+                HeartRateZoneRecord(user_id="u", zone_key="z2", label="pk2", lower_bpm=125, upper_bpm=134),
+                HeartRateZoneRecord(user_id="u", zone_key="z3", label="vk1", lower_bpm=135),
+            ),
+        )
+
+        spec = compile_visualization_spec(request, manifest)
+        rows = _transformed_rows(spec, manifest.dataset("hr_zone_distribution"))
+
+        self.assertEqual(spec.mark, "bar")
+        self.assertEqual(_bar_tick_format(spec), "percentage")
+        self.assertEqual([round(row["heart_rate_zone_seconds"], 1) for row in rows], [33.3, 66.7, 0.0])
+        self.assertEqual([row["color_hint"] for row in rows], ["blue", "yellow", "red"])
+
+    def test_compile_spec_selects_pie_mark_from_explicit_chart_kind_for_categorical_values(self) -> None:
+        request = dataset_request_from_metrics(
+            x_metric="heart_rate_zone_seconds",
+            y_metrics=("heart_rate_zone_seconds",),
+            transforms=("as_percentage_of_total",),
+            chart_kind="pie",
+        )
+        manifest = resolve_datasets(
+            request,
+            points=(
+                WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, heart_rate_bpm=120),
+                WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=60, heart_rate_bpm=130),
+            ),
+            heart_rate_zones=(
+                HeartRateZoneRecord(user_id="u", zone_key="z1", label="Easy", upper_bpm=124),
+                HeartRateZoneRecord(user_id="u", zone_key="z2", label="Steady", lower_bpm=125),
+            ),
+        )
+
+        spec = compile_visualization_spec(request, manifest)
+
+        self.assertEqual(spec.mark, "pie")
+        self.assertEqual(spec.x.column_id, "zone_label")
+        self.assertEqual(spec.y[0].column_id, "heart_rate_zone_seconds")
+
+    def test_compile_spec_rejects_pie_mark_for_continuous_axis(self) -> None:
+        request = dataset_request_from_metrics(
+            x_metric="elapsed_s",
+            y_metrics=("heart_rate_bpm",),
+            transforms=(),
+            chart_kind="pie",
+        )
+        manifest = resolve_datasets(
+            request,
+            points=(WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, heart_rate_bpm=120),),
+        )
+
+        with self.assertRaises(TransformNotApplicableError):
+            compile_visualization_spec(request, manifest)
+
+    def test_percentage_transform_is_rejected_for_line_charts(self) -> None:
+        request = dataset_request_from_metrics(
+            x_metric="elapsed_s",
+            y_metrics=("heart_rate_bpm",),
+            transforms=("as_percentage_of_total",),
+        )
+        manifest = resolve_datasets(
+            request,
+            points=(
+                WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, heart_rate_bpm=120),
+                WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=60, heart_rate_bpm=130),
+            ),
+        )
+
+        with self.assertRaises(TransformNotApplicableError):
+            compile_visualization_spec(request, manifest)
+
     def test_compile_spec_selects_workout_summary_dataset_for_summary_metric(self) -> None:
-        request = dataset_request_from_metrics(x_metric="elapsed_s", y_metrics=("duration",), transforms=())
+        request = dataset_request_from_metrics(x_metric="elapsed_s", y_metrics=("duration_s",), transforms=())
         manifest = resolve_datasets(request, points=(), workout=_workout(duration_s=3600, distance_km=10.0))
 
         spec = compile_visualization_spec(request, manifest)
@@ -278,6 +414,27 @@ class VisualizationSpecTests(unittest.TestCase):
         )
         with self.assertRaises(UnsupportedTransformError):
             compile_visualization_spec(bad_transform, manifest)
+
+    def test_compile_spec_rejects_unknown_chart_kind_with_safe_validation_issue(self) -> None:
+        request = dataset_request_from_metrics(
+            x_metric="elapsed_s",
+            y_metrics=("heart_rate_bpm",),
+            transforms=(),
+            chart_kind="scatter",
+        )
+        manifest = resolve_datasets(
+            request,
+            points=(WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, heart_rate_bpm=120),),
+        )
+
+        with self.assertRaises(UnsupportedMarkError) as caught:
+            compile_visualization_spec(request, manifest)
+
+        issue = visualization_validation_issue(caught.exception, manifest).to_model_error()
+        self.assertEqual(issue["code"], "unsupported_mark")
+        self.assertEqual(issue["path"], "chart_kind")
+        self.assertEqual(issue["value"], "scatter")
+        self.assertIn("pie", issue["allowed_values"])
 
     def test_compile_spec_rejects_missing_renderable_metric_data(self) -> None:
         request = dataset_request_from_metrics(x_metric="elapsed_s", y_metrics=("heart_rate_bpm",), transforms=())
@@ -358,15 +515,6 @@ class VisualizationSpecTests(unittest.TestCase):
         rows = _transformed_rows(spec, manifest.dataset("workout_points"))
 
         self.assertEqual(tuple(row["elapsed_s"] for row in rows), (0, 180))
-
-    def test_infer_transforms_detects_normalize_and_smoothing(self) -> None:
-        transforms = infer_transforms_from_text("piirra syke tasoitettuna ja vauhti skaalattuna samaan kuvaajaan")
-
-        self.assertEqual(transforms, ("normalize_to_primary_range", "rolling_average"))
-
-    def test_infer_transforms_detects_aggregation(self) -> None:
-        self.assertEqual(infer_transforms_from_text("näytä sykkeen keskiarvo"), ("aggregate_avg",))
-        self.assertEqual(infer_transforms_from_text("näytä nousu yhteensä"), ("aggregate_sum",))
 
     def test_rolling_average_smooths_numeric_series_without_filling_missing_values(self) -> None:
         smoothed = _apply_rolling_average(
@@ -523,6 +671,44 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertFalse(_should_render_metric_aggregate_bars(spec, dataset))
         self.assertEqual(tuple(row["zone_label"] for row in dataset.rows), ("pk1", "pk2", "vk1"))
 
+    def test_pie_chart_renderer_outputs_png_for_generic_slices(self) -> None:
+        content = render_pie_chart_png(
+            PieChart(
+                title="Generic distribution",
+                slices=(
+                    PieSlice(label="A", value=2),
+                    PieSlice(label="B", value=3),
+                    PieSlice(label="C", value=5),
+                ),
+                value_label="Value",
+            )
+        )
+
+        self.assertTrue(content.startswith(b"\x89PNG"))
+        self.assertGreater(len(content), 1000)
+
+    def test_pie_chart_renderer_accepts_zero_value_legend_items(self) -> None:
+        content = render_pie_chart_png(
+            PieChart(
+                title="Generic distribution",
+                slices=(
+                    PieSlice(label="A", value=2),
+                    PieSlice(label="B", value=0),
+                    PieSlice(label="C", value=3),
+                ),
+                value_label="Share of total (%)",
+                value_format="percentage",
+            )
+        )
+
+        self.assertTrue(content.startswith(b"\x89PNG"))
+        self.assertGreater(len(content), 1000)
+
+    def test_named_and_hex_color_hints_are_metadata_driven(self) -> None:
+        self.assertEqual(_color_hint("green"), (22, 163, 74))
+        self.assertEqual(_color_hint("#123abc"), (18, 58, 188))
+        self.assertIsNone(_color_hint("not-a-color"))
+
     def test_render_workout_summary_metric_without_point_rows(self) -> None:
         artifact = render_workout_visualization(
             _workout(duration_s=3600, distance_km=10.0),
@@ -633,6 +819,58 @@ class VisualizationSpecTests(unittest.TestCase):
             comparison_workouts=(
                 _workout(workout_id="w1", title="Run 1", distance_km=5.0),
                 _workout(workout_id="w2", title="Run 2", distance_km=7.0),
+            ),
+        )
+
+        self.assertEqual(artifact.content_type, "image/png")
+        self.assertTrue(artifact.content.startswith(b"\x89PNG"))
+        self.assertEqual(artifact.rendered_metrics, ("distance_km",))
+
+    def test_render_explicit_pie_chart_for_categorical_numeric_dataset(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(duration_s=120, distance_km=0.5),
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, heart_rate_bpm=100),
+                WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=60, heart_rate_bpm=130),
+                WorkoutPointRecord(workout_id="w", point_index=2, elapsed_s=120, heart_rate_bpm=150),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="heart_rate_zone_seconds",
+                y_metrics=("heart_rate_zone_seconds",),
+                transforms=("as_percentage_of_total",),
+                date_range={},
+                comparison_mode="",
+                chart_kind="pie",
+            ),
+            heart_rate_zones=(
+                HeartRateZoneRecord(user_id="u", zone_key="z1", label="Easy", upper_bpm=119),
+                HeartRateZoneRecord(user_id="u", zone_key="z2", label="Steady", lower_bpm=120, upper_bpm=139),
+                HeartRateZoneRecord(user_id="u", zone_key="z3", label="Hard", lower_bpm=140),
+            ),
+        )
+
+        self.assertEqual(artifact.content_type, "image/png")
+        self.assertTrue(artifact.content.startswith(b"\x89PNG"))
+        self.assertEqual(artifact.rendered_metrics, ("heart_rate_zone_seconds",))
+
+    def test_render_explicit_pie_chart_for_comparison_metric_dataset(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(workout_id="w1", title="Run 1", distance_km=5.0),
+            (),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="workout_title",
+                y_metrics=("distance_km",),
+                transforms=(),
+                date_range={},
+                comparison_mode="recent",
+                chart_kind="pie",
+            ),
+            comparison_workouts=(
+                _workout(workout_id="w1", title="Run 1", distance_km=5.0),
+                _workout(workout_id="w2", title="Run 2", distance_km=7.0),
+                _workout(workout_id="w3", title="Run 3", distance_km=8.0),
             ),
         )
 

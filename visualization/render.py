@@ -8,12 +8,22 @@ from dataclasses import dataclass
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 COLORS = (
-    (26, 95, 180),
-    (210, 75, 65),
-    (40, 145, 90),
-    (145, 90, 180),
+    (37, 99, 235),
+    (22, 163, 74),
+    (234, 179, 8),
+    (249, 115, 22),
+    (220, 38, 38),
+    (124, 58, 237),
+    (8, 145, 178),
+    (190, 24, 93),
 )
 MARKER_POINT_LIMIT = 80
+RENDER_SCALE = 2
+TEXT = (34, 39, 46)
+MUTED_TEXT = (91, 99, 112)
+GRID = (219, 225, 232)
+SIDEBAR_BG = (237, 241, 246)
+SIDEBAR_BORDER = (210, 218, 228)
 
 
 @dataclass(frozen=True)
@@ -65,6 +75,7 @@ class MultiPanelLineChart:
 class Bar:
     label: str
     value: float
+    color: tuple[int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -79,14 +90,58 @@ class BarChart:
     height: int = 520
 
 
+@dataclass(frozen=True)
+class PieSlice:
+    label: str
+    value: float
+    color: tuple[int, int, int] | None = None
+
+
+@dataclass(frozen=True)
+class PieChart:
+    title: str
+    slices: tuple[PieSlice, ...]
+    subtitle: str = ""
+    value_label: str = ""
+    value_format: str = "number"
+    width: int = 900
+    height: int = 520
+
+
+@dataclass(frozen=True)
+class ChartFrame:
+    title_x: int
+    title_y: int
+    subtitle_y: int
+    plot_left: int
+    plot_top: int
+    plot_right: int
+    plot_bottom: int
+    sidebar_left: int
+    sidebar_top: int
+    sidebar_right: int
+    sidebar_bottom: int
+
+
+@dataclass(frozen=True)
+class LegendItem:
+    label: str
+    color: tuple[int, int, int]
+    value: float | None = None
+    value_format: str = "number"
+    note: str = ""
+    line: bool = False
+
+
 def render_line_chart_png(chart: LineChart) -> bytes:
-    pixels = _background(chart.width, chart.height)
-    left, top, right, bottom = 92, 92, chart.width - 34, chart.height - 72
-    _draw_chart_text(pixels, chart.width, 24, 18, chart.title, (24, 24, 24), scale=2)
-    if chart.subtitle:
-        _draw_chart_text(pixels, chart.width, 24, 42, chart.subtitle, (90, 90, 90), scale=1)
-    _line(pixels, chart.width, left, bottom, right, bottom, (30, 30, 30))
-    _line(pixels, chart.width, left, top, left, bottom, (30, 30, 30))
+    scale = RENDER_SCALE
+    width, height = chart.width * scale, chart.height * scale
+    pixels = _background(width, height)
+    frame = _chart_frame(width, height, scale=scale)
+    _draw_frame(pixels, width, height, frame, chart.title, chart.subtitle, scale=scale, draw_text=False)
+    left, top, right, bottom = frame.plot_left, frame.plot_top, frame.plot_right, frame.plot_bottom
+    _line(pixels, width, left, bottom, right, bottom, (30, 30, 30))
+    _line(pixels, width, left, top, left, bottom, (30, 30, 30))
 
     x_axis = _time_axis(chart.x_values, target_ticks=6) if chart.x_tick_format == "duration" else _axis(chart.x_values, target_ticks=6)
     y_values = tuple(value for series in chart.series for value in series.values)
@@ -97,10 +152,10 @@ def render_line_chart_png(chart: LineChart) -> bytes:
     y_label = chart.y_label
     if len(render_series) == 1:
         y_label = _label_with_suffixes(y_label, render_series[0])
-    _draw_x_axis(pixels, chart.width, left, right, bottom, x_axis, chart.x_label, tick_format=chart.x_tick_format)
+    _draw_x_axis(pixels, width, left, right, bottom, x_axis, chart.x_label, tick_format=chart.x_tick_format, scale=scale, draw_text=False)
     _draw_y_axis(
         pixels,
-        chart.width,
+        width,
         left,
         top,
         bottom,
@@ -108,9 +163,10 @@ def render_line_chart_png(chart: LineChart) -> bytes:
         y_label,
         tick_format=chart.y_tick_format,
         invert_y=chart.invert_y,
+        grid_right=right,
+        scale=scale,
+        draw_text=False,
     )
-    if len(render_series) > 1:
-        _draw_legend(pixels, chart.width, render_series, right - 190, 18)
     for index, series in enumerate(render_series):
         color = COLORS[index % len(COLORS)]
         previous: tuple[int, int] | None = None
@@ -122,38 +178,66 @@ def render_line_chart_png(chart: LineChart) -> bytes:
             x = _scale(x_value, x_axis.domain, left, right)
             y = _scale_y(y_value, y_axis.domain, bottom, top, invert=chart.invert_y)
             if previous is not None:
-                _line(pixels, chart.width, previous[0], previous[1], x, y, color)
+                _stroke_line(pixels, width, previous[0], previous[1], x, y, color, stroke=scale)
             if show_markers:
-                _dot(pixels, chart.width, x, y, color)
+                _dot(pixels, width, x, y, color, scale=scale)
             previous = (x, y)
-    return _png(chart.width, chart.height, pixels)
+    output = _downsample(pixels, chart.width, chart.height, scale=scale)
+    output_frame = _chart_frame(chart.width, chart.height)
+    output_left, output_top, output_right, output_bottom = (
+        output_frame.plot_left,
+        output_frame.plot_top,
+        output_frame.plot_right,
+        output_frame.plot_bottom,
+    )
+    _draw_frame(output, chart.width, chart.height, output_frame, chart.title, chart.subtitle, draw_panel=False)
+    _draw_x_axis(output, chart.width, output_left, output_right, output_bottom, x_axis, chart.x_label, tick_format=chart.x_tick_format, draw_lines=False)
+    _draw_y_axis(
+        output,
+        chart.width,
+        output_left,
+        output_top,
+        output_bottom,
+        y_axis,
+        y_label,
+        tick_format=chart.y_tick_format,
+        invert_y=chart.invert_y,
+        grid_right=output_right,
+        draw_lines=False,
+    )
+    _draw_sidebar_legend(output, chart.width, output_frame, _line_legend_items(render_series), title="Legend")
+    return _png(chart.width, chart.height, output)
 
 
 def render_multi_panel_line_chart_png(chart: MultiPanelLineChart) -> bytes:
-    pixels = _background(chart.width, chart.height)
-    left, top, right, bottom = 92, 92, chart.width - 34, chart.height - 72
-    _draw_chart_text(pixels, chart.width, 24, 18, chart.title, (24, 24, 24), scale=2)
-    if chart.subtitle:
-        _draw_chart_text(pixels, chart.width, 24, 42, chart.subtitle, (90, 90, 90), scale=1)
+    scale = RENDER_SCALE
+    width, height = chart.width * scale, chart.height * scale
+    pixels = _background(width, height)
+    frame = _chart_frame(width, height, scale=scale)
+    _draw_frame(pixels, width, height, frame, chart.title, chart.subtitle, scale=scale, draw_text=False)
+    left, top, right, bottom = frame.plot_left, frame.plot_top, frame.plot_right, frame.plot_bottom
     if not chart.panels:
-        return _png(chart.width, chart.height, pixels)
+        output = _downsample(pixels, chart.width, chart.height, scale=scale)
+        output_frame = _chart_frame(chart.width, chart.height)
+        _draw_frame(output, chart.width, chart.height, output_frame, chart.title, chart.subtitle, draw_panel=False)
+        return _png(chart.width, chart.height, output)
 
     x_axis = _time_axis(chart.x_values, target_ticks=6) if chart.x_tick_format == "duration" else _axis(chart.x_values, target_ticks=6)
-    gap = 26
+    gap = 26 * scale
     panel_count = len(chart.panels)
     panel_height = max(72, (bottom - top - gap * (panel_count - 1)) // panel_count)
     for index, panel in enumerate(chart.panels):
         panel_top = top + index * (panel_height + gap)
         panel_bottom = panel_top + panel_height
-        _line(pixels, chart.width, left, panel_bottom, right, panel_bottom, (30, 30, 30))
-        _line(pixels, chart.width, left, panel_top, left, panel_bottom, (30, 30, 30))
+        _line(pixels, width, left, panel_bottom, right, panel_bottom, (30, 30, 30))
+        _line(pixels, width, left, panel_top, left, panel_bottom, (30, 30, 30))
         preliminary_y_axis = _robust_axis(panel.series.values, target_ticks=5)
         render_series = _prepare_render_series(panel.series, preliminary_y_axis)
         y_axis = _robust_axis(render_series.values, target_ticks=5)
         label = _label_with_suffixes(panel.y_label, render_series)
         _draw_y_axis(
             pixels,
-            chart.width,
+            width,
             left,
             panel_top,
             panel_bottom,
@@ -161,10 +245,13 @@ def render_multi_panel_line_chart_png(chart: MultiPanelLineChart) -> bytes:
             label,
             tick_format=panel.y_tick_format,
             invert_y=panel.invert_y,
+            grid_right=right,
+            scale=scale,
+            draw_text=False,
         )
         _draw_panel_series(
             pixels,
-            chart.width,
+            width,
             chart.x_values,
             render_series,
             x_axis=x_axis,
@@ -175,47 +262,167 @@ def render_multi_panel_line_chart_png(chart: MultiPanelLineChart) -> bytes:
             bottom=panel_bottom,
             color=COLORS[index % len(COLORS)],
             invert_y=panel.invert_y,
+            scale=scale,
         )
 
     _draw_x_axis(
         pixels,
-        chart.width,
+        width,
         left,
         right,
         top + (panel_count - 1) * (panel_height + gap) + panel_height,
         x_axis,
         chart.x_label,
         tick_format=chart.x_tick_format,
+        scale=scale,
+        draw_text=False,
     )
-    return _png(chart.width, chart.height, pixels)
+    output = _downsample(pixels, chart.width, chart.height, scale=scale)
+    output_frame = _chart_frame(chart.width, chart.height)
+    output_left, output_top, output_right, output_bottom = (
+        output_frame.plot_left,
+        output_frame.plot_top,
+        output_frame.plot_right,
+        output_frame.plot_bottom,
+    )
+    output_gap = 26
+    output_panel_height = max(72, (output_bottom - output_top - output_gap * (panel_count - 1)) // panel_count)
+    _draw_frame(output, chart.width, chart.height, output_frame, chart.title, chart.subtitle, draw_panel=False)
+    for index, panel in enumerate(chart.panels):
+        panel_top = output_top + index * (output_panel_height + output_gap)
+        panel_bottom = panel_top + output_panel_height
+        preliminary_y_axis = _robust_axis(panel.series.values, target_ticks=5)
+        render_series = _prepare_render_series(panel.series, preliminary_y_axis)
+        y_axis = _robust_axis(render_series.values, target_ticks=5)
+        label = _label_with_suffixes(panel.y_label, render_series)
+        _draw_y_axis(
+            output,
+            chart.width,
+            output_left,
+            panel_top,
+            panel_bottom,
+            y_axis,
+            label,
+            tick_format=panel.y_tick_format,
+            invert_y=panel.invert_y,
+            grid_right=output_right,
+            draw_lines=False,
+        )
+    _draw_x_axis(
+        output,
+        chart.width,
+        output_left,
+        output_right,
+        output_top + (panel_count - 1) * (output_panel_height + output_gap) + output_panel_height,
+        x_axis,
+        chart.x_label,
+        tick_format=chart.x_tick_format,
+        draw_lines=False,
+    )
+    _draw_sidebar_legend(output, chart.width, output_frame, _line_legend_items(tuple(panel.series for panel in chart.panels)), title="Panels")
+    return _png(chart.width, chart.height, output)
 
 
 def render_bar_chart_png(chart: BarChart) -> bytes:
-    pixels = _background(chart.width, chart.height)
-    left, top, right, bottom = 92, 92, chart.width - 34, chart.height - 86
-    _draw_chart_text(pixels, chart.width, 24, 18, chart.title, (24, 24, 24), scale=2)
-    if chart.subtitle:
-        _draw_chart_text(pixels, chart.width, 24, 42, chart.subtitle, (90, 90, 90), scale=1)
-    _line(pixels, chart.width, left, bottom, right, bottom, (30, 30, 30))
-    _line(pixels, chart.width, left, top, left, bottom, (30, 30, 30))
+    scale = RENDER_SCALE
+    width, height = chart.width * scale, chart.height * scale
+    pixels = _background(width, height)
+    frame = _chart_frame(width, height, scale=scale)
+    _draw_frame(pixels, width, height, frame, chart.title, chart.subtitle, scale=scale, draw_text=False)
+    left, top, right, bottom = frame.plot_left, frame.plot_top, frame.plot_right, frame.plot_bottom - 14 * scale
+    _line(pixels, width, left, bottom, right, bottom, (30, 30, 30))
+    _line(pixels, width, left, top, left, bottom, (30, 30, 30))
     if not chart.bars:
-        return _png(chart.width, chart.height, pixels)
+        output = _downsample(pixels, chart.width, chart.height, scale=scale)
+        output_frame = _chart_frame(chart.width, chart.height)
+        _draw_frame(output, chart.width, chart.height, output_frame, chart.title, chart.subtitle, draw_panel=False)
+        return _png(chart.width, chart.height, output)
 
     y_axis = _axis(tuple(bar.value for bar in chart.bars), target_ticks=6, include_zero=True)
-    _draw_y_axis(pixels, chart.width, left, top, bottom, y_axis, chart.y_label, tick_format=chart.y_tick_format)
-    if chart.x_label:
-        _draw_centered_text(pixels, chart.width, (left + right) // 2, chart.height - 24, chart.x_label, (70, 70, 70))
+    _draw_y_axis(pixels, width, left, top, bottom, y_axis, chart.y_label, tick_format=chart.y_tick_format, grid_right=right, scale=scale, draw_text=False)
     slot_width = max(1, (right - left) // len(chart.bars))
-    bar_width = max(8, round(slot_width * 0.65))
+    bar_width = max(8 * scale, round(slot_width * 0.65))
     for index, bar in enumerate(chart.bars):
-        color = COLORS[index % len(COLORS)]
+        color = bar.color or COLORS[index % len(COLORS)]
         center = left + index * slot_width + slot_width // 2
         x1 = center - bar_width // 2
         x2 = center + bar_width // 2
         y1 = _scale(bar.value, y_axis.domain, bottom, top)
-        _rect(pixels, chart.width, x1, y1, x2, bottom - 1, color)
-        _draw_centered_text(pixels, chart.width, center, bottom + 12, _ellipsize(bar.label, 12), (70, 70, 70))
-    return _png(chart.width, chart.height, pixels)
+        _rect(pixels, width, x1, y1, x2, bottom - 1, color)
+    output = _downsample(pixels, chart.width, chart.height, scale=scale)
+    output_frame = _chart_frame(chart.width, chart.height)
+    output_left, output_top, output_right, output_bottom = (
+        output_frame.plot_left,
+        output_frame.plot_top,
+        output_frame.plot_right,
+        output_frame.plot_bottom - 14,
+    )
+    _draw_frame(output, chart.width, chart.height, output_frame, chart.title, chart.subtitle, draw_panel=False)
+    _draw_y_axis(output, chart.width, output_left, output_top, output_bottom, y_axis, chart.y_label, tick_format=chart.y_tick_format, grid_right=output_right, draw_lines=False)
+    if chart.x_label:
+        _draw_centered_text(output, chart.width, (output_left + output_right) // 2, output_frame.plot_bottom + 48, chart.x_label, MUTED_TEXT)
+    output_slot_width = max(1, (output_right - output_left) // len(chart.bars))
+    for index, bar in enumerate(chart.bars):
+        center = output_left + index * output_slot_width + output_slot_width // 2
+        _draw_centered_text(output, chart.width, center, output_bottom + 12, _ellipsize(bar.label, 12), MUTED_TEXT)
+    _draw_sidebar_legend(
+        output,
+        chart.width,
+        output_frame,
+        tuple(
+            LegendItem(label=bar.label, color=bar.color or COLORS[index % len(COLORS)], value=bar.value, value_format=chart.y_tick_format)
+            for index, bar in enumerate(chart.bars)
+        ),
+        title="Legend",
+    )
+    return _png(chart.width, chart.height, output)
+
+
+def render_pie_chart_png(chart: PieChart) -> bytes:
+    scale = RENDER_SCALE
+    width, height = chart.width * scale, chart.height * scale
+    pixels = _background(width, height)
+    frame = _chart_frame(width, height, scale=scale)
+    _draw_frame(pixels, width, height, frame, chart.title, chart.subtitle, scale=scale, draw_text=False)
+    all_slices = tuple(item for item in chart.slices if math.isfinite(item.value))
+    positive_slices = tuple((index, item) for index, item in enumerate(all_slices) if item.value > 0)
+    if not all_slices:
+        output = _downsample(pixels, chart.width, chart.height, scale=scale)
+        output_frame = _chart_frame(chart.width, chart.height)
+        _draw_frame(output, chart.width, chart.height, output_frame, chart.title, chart.subtitle, draw_panel=False)
+        return _png(chart.width, chart.height, output)
+
+    center_x = (frame.plot_left + frame.plot_right) // 2
+    center_y = (frame.plot_top + frame.plot_bottom) // 2 + 8 * scale
+    radius = _pie_radius(frame, center_x, center_y, scale=scale, has_value_label=bool(chart.value_label))
+    total = sum(item.value for _, item in positive_slices)
+    start_angle = -math.pi / 2
+    if total > 0:
+        for original_index, item in positive_slices:
+            end_angle = start_angle + (item.value / total) * math.tau
+            color = item.color or COLORS[original_index % len(COLORS)]
+            _sector(pixels, width, center_x, center_y, radius, start_angle, end_angle, color)
+            start_angle = end_angle
+        _circle_outline(pixels, width, center_x, center_y, radius, (30, 30, 30), stroke=scale)
+    output = _downsample(pixels, chart.width, chart.height, scale=scale)
+    output_frame = _chart_frame(chart.width, chart.height)
+    output_center_x = (output_frame.plot_left + output_frame.plot_right) // 2
+    output_center_y = (output_frame.plot_top + output_frame.plot_bottom) // 2 + 8
+    output_radius = _pie_radius(output_frame, output_center_x, output_center_y, scale=1, has_value_label=bool(chart.value_label))
+    _draw_frame(output, chart.width, chart.height, output_frame, chart.title, chart.subtitle, draw_panel=False)
+    _draw_sidebar_legend(
+        output,
+        chart.width,
+        output_frame,
+        tuple(
+            LegendItem(label=item.label, color=item.color or COLORS[index % len(COLORS)], value=item.value, value_format=chart.value_format)
+            for index, item in enumerate(all_slices)
+        ),
+        title="Legend",
+    )
+    if chart.value_label:
+        _draw_centered_text(output, chart.width, output_center_x, output_center_y + output_radius + 18, chart.value_label, MUTED_TEXT)
+    return _png(chart.width, chart.height, output)
 
 
 def _draw_panel_series(
@@ -232,6 +439,7 @@ def _draw_panel_series(
     bottom: int,
     color: tuple[int, int, int],
     invert_y: bool = False,
+    scale: int = 1,
 ) -> None:
     previous: tuple[int, int] | None = None
     show_markers = _show_markers(x_values, series.values)
@@ -245,9 +453,9 @@ def _draw_panel_series(
         x = _scale(x_value, x_axis.domain, left, right)
         y = _scale_y(y_value, y_axis.domain, bottom, top, invert=invert_y)
         if previous is not None:
-            _line(pixels, width, previous[0], previous[1], x, y, color)
+            _stroke_line(pixels, width, previous[0], previous[1], x, y, color, stroke=scale)
         if show_markers:
-            _dot(pixels, width, x, y, color)
+            _dot(pixels, width, x, y, color, scale=scale)
         previous = (x, y)
 
 
@@ -288,15 +496,132 @@ def _label_with_suffixes(label: str, series: RenderSeries) -> str:
     return f"{label} {', '.join(suffixes)}"
 
 
+def _chart_frame(width: int, height: int, *, scale: int = 1) -> ChartFrame:
+    margin_left = 92 * scale
+    title_x = 24 * scale
+    plot_top = 92 * scale
+    plot_bottom = height - 86 * scale
+    sidebar_width = max(190 * scale, round(width * 0.25))
+    sidebar_right = width - 1
+    sidebar_left = sidebar_right - sidebar_width
+    plot_right = sidebar_left - 34 * scale
+    return ChartFrame(
+        title_x=title_x,
+        title_y=18 * scale,
+        subtitle_y=42 * scale,
+        plot_left=margin_left,
+        plot_top=plot_top,
+        plot_right=plot_right,
+        plot_bottom=plot_bottom,
+        sidebar_left=sidebar_left,
+        sidebar_top=0,
+        sidebar_right=sidebar_right,
+        sidebar_bottom=height - 1,
+    )
+
+
+def _draw_frame(
+    pixels: bytearray,
+    width: int,
+    height: int,
+    frame: ChartFrame,
+    title: str,
+    subtitle: str,
+    *,
+    scale: int = 1,
+    draw_panel: bool = True,
+    draw_text: bool = True,
+) -> None:
+    del height
+    if draw_panel:
+        _rect(pixels, width, frame.sidebar_left, frame.sidebar_top, frame.sidebar_right, frame.sidebar_bottom, SIDEBAR_BG)
+        _line(pixels, width, frame.sidebar_left, frame.sidebar_top, frame.sidebar_left, frame.sidebar_bottom, SIDEBAR_BORDER)
+    if not draw_text:
+        return
+    _draw_chart_text(pixels, width, frame.title_x, frame.title_y, title, TEXT, scale=2 * scale)
+    if subtitle:
+        _draw_chart_text(pixels, width, frame.title_x, frame.subtitle_y, subtitle, MUTED_TEXT, scale=scale)
+
+
+def _line_legend_items(series: tuple[RenderSeries, ...]) -> tuple[LegendItem, ...]:
+    items = []
+    for index, item in enumerate(series):
+        notes = []
+        if item.scaled:
+            notes.append("scaled")
+        if item.clipped:
+            notes.append("clipped")
+        if item.smoothed:
+            notes.append("smoothed")
+        items.append(
+            LegendItem(
+                label=item.label or item.metric,
+                color=COLORS[index % len(COLORS)],
+                note=", ".join(notes),
+                line=True,
+            )
+        )
+    return tuple(items)
+
+
+def _draw_sidebar_legend(
+    pixels: bytearray,
+    width: int,
+    frame: ChartFrame,
+    items: tuple[LegendItem, ...],
+    *,
+    title: str,
+    scale: int = 1,
+) -> None:
+    if not items:
+        return
+    x = frame.sidebar_left + 18 * scale
+    y = frame.sidebar_top + 18 * scale
+    value_x = frame.sidebar_right - 18 * scale
+    _draw_chart_text(pixels, width, x, y, title, TEXT, scale=scale)
+    y += 28 * scale
+    for item in items:
+        if y > frame.sidebar_bottom - 20 * scale:
+            _draw_chart_text(pixels, width, x, y, "...", MUTED_TEXT, scale=scale)
+            return
+        if item.line:
+            _stroke_line(pixels, width, x, y + 6 * scale, x + 16 * scale, y + 6 * scale, item.color, stroke=scale)
+        else:
+            _rect(pixels, width, x, y, x + 12 * scale, y + 12 * scale, item.color)
+        label = _ellipsize(item.label, 18)
+        _draw_chart_text(pixels, width, x + 22 * scale, y + 2 * scale, label, TEXT, scale=scale)
+        if item.value is not None:
+            value = _format_tick(item.value, tick_format=item.value_format)
+            _draw_right_aligned_text(pixels, width, value_x, y + 2 * scale, value, MUTED_TEXT, scale=scale)
+        if item.note:
+            y += 14 * scale
+            _draw_chart_text(pixels, width, x + 22 * scale, y + 2 * scale, _ellipsize(item.note, 24), MUTED_TEXT, scale=scale)
+        y += 22 * scale
+
+
+def _pie_radius(frame: ChartFrame, center_x: int, center_y: int, *, scale: int, has_value_label: bool) -> int:
+    label_space = 36 * scale if has_value_label else 12 * scale
+    bottom_limit = frame.sidebar_bottom - 18 * scale
+    return max(
+        24 * scale,
+        min(
+            center_x - frame.plot_left - 8 * scale,
+            frame.plot_right - center_x - 8 * scale,
+            center_y - frame.plot_top - 8 * scale,
+            bottom_limit - center_y - label_space,
+        ),
+    )
+
+
 def _blank(width: int, height: int, color: tuple[int, int, int]) -> bytearray:
     return bytearray(color * width * height)
 
 
 def _background(width: int, height: int) -> bytearray:
     pixels = bytearray()
-    top = (247, 250, 252)
-    middle = (255, 255, 255)
-    bottom = (244, 246, 248)
+    top = (232, 238, 246)
+    middle = (250, 252, 255)
+    bottom = (239, 244, 249)
     for y in range(height):
         ratio = y / max(height - 1, 1)
         if ratio <= 0.5:
@@ -535,13 +860,26 @@ def _draw_x_axis(
     label: str,
     *,
     tick_format: str = "number",
+    scale: int = 1,
+    draw_lines: bool = True,
+    draw_text: bool = True,
 ) -> None:
     for tick in axis.ticks:
         x = _scale(tick, axis.domain, left, right)
-        _line(pixels, width, x, bottom, x, bottom + 5, (30, 30, 30))
-        _draw_centered_text(pixels, width, x, bottom + 12, _format_tick(tick, tick_format=tick_format), (70, 70, 70))
-    if label:
-        _draw_centered_text(pixels, width, (left + right) // 2, bottom + 42, label, (70, 70, 70))
+        if draw_lines:
+            _line(pixels, width, x, bottom, x, bottom + 5 * scale, (30, 30, 30))
+        if draw_text:
+            _draw_centered_text(
+                pixels,
+                width,
+                x,
+                bottom + 12 * scale,
+                _format_tick(tick, tick_format=tick_format),
+                MUTED_TEXT,
+                scale=scale,
+            )
+    if label and draw_text:
+        _draw_centered_text(pixels, width, (left + right) // 2, bottom + 42 * scale, label, MUTED_TEXT, scale=scale)
 
 
 def _draw_y_axis(
@@ -555,32 +893,30 @@ def _draw_y_axis(
     *,
     tick_format: str = "number",
     invert_y: bool = False,
+    grid_right: int | None = None,
+    scale: int = 1,
+    draw_lines: bool = True,
+    draw_text: bool = True,
 ) -> None:
+    if grid_right is None:
+        grid_right = width - 34 * scale
     for tick in axis.ticks:
         y = _scale_y(tick, axis.domain, bottom, top, invert=invert_y)
-        _line(pixels, width, left - 5, y, left, y, (30, 30, 30))
-        _line(pixels, width, left + 1, y, width - 34, y, (230, 230, 230))
-        _draw_right_aligned_text(pixels, width, left - 10, y - 4, _format_tick(tick, tick_format=tick_format), (70, 70, 70))
-    if label:
-        _draw_chart_text(pixels, width, left, top - 18, label, (70, 70, 70), scale=1)
-
-
-def _draw_legend(pixels: bytearray, width: int, series: tuple[RenderSeries, ...], x: int, y: int) -> None:
-    for index, item in enumerate(series):
-        yy = y + index * 14
-        color = COLORS[index % len(COLORS)]
-        _line(pixels, width, x, yy + 4, x + 16, yy + 4, color)
-        label = item.label or item.metric
-        suffixes = []
-        if item.scaled:
-            suffixes.append("scaled")
-        if item.clipped:
-            suffixes.append("clipped")
-        if item.smoothed:
-            suffixes.append("smoothed")
-        if suffixes:
-            label = f"{label} ({', '.join(suffixes)})"
-        _draw_chart_text(pixels, width, x + 22, yy, _ellipsize(label, 22), (70, 70, 70), scale=1)
+        if draw_lines:
+            _line(pixels, width, left - 5 * scale, y, left, y, (30, 30, 30))
+            _line(pixels, width, left + 1, y, grid_right, y, GRID)
+        if draw_text:
+            _draw_right_aligned_text(
+                pixels,
+                width,
+                left - 10 * scale,
+                y - 4 * scale,
+                _format_tick(tick, tick_format=tick_format),
+                MUTED_TEXT,
+                scale=scale,
+            )
+    if label and draw_text:
+        _draw_chart_text(pixels, width, left, top - 18 * scale, label, MUTED_TEXT, scale=scale)
 
 
 def _format_tick(value: float, *, tick_format: str = "number") -> str:
@@ -588,6 +924,8 @@ def _format_tick(value: float, *, tick_format: str = "number") -> str:
         return _format_seconds(value)
     if tick_format == "pace":
         return _format_pace(value)
+    if tick_format == "percentage":
+        return f"{_format_tick(value)}%"
     if abs(value - round(value)) < 1e-8:
         return str(int(round(value)))
     text = f"{value:.2f}".rstrip("0").rstrip(".")
@@ -627,10 +965,56 @@ def _scale_y(value: float, domain: tuple[float, float], bottom_px: int, top_px: 
     return _scale(value, domain, bottom_px, top_px)
 
 
-def _dot(pixels: bytearray, width: int, x: int, y: int, color: tuple[int, int, int]) -> None:
-    for dx in range(-2, 3):
-        for dy in range(-2, 3):
+def _dot(pixels: bytearray, width: int, x: int, y: int, color: tuple[int, int, int], *, scale: int = 1) -> None:
+    radius = 2 * scale
+    for dx in range(-radius, radius + 1):
+        for dy in range(-radius, radius + 1):
             _set(pixels, width, x + dx, y + dy, color)
+
+
+def _sector(
+    pixels: bytearray,
+    width: int,
+    center_x: int,
+    center_y: int,
+    radius: int,
+    start_angle: float,
+    end_angle: float,
+    color: tuple[int, int, int],
+) -> None:
+    radius_squared = radius * radius
+    for y in range(center_y - radius, center_y + radius + 1):
+        dy = y - center_y
+        for x in range(center_x - radius, center_x + radius + 1):
+            dx = x - center_x
+            if dx * dx + dy * dy > radius_squared:
+                continue
+            angle = math.atan2(dy, dx)
+            if angle < -math.pi / 2:
+                angle += math.tau
+            if start_angle <= angle <= end_angle:
+                _set(pixels, width, x, y, color)
+
+
+def _circle_outline(
+    pixels: bytearray,
+    width: int,
+    center_x: int,
+    center_y: int,
+    radius: int,
+    color: tuple[int, int, int],
+    *,
+    stroke: int = 1,
+) -> None:
+    steps = max(64, radius * 4)
+    previous: tuple[int, int] | None = None
+    for index in range(steps + 1):
+        angle = (index / steps) * math.tau
+        x = round(center_x + math.cos(angle) * radius)
+        y = round(center_y + math.sin(angle) * radius)
+        if previous is not None:
+            _stroke_line(pixels, width, previous[0], previous[1], x, y, color, stroke=stroke)
+        previous = (x, y)
 
 
 def _rect(pixels: bytearray, width: int, x1: int, y1: int, x2: int, y2: int, color: tuple[int, int, int]) -> None:
@@ -734,6 +1118,28 @@ def _line(
             y += sy
 
 
+def _stroke_line(
+    pixels: bytearray,
+    width: int,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    color: tuple[int, int, int],
+    *,
+    stroke: int = 1,
+) -> None:
+    if stroke <= 1:
+        _line(pixels, width, x1, y1, x2, y2, color)
+        return
+    radius = max(1, stroke // 2)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if abs(dx) + abs(dy) > radius:
+                continue
+            _line(pixels, width, x1 + dx, y1 + dy, x2 + dx, y2 + dy, color)
+
+
 def _set(pixels: bytearray, width: int, x: int, y: int, color: tuple[int, int, int]) -> None:
     if x < 0 or y < 0:
         return
@@ -741,6 +1147,26 @@ def _set(pixels: bytearray, width: int, x: int, y: int, color: tuple[int, int, i
     if index < 0 or index + 2 >= len(pixels):
         return
     pixels[index:index + 3] = bytes(color)
+
+
+def _downsample(pixels: bytearray, width: int, height: int, *, scale: int) -> bytearray:
+    source_width = width * scale
+    output = bytearray()
+    area = scale * scale
+    for y in range(height):
+        source_y = y * scale
+        for x in range(width):
+            source_x = x * scale
+            red = green = blue = 0
+            for dy in range(scale):
+                row_start = ((source_y + dy) * source_width + source_x) * 3
+                for dx in range(scale):
+                    index = row_start + dx * 3
+                    red += pixels[index]
+                    green += pixels[index + 1]
+                    blue += pixels[index + 2]
+            output.extend((round(red / area), round(green / area), round(blue / area)))
+    return output
 
 
 def _png(width: int, height: int, pixels: bytearray) -> bytes:

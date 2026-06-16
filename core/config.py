@@ -20,6 +20,9 @@ class BotConfig:
 @dataclass(frozen=True)
 class DiscordConfig:
     token: str = ""
+    allowed_guild_ids: frozenset[str] = field(default_factory=frozenset)
+    allowed_channel_ids: frozenset[str] = field(default_factory=frozenset)
+    allow_direct_messages: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,9 @@ def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = F
         ),
         discord=DiscordConfig(
             token=_get(parser, "discord", "token", fallback=""),
+            allowed_guild_ids=frozenset(_split_csv(_get(parser, "discord", "allowed_guild_ids", fallback=""))),
+            allowed_channel_ids=frozenset(_split_csv(_get(parser, "discord", "allowed_channel_ids", fallback=""))),
+            allow_direct_messages=_getbool(parser, "discord", "allow_direct_messages", fallback=False),
         ),
         openai=OpenAIConfig(
             api_key=_get(parser, "openai", "api_key", fallback=""),
@@ -126,6 +132,8 @@ def validate_config(config: AppConfig, *, require_secrets: bool = False) -> None
         raise ConfigError("limits.max_attachment_size_bytes must be positive")
     if config.history.retention_days <= 0:
         raise ConfigError("history.retention_days must be positive")
+    _validate_discord_ids("discord.allowed_guild_ids", config.discord.allowed_guild_ids)
+    _validate_discord_ids("discord.allowed_channel_ids", config.discord.allowed_channel_ids)
     if not str(config.storage.database_path):
         raise ConfigError("storage.database_path must not be empty")
     if not str(config.storage.artifact_path):
@@ -135,6 +143,8 @@ def validate_config(config: AppConfig, *, require_secrets: bool = False) -> None
     if require_secrets:
         if not config.discord.token:
             raise ConfigError("discord.token is required in production mode")
+        if not config.discord.allowed_guild_ids:
+            raise ConfigError("discord.allowed_guild_ids is required in production mode")
         if not config.openai.api_key:
             raise ConfigError("openai.api_key is required in production mode")
 
@@ -166,3 +176,9 @@ def _getbool(parser: ConfigParser, section: str, option: str, *, fallback: bool)
 
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _validate_discord_ids(name: str, values: frozenset[str]) -> None:
+    invalid = sorted(value for value in values if not value.isdecimal())
+    if invalid:
+        raise ConfigError(f"{name} must contain numeric Discord ids")

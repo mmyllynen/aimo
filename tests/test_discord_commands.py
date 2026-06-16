@@ -27,10 +27,14 @@ class DiscordCommandSpecTests(unittest.IsolatedAsyncioTestCase):
             {"syote", "liite"},
         )
         self.assertEqual(specs["aimo"].options[1].option_type, DiscordCommandOptionType.ATTACHMENT)
-        treenit_action = specs["treenit"].options[0]
-        self.assertTrue(treenit_action.required)
-        self.assertIn("listaa", treenit_action.choices)
-        self.assertIn("aseta_sykerajat", treenit_action.choices)
+        subcommands = {subcommand.name: subcommand for subcommand in specs["treenit"].subcommands}
+        self.assertEqual(
+            set(subcommands),
+            {"listaa", "nayta", "aktiivinen", "aseta_aktiivinen", "poista", "sykerajat", "aseta_sykerajat"},
+        )
+        self.assertEqual(specs["treenit"].options, ())
+        self.assertEqual({option.name for option in subcommands["poista"].options}, {"viite"})
+        self.assertEqual({option.name for option in subcommands["aseta_sykerajat"].options}, {"zones"})
 
     async def test_register_command_specs_adds_all_specs_and_syncs(self) -> None:
         tree = FakeCommandTree()

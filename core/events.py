@@ -9,6 +9,7 @@ from typing import Any
 class EventSource(StrEnum):
     DISCORD_MESSAGE = "discord_message"
     DISCORD_SLASH = "discord_slash"
+    DISCORD_COMPONENT = "discord_component"
     DISCORD_ATTACHMENT = "discord_attachment"
     SYSTEM = "system"
 
@@ -17,6 +18,7 @@ class EventKind(StrEnum):
     MESSAGE = "message"
     MENTION = "mention"
     SLASH_COMMAND = "slash_command"
+    COMPONENT = "component"
     ATTACHMENT = "attachment"
     SCHEDULED = "scheduled"
 
@@ -44,4 +46,3 @@ class CanonicalEvent:
     attachments: tuple[AttachmentRef, ...] = ()
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = field(default_factory=dict)
-

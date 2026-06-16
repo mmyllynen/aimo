@@ -42,9 +42,23 @@ class DiscordSlashSnapshot:
     channel_id: str
     user: DiscordUserSnapshot
     command_name: str
+    subcommand: str = ""
     options: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     attachments: tuple[DiscordAttachmentSnapshot, ...] = ()
+
+
+@dataclass(frozen=True)
+class DiscordComponentSnapshot:
+    interaction_id: str
+    guild_id: str | None
+    channel_id: str
+    user: DiscordUserSnapshot
+    component_id: str
+    command_name: str = ""
+    subcommand: str = ""
+    pending_id: str = ""
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 def message_to_event(message: DiscordMessageSnapshot, *, bot_user_id: str) -> CanonicalEvent:
@@ -83,8 +97,31 @@ def slash_to_event(slash: DiscordSlashSnapshot) -> CanonicalEvent:
         created_at=slash.created_at,
         metadata={
             "command_name": slash.command_name,
+            "subcommand": slash.subcommand,
             "discord_display_name": slash.user.display_name,
             "options": slash.options,
+        },
+    )
+
+
+def component_to_event(component: DiscordComponentSnapshot) -> CanonicalEvent:
+    text = f"/{component.command_name} {component.subcommand}".strip()
+    return CanonicalEvent(
+        event_id=component.interaction_id,
+        source=EventSource.DISCORD_COMPONENT,
+        kind=EventKind.COMPONENT,
+        guild_id=component.guild_id,
+        channel_id=component.channel_id,
+        user_id=component.user.user_id,
+        user_name=component.user.user_name,
+        text=text,
+        created_at=component.created_at,
+        metadata={
+            "command_name": component.command_name,
+            "subcommand": component.subcommand,
+            "component_id": component.component_id,
+            "pending_id": component.pending_id,
+            "discord_display_name": component.user.display_name,
         },
     )
 
@@ -109,5 +146,6 @@ def _slash_text(slash: DiscordSlashSnapshot) -> str:
     syote = slash.options.get("syote")
     if isinstance(syote, str) and syote.strip():
         return syote.strip()
+    if slash.subcommand:
+        return f"/{slash.command_name} {slash.subcommand}"
     return f"/{slash.command_name}"
-

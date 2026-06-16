@@ -18,7 +18,7 @@ from storage.unit_of_work import open_database
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Aimo v3 runtime bootstrap")
+    parser = argparse.ArgumentParser(description="Aimo runtime bootstrap")
     parser.add_argument("--config", default="aimo.conf", help="Path to aimo.conf")
     parser.add_argument(
         "--require-secrets",
@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             context.close()
         return 0
     context.close()
-    print("Aimo v3 application services are valid; use --run-discord to start Discord.")
+    print("Aimo application services are valid; use --run-discord to start Discord.")
     return 0
 
 

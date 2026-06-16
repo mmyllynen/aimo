@@ -9,11 +9,13 @@ from llm.operations import (
     ChatReplyInput,
     IntentClassificationInput,
     VisualizationIntentInput,
+    VisualizationIntentRevisionInput,
     WorkoutReplyInput,
     WorkoutReferenceInput,
     classify_intent,
     extract_visualization_intent,
     extract_workout_reference,
+    revise_visualization_intent,
     write_chat_reply,
     write_workout_reply,
 )
@@ -47,6 +49,11 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertEqual(decision.target, WorkflowTarget.VISUALIZATION)
         self.assertEqual(decision.confidence, RouteConfidence.HIGH)
         self.assertEqual(decision.slots["workout_selector"], "latest")
+        request = gateway.client.requests[0]
+        self.assertIn("Use visualization for any request", request.system_prompt)
+        self.assertIn("do not route workout chart requests to chat", request.system_prompt)
+        self.assertIn("visualization", request.user_payload["workflow_catalog"])
+        self.assertIn("sykealuejakauma", request.user_payload["workflow_catalog"]["visualization"]["examples"][0])
 
     def test_rejects_malformed_model_output(self) -> None:
         gateway = LLMGateway(
@@ -94,6 +101,7 @@ class LLMGatewayTests(unittest.TestCase):
                         "matched_workout_ids": [],
                         "ambiguity_reason": "",
                         "requires_clarification": False,
+                        "set_current_workout": False,
                     }
                 }
             )
@@ -139,6 +147,8 @@ class LLMGatewayTests(unittest.TestCase):
                         "date_range": {},
                         "comparison_mode": "",
                         "layout_mode": "auto",
+                        "chart_kind": "auto",
+                        "context_update": {"set_current_workout": False},
                     }
                 }
             )
@@ -152,6 +162,46 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertEqual(intent.workout_selector["type"], "latest")
         self.assertEqual(intent.y_metrics, ("heart_rate_bpm",))
         self.assertEqual(intent.layout_mode, "auto")
+        self.assertEqual(intent.chart_kind, "auto")
+
+    def test_revise_visualization_intent_uses_typed_operation(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.VISUALIZATION_INTENT_REVISION: {
+                    "workout_selector": {"type": "latest"},
+                    "x_metric": "elapsed_s",
+                    "requested_metrics": ["heart_rate_bpm"],
+                    "transform_hints": [],
+                    "date_range": {},
+                    "comparison_mode": "",
+                    "layout_mode": "auto",
+                    "chart_kind": "auto",
+                    "context_update": {"set_current_workout": False},
+                }
+            }
+        )
+
+        intent = revise_visualization_intent(
+            LLMGateway(client),
+            VisualizationIntentRevisionInput(
+                user_text="draw latest chart",
+                failed_intent={"y_metrics": ["invented_metric"]},
+                validation_errors=(
+                    {
+                        "code": "unsupported_column",
+                        "path": "metric_or_encoding",
+                        "value": "invented_metric",
+                        "allowed_values": ["heart_rate_bpm"],
+                    },
+                ),
+                dataset_manifest={"datasets": []},
+                allowed_primitives={"chart_kinds": ["auto", "line"]},
+            ),
+        )
+
+        self.assertEqual(intent.y_metrics, ("heart_rate_bpm",))
+        self.assertEqual(client.requests[0].operation, LLMOperation.VISUALIZATION_INTENT_REVISION)
+        self.assertIn("full replacement intent", client.requests[0].system_prompt)
 
     def test_write_workout_reply_uses_bounded_workout_facts(self) -> None:
         client = FakeLLMClient(
