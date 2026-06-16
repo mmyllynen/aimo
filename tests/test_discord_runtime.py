@@ -426,6 +426,25 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view.items[0].style, "danger")
         self.assertEqual(view.items[0].custom_id, "treenit:workout_delete_confirm:pending-1")
 
+    async def test_send_outbound_attaches_button_callback_when_provided(self) -> None:
+        channel = FakeChannel()
+        handled = []
+        outbound = DiscordOutbound(
+            text="confirm",
+            components=(OutgoingComponent(component_id="treenit:workout_delete_cancel:pending-1", label="Peruuta"),),
+        )
+
+        async def callback(interaction) -> None:
+            handled.append(interaction)
+
+        await send_outbound(channel, outbound, discord_module=FakeDiscordModule, component_callback=callback)
+        button = channel.sent[0]["view"].items[0]
+        interaction = SimpleNamespace(id="interaction-1")
+
+        await button.callback(interaction)
+
+        self.assertEqual(handled, [interaction])
+
     async def test_handle_interaction_extracts_namespace_options_and_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             context = _context(tmpdir)
