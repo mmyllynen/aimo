@@ -12,6 +12,8 @@ JsonObject = dict[str, Any]
 class LLMOperation(StrEnum):
     INTENT_CLASSIFICATION = "intent_classification"
     WORKOUT_REFERENCE_EXTRACTION = "workout_reference_extraction"
+    PERIOD_REQUEST_INTERPRETATION = "period_request_interpretation"
+    PERIOD_ANALYSIS_REPLY = "period_analysis_reply"
     CHAT_REPLY = "chat_reply"
     WORKOUT_REPLY = "workout_reply"
     VISUALIZATION_INTENT = "visualization_intent"
@@ -47,6 +49,7 @@ class LLMCallTrace:
     max_tokens: int
     response_keys: tuple[str, ...] = ()
     error_type: str = ""
+    error_message: str = ""
 
 
 class LLMClient(Protocol):
@@ -69,6 +72,7 @@ class LLMGateway:
         response_keys: tuple[str, ...] = ()
         status = "success"
         error_type = ""
+        error_message = ""
         try:
             validate_request(request)
             response = self.client.complete_json(request)
@@ -78,6 +82,7 @@ class LLMGateway:
         except Exception as exc:
             status = "error"
             error_type = type(exc).__name__
+            error_message = str(exc)[:500]
             raise
         finally:
             self._observe(
@@ -88,6 +93,7 @@ class LLMGateway:
                     max_tokens=request.max_tokens,
                     response_keys=response_keys,
                     error_type=error_type,
+                    error_message=error_message,
                 )
             )
 

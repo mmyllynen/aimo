@@ -11,6 +11,8 @@ class ErrorCategory(StrEnum):
     NO_MATCHING_WORKOUT = "no_matching_workout"
     MISSING_METRIC = "missing_metric"
     AMBIGUOUS_WORKOUT = "ambiguous_workout"
+    NO_WORKOUTS_IN_PERIOD = "no_workouts_in_period"
+    PERIOD_REQUEST_INVALID = "period_request_invalid"
     VISUALIZATION_PLAN_INVALID = "visualization_plan_invalid"
     RENDER_FAILED = "render_failed"
     MODEL_UNAVAILABLE = "model_unavailable"

@@ -1,20 +1,40 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
+from PIL import Image, ImageDraw
+
+from core.config import MapsConfig, RenderersConfig
+from core.i18n import SupportedLanguage
 from llm.operations import VisualizationIntent
 from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
 from visualization.datasets import dataset_request_from_metrics, resolve_datasets
 from visualization.render import (
+    FONT,
+    DEFAULT_RENDER_HEIGHT,
+    DEFAULT_RENDER_WIDTH,
     MARKER_POINT_LIMIT,
     Axis,
+    Bar,
+    BarChart,
+    LineChart,
+    LinePanel,
+    MultiPanelLineChart,
     PieChart,
     PieSlice,
     RenderSeries,
+    RouteMap,
+    RouteMapTile,
+    RoutePoint,
+    RoutePolyline,
     _background,
+    _best_route_safe_rect,
     _chart_frame,
+    _decode_png_rgb,
     _downsample,
     _pie_radius,
+    _png,
     _show_markers,
     _axis,
     _fill_short_gaps,
@@ -24,7 +44,13 @@ from visualization.render import (
     _scale_y,
     _time_axis,
     render_pie_chart_png,
+    render_route_map_png,
+    route_metric_color,
+    route_map_viewport,
 )
+from visualization.pillow_renderer import PillowVisualizationRenderer, _font, _route_subtitle_lines, _visible_route_legend_count
+from visualization.renderer import renderer_name, resolve_renderer
+from visualization.tiles import TileCoord
 from visualization.specs import (
     Encoding,
     MissingRenderableDataError,
@@ -39,24 +65,332 @@ from visualization.specs import (
 from visualization.service import (
     _aggregate_bars,
     _apply_rolling_average,
+    _chart_subtitle,
     _color_hint,
     _effective_layout_mode,
     _explicit_smooth_window,
     _invert_y_axis,
+    _metric_label,
     _bar_tick_format,
+    _preferred_tile_zoom,
+    _route_chart_subtitle,
+    _route_color_domain,
+    _route_color_metric_label,
+    _route_color_status,
+    _route_legend_title,
+    _route_label,
+    _route_polylines,
     _should_render_metric_aggregate_bars,
+    _tile_provider_configs,
     _transformed_rows,
     render_workout_visualization,
 )
-from visualization.service import _apply_normalization, _chart_title
+from visualization.service import _apply_normalization, _chart_title, _y_axis_label
+from visualization.tiles import TileFetchConfig
 
 
 class VisualizationSpecTests(unittest.TestCase):
+    def test_bitmap_font_contains_hash_glyph_for_duplicate_date_labels(self) -> None:
+        self.assertIn("#", FONT)
+        self.assertNotEqual(FONT["#"], FONT["?"])
+
+    def test_bitmap_font_contains_copyright_glyph_for_osm_attribution(self) -> None:
+        self.assertIn("©", FONT)
+        self.assertNotEqual(FONT["©"], FONT["?"])
+
     def test_background_uses_subtle_vertical_gradient(self) -> None:
         pixels = _background(1, 3)
 
         self.assertNotEqual(bytes(pixels[0:3]), bytes(pixels[-3:]))
         self.assertGreaterEqual(min(pixels), 232)
+
+    def test_route_map_can_render_png_tile_background(self) -> None:
+        tile_content = _solid_png(256, 256, (171, 205, 239))
+
+        rendered = render_route_map_png(
+            RouteMap(
+                title="Route",
+                routes=(
+                    RoutePolyline(
+                        label="route",
+                        points=(
+                            RoutePoint(latitude=60.1699, longitude=24.9384),
+                            RoutePoint(latitude=60.1702, longitude=24.9390),
+                        ),
+                    ),
+                ),
+                tiles=(RouteMapTile(coord=TileCoord(z=12, x=2331, y=1185), content=tile_content),),
+                tile_zoom=12,
+                attribution="OpenStreetMap",
+            )
+        )
+
+        decoded = _decode_png_rgb(rendered)
+        self.assertIsNotNone(decoded)
+        _, _, pixels = decoded
+        sample = (120 * DEFAULT_RENDER_WIDTH + 160) * 3
+        self.assertEqual(tuple(pixels[sample : sample + 3]), (171, 205, 239))
+
+    def test_renderer_config_resolves_chart_specific_override(self) -> None:
+        config = RenderersConfig(default="internal", route="pillow")
+
+        self.assertEqual(renderer_name(config, "pie"), "internal")
+        self.assertEqual(renderer_name(config, "route"), "pillow")
+        self.assertEqual(resolve_renderer(config, "route").name, "pillow")
+
+    def test_pillow_renderer_renders_all_chart_types_as_png(self) -> None:
+        renderer = PillowVisualizationRenderer()
+        line = renderer.render_line_chart_png(
+            LineChart(
+                title="Line",
+                x_values=(0.0, 1.0, 2.0),
+                series=(RenderSeries(metric="pace", values=(5.0, 5.5, 5.2), label="Pace"),),
+                x_label="Time",
+                y_label="Pace",
+            )
+        )
+        multi = renderer.render_multi_panel_line_chart_png(
+            MultiPanelLineChart(
+                title="Panels",
+                x_values=(0.0, 1.0, 2.0),
+                panels=(
+                    LinePanel(RenderSeries(metric="heart_rate_bpm", values=(120.0, 130.0, 125.0), label="HR"), "HR"),
+                    LinePanel(RenderSeries(metric="elevation_m", values=(40.0, 45.0, 42.0), label="Elevation"), "Elevation"),
+                ),
+            )
+        )
+        bar = renderer.render_bar_chart_png(
+            BarChart(title="Bars", bars=(Bar(label="A", value=1.0), Bar(label="B", value=2.0)), x_label="Kind", y_label="Value")
+        )
+        pie = renderer.render_pie_chart_png(
+            PieChart(title="Pie", slices=(PieSlice(label="A", value=1.0), PieSlice(label="B", value=2.0)), value_label="Share")
+        )
+        route = renderer.render_route_map_png(
+            RouteMap(
+                title="Route",
+                routes=(
+                    RoutePolyline(
+                        label="route",
+                        points=(
+                            RoutePoint(latitude=60.1699, longitude=24.9384),
+                            RoutePoint(latitude=60.1702, longitude=24.9390),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        for content, expected_size in (
+            (line, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
+            (multi, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
+            (bar, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
+            (pie, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
+            (route, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
+        ):
+            decoded = _decode_png_rgb(content)
+            self.assertIsNotNone(decoded)
+            self.assertEqual(decoded[0:2], expected_size)
+
+    def test_pillow_route_overlay_uses_dark_translucent_panel(self) -> None:
+        content = PillowVisualizationRenderer().render_route_map_png(
+            RouteMap(
+                title="Route - Long Run",
+                subtitle="2026-06-16 - Activity - 5.4 km",
+                routes=(
+                    RoutePolyline(
+                        label="route",
+                        points=(
+                            RoutePoint(latitude=60.1699, longitude=24.9384),
+                            RoutePoint(latitude=60.1702, longitude=24.9390),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        decoded = _decode_png_rgb(content)
+        self.assertIsNotNone(decoded)
+        width, _, pixels = decoded
+        sample = (96 * width + 700) * 3
+        red, green, blue = pixels[sample : sample + 3]
+        self.assertLess(max(red, green, blue), 170)
+        self.assertGreater(min(red, green, blue), 60)
+
+    def test_route_map_title_subtitle_and_legend_label_are_user_friendly(self) -> None:
+        workout = _workout(
+            workout_id="workout-c726097d",
+            title="Sipoo Running",
+            start_time_local="2026-06-16T18:34:00+03:00",
+            local_date="2026-06-16",
+            distance_km=5.4,
+            duration_s=2016,
+            avg_hr_bpm=124,
+        )
+
+        self.assertEqual(_route_chart_subtitle(workout, language=SupportedLanguage.FI), "16/6/2026 18:34 - 5.4 km - 33min 36s - Keskisyke 124")
+        self.assertEqual(_route_label(workout, "fallback"), "16/6/2026 18:34 5.4 km")
+
+        utc_workout = _workout(
+            workout_id="workout-c726097d",
+            title="Sipoo Running",
+            start_time_local="2026-06-16T03:27:42Z",
+            local_date="2026-06-16",
+            distance_km=5.4,
+            duration_s=2016,
+            avg_hr_bpm=124,
+        )
+
+        self.assertEqual(_route_chart_subtitle(utc_workout, language=SupportedLanguage.FI), "16/6/2026 6:27 - 5.4 km - 33min 36s - Keskisyke 124")
+        self.assertEqual(_route_label(utc_workout, "fallback"), "16/6/2026 6:27 5.4 km")
+
+    def test_route_map_can_color_single_route_by_heart_rate(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(workout_id="w", title="Run", duration_s=120, distance_km=1.0),
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, latitude=60.17, longitude=24.94, heart_rate_bpm=120),
+                WorkoutPointRecord(workout_id="w", point_index=1, latitude=60.18, longitude=24.95, heart_rate_bpm=140),
+                WorkoutPointRecord(workout_id="w", point_index=2, latitude=60.19, longitude=24.96, heart_rate_bpm=160),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route", "heart_rate_bpm"),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+                route_color_metric="heart_rate_bpm",
+            ),
+            renderers_config=RenderersConfig(default="pillow", route="pillow"),
+        )
+
+        self.assertTrue(artifact.content.startswith(b"\x89PNG"))
+        self.assertEqual(artifact.rendered_metrics, ("route", "heart_rate_bpm"))
+        self.assertEqual(artifact.metadata["route_color_metric"], "heart_rate_bpm")
+        self.assertEqual(artifact.metadata["route_color_status"], "ok")
+
+    def test_render_workout_visualization_accepts_square_output_size_for_line_chart(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(workout_id="w", title="Run", duration_s=120, distance_km=1.0),
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, heart_rate_bpm=120),
+                WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=60, heart_rate_bpm=140),
+                WorkoutPointRecord(workout_id="w", point_index=2, elapsed_s=120, heart_rate_bpm=160),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="elapsed_s",
+                y_metrics=("heart_rate_bpm",),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="line",
+                render_width=1080,
+                render_height=1080,
+            ),
+            renderers_config=RenderersConfig(default="pillow"),
+        )
+
+        self.assertEqual(_decode_png_rgb(artifact.content)[:2], (1080, 1080))
+        self.assertEqual(artifact.metadata["render_width"], 1080)
+        self.assertEqual(artifact.metadata["render_height"], 1080)
+
+    def test_route_color_status_allows_multiple_routes_with_shared_data_scale(self) -> None:
+        routes = (
+            RoutePolyline(
+                label="first",
+                color_metric="heart_rate_bpm",
+                points=(RoutePoint(60.1, 24.9, color_value=120), RoutePoint(60.2, 25.0, color_value=130)),
+            ),
+            RoutePolyline(
+                label="second",
+                color_metric="heart_rate_bpm",
+                points=(RoutePoint(60.3, 25.1, color_value=140), RoutePoint(60.4, 25.2, color_value=150)),
+            ),
+        )
+
+        self.assertEqual(_route_color_status(routes, route_color_metric="heart_rate_bpm"), "ok")
+
+    def test_route_map_legend_title_is_localized_by_route_count(self) -> None:
+        single = (RoutePolyline(label="route", points=()),)
+        multiple = (RoutePolyline(label="route 1", points=()), RoutePolyline(label="route 2", points=()))
+
+        self.assertEqual(_route_legend_title(single, language=SupportedLanguage.FI), "Reitti")
+        self.assertEqual(_route_legend_title(single, language=SupportedLanguage.EN), "Route")
+        self.assertEqual(_route_legend_title(multiple, language=SupportedLanguage.FI), "Treenit")
+        self.assertEqual(_route_legend_title(multiple, language=SupportedLanguage.EN), "Workouts")
+        self.assertEqual(_route_color_metric_label("heart_rate_bpm", language=SupportedLanguage.FI), "Syke")
+        self.assertEqual(_route_color_metric_label("heart_rate_bpm", language=SupportedLanguage.EN), "Heart rate")
+        self.assertEqual(_route_color_metric_label("pace_s_per_km", language=SupportedLanguage.FI), "Vauhti (min/km)")
+        self.assertEqual(_route_color_metric_label("pace_s_per_km", language=SupportedLanguage.EN), "Pace (min/km)")
+
+    def test_pillow_route_legend_shows_up_to_twenty_rows_when_space_allows(self) -> None:
+        self.assertEqual(_visible_route_legend_count(9, DEFAULT_RENDER_HEIGHT * 2, scale=2), 9)
+        self.assertEqual(_visible_route_legend_count(25, DEFAULT_RENDER_HEIGHT * 2, scale=2), 20)
+
+    def test_pillow_route_subtitle_wraps_structured_summary_only_when_needed(self) -> None:
+        draw = ImageDraw.Draw(Image.new("RGBA", (900, 300)))
+        font = _font(24)
+        subtitle = "16/6/2026 6:27 - 5.5 km - 33min 36s - Keskisyke 124"
+        full_width = draw.textbbox((0, 0), subtitle, font=font)[2]
+        wrapped_width = max(
+            draw.textbbox((0, 0), "16/6/2026 6:27 - 5.5 km", font=font)[2],
+            draw.textbbox((0, 0), "33min 36s - Keskisyke 124", font=font)[2],
+        )
+
+        self.assertEqual(_route_subtitle_lines(draw, subtitle, full_width + 20, font), (subtitle,))
+        self.assertEqual(
+            _route_subtitle_lines(draw, subtitle, wrapped_width + 20, font),
+            ("16/6/2026 6:27 - 5.5 km", "33min 36s - Keskisyke 124"),
+        )
+
+    def test_route_map_safe_area_can_use_right_side_below_small_legend(self) -> None:
+        route_x = (0.0, 100.0)
+        route_y = (0.0, 10.0)
+
+        rect = _best_route_safe_rect(route_x, route_y, width=1080, height=1080)
+
+        self.assertEqual(rect, (48, 156, 1032, 1052))
+
+    def test_route_map_viewport_uses_map_first_safe_area(self) -> None:
+        route = RoutePolyline(
+            label="route",
+            points=(
+                RoutePoint(latitude=60.2928511518985, longitude=25.304258912801743),
+                RoutePoint(latitude=60.303914258256555, longitude=25.33885865472257),
+            ),
+        )
+
+        viewport = route_map_viewport((route,), width=900, height=520)
+
+        self.assertLess(viewport.x_domain[0], viewport.x_domain[1])
+        self.assertLess(viewport.y_domain[0], viewport.y_domain[1])
+        self.assertLess(viewport.x_domain[1] - viewport.x_domain[0], 0.00025)
+
+    def test_route_map_tile_zoom_targets_native_pixel_density(self) -> None:
+        route = RoutePolyline(
+            label="route",
+            points=(
+                RoutePoint(latitude=60.2928511518985, longitude=25.304258912801743),
+                RoutePoint(latitude=60.303914258256555, longitude=25.33885865472257),
+            ),
+        )
+        viewport = route_map_viewport((route,), width=900, height=520)
+
+        zoom = _preferred_tile_zoom(viewport.x_domain, viewport.y_domain, width=900, config=TileFetchConfig(cache_root=Path(".")))
+
+        self.assertEqual(zoom, 15)
+
+    def test_maptiler_tile_provider_uses_separate_cache_and_512_tiles(self) -> None:
+        providers = _tile_provider_configs(Path("cache/osm_tiles"), MapsConfig(provider="maptiler", maptiler_api_key="secret", maptiler_map_id="streets-v4"))
+
+        self.assertEqual(providers[0].name, "maptiler")
+        self.assertEqual(providers[0].background, "maptiler_tiles")
+        self.assertEqual(providers[0].tile_size, 512)
+        self.assertEqual(providers[0].config.cache_root, Path("cache/maptiler_tiles/streets-v4"))
+        self.assertIn("api.maptiler.com/maps/streets-v4", providers[0].config.url_template)
+        self.assertNotIn("secret", str(providers[0].config.cache_root))
+        self.assertEqual(providers[1].name, "openstreetmap")
 
     def test_dense_series_hides_markers_without_metric_specific_rule(self) -> None:
         dense = tuple(float(index) for index in range(MARKER_POINT_LIMIT + 1))
@@ -89,6 +423,53 @@ class VisualizationSpecTests(unittest.TestCase):
     def test_pace_ticks_render_as_minutes_per_kilometer(self) -> None:
         self.assertEqual(_format_tick(330, tick_format="pace"), "5:30")
         self.assertEqual(_format_tick(360, tick_format="pace"), "6:00")
+
+    def test_pace_metric_profile_cleans_point_dataset_outliers(self) -> None:
+        manifest = resolve_datasets(
+            dataset_request_from_metrics(
+                x_metric="elapsed_s",
+                y_metrics=("pace_s_per_km",),
+                transforms=(),
+            ),
+            points=(
+                WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, pace_s_per_km=360),
+                WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=60, pace_s_per_km=365),
+                WorkoutPointRecord(workout_id="w", point_index=2, elapsed_s=120, pace_s_per_km=1104),
+                WorkoutPointRecord(workout_id="w", point_index=3, elapsed_s=180, pace_s_per_km=370),
+                WorkoutPointRecord(workout_id="w", point_index=4, elapsed_s=240, pace_s_per_km=375),
+            ),
+        )
+
+        dataset = manifest.dataset("workout_points")
+        self.assertIsNotNone(dataset)
+        values = tuple(row["pace_s_per_km"] for row in dataset.rows)
+        self.assertEqual(values, (365.0, 367.5, 370.0, 372.5, 375.0))
+        pace_column = next(column for column in dataset.columns if column.column_id == "pace_s_per_km")
+        self.assertEqual(pace_column.max_value, 375.0)
+
+    def test_route_pace_color_uses_cleaned_values_and_robust_domain(self) -> None:
+        routes = _route_polylines(
+            [
+                WorkoutPointRecord(workout_id="w", point_index=0, latitude=60.10, longitude=24.90, pace_s_per_km=360),
+                WorkoutPointRecord(workout_id="w", point_index=1, latitude=60.11, longitude=24.91, pace_s_per_km=365),
+                WorkoutPointRecord(workout_id="w", point_index=2, latitude=60.12, longitude=24.92, pace_s_per_km=1104),
+                WorkoutPointRecord(workout_id="w", point_index=3, latitude=60.13, longitude=24.93, pace_s_per_km=370),
+                WorkoutPointRecord(workout_id="w", point_index=4, latitude=60.14, longitude=24.94, pace_s_per_km=375),
+            ],
+            route_color_metric="pace_s_per_km",
+        )
+
+        self.assertEqual(tuple(point.color_value for point in routes[0].points), (365.0, 367.5, 370.0, 372.5, 375.0))
+        domain = _route_color_domain(routes, "pace_s_per_km")
+        self.assertIsNotNone(domain)
+        self.assertLess(domain[1], 400)
+
+    def test_route_color_direction_is_metric_metadata_driven(self) -> None:
+        fast_color = route_metric_color(330, (300, 600), direction="descending")
+        slow_color = route_metric_color(570, (300, 600), direction="descending")
+
+        self.assertGreater(fast_color[0], slow_color[0])
+        self.assertLess(fast_color[2], slow_color[2])
 
     def test_percentage_ticks_render_with_percent_suffix(self) -> None:
         self.assertEqual(_format_tick(25, tick_format="percentage"), "25%")
@@ -396,6 +777,58 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(comparison_manifest["row_count"], 2)
         self.assertNotIn("rows", comparison_manifest)
 
+    def test_compile_spec_selects_short_period_label_for_period_dataset(self) -> None:
+        request = dataset_request_from_metrics(
+            x_metric="elapsed_s",
+            y_metrics=("ascent_m",),
+            transforms=(),
+            chart_kind="bar",
+        )
+        manifest = resolve_datasets(
+            request,
+            points=(),
+            period_workouts=(
+                _workout(workout_id="w1", title="Sipoo Running", local_date="2026-06-01", ascent_m=20.0),
+                _workout(workout_id="w2", title="Sipoo Running", local_date="2026-06-07", ascent_m=30.0),
+                _workout(workout_id="w3", title="Sipoo Running", local_date="2026-06-07", ascent_m=40.0),
+            ),
+        )
+
+        spec = compile_visualization_spec(request, manifest)
+        period = manifest.dataset("workout_period")
+
+        self.assertEqual(spec.mark, "bar")
+        self.assertEqual(spec.x.dataset_id, "workout_period")
+        self.assertEqual(spec.x.column_id, "workout_label")
+        self.assertEqual([row["workout_label"] for row in period.rows], ["1/6", "7/6 #1", "7/6 #2"])
+        self.assertEqual([row["workout_title"] for row in period.rows], ["Sipoo Running", "Sipoo Running", "Sipoo Running"])
+
+    def test_route_metric_adds_route_points_dataset_without_model_rows(self) -> None:
+        request = dataset_request_from_metrics(
+            x_metric="longitude",
+            y_metrics=("route",),
+            transforms=(),
+            chart_kind="map",
+        )
+        manifest = resolve_datasets(
+            request,
+            points=(
+                WorkoutPointRecord(workout_id="w", point_index=0, latitude=60.17, longitude=24.94),
+                WorkoutPointRecord(workout_id="w", point_index=1, latitude=60.18, longitude=24.95),
+            ),
+            workout=_workout(workout_id="w", title="Route workout"),
+        )
+
+        route_dataset = manifest.dataset("route_points")
+        model_manifest = manifest.to_model_manifest()
+        route_model_dataset = next(dataset for dataset in model_manifest["datasets"] if dataset["dataset_id"] == "route_points")
+
+        self.assertIsNotNone(route_dataset)
+        self.assertEqual(route_dataset.rows[0]["latitude"], 60.17)
+        self.assertEqual(route_dataset.rows[0]["longitude"], 24.94)
+        self.assertIn("route", [column["column_id"] for column in route_model_dataset["columns"]])
+        self.assertNotIn("rows", route_model_dataset)
+
     def test_compile_spec_rejects_unknown_metric_and_transform(self) -> None:
         request = dataset_request_from_metrics(x_metric="elapsed_s", y_metrics=("unknown_metric",), transforms=())
         manifest = resolve_datasets(request, points=())
@@ -549,19 +982,16 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertGreater(max(value for value in normalized[1].values if value is not None), 130)
         self.assertLess(min(value for value in normalized[1].values if value is not None), 110)
 
-    def test_multi_series_title_is_generic(self) -> None:
+    def test_chart_text_uses_workout_title_for_single_workout_and_localized_subject_for_period(self) -> None:
+        request = dataset_request_from_metrics(
+            x_metric="elapsed_s",
+            y_metrics=("heart_rate_bpm", "pace_s_per_km"),
+            transforms=(),
+        )
         spec = compile_visualization_spec(
-            dataset_request_from_metrics(
-                x_metric="elapsed_s",
-                y_metrics=("heart_rate_bpm", "pace_s_per_km"),
-                transforms=(),
-            ),
+            request,
             resolve_datasets(
-                dataset_request_from_metrics(
-                    x_metric="elapsed_s",
-                    y_metrics=("heart_rate_bpm", "pace_s_per_km"),
-                    transforms=(),
-                ),
+                request,
                 points=(
                     WorkoutPointRecord(
                         workout_id="w",
@@ -573,8 +1003,37 @@ class VisualizationSpecTests(unittest.TestCase):
                 ),
             ),
         )
+        workout = _workout(title="Morning run")
+        period = _workout(title="Kaikki treenit", kind="period", primary_kind="period", local_date="2026-06-01..2026-06-17")
 
-        self.assertEqual(_chart_title("Morning run", spec), "Workout metrics - Morning run")
+        self.assertEqual(_chart_title(workout, spec, language=SupportedLanguage.FI), "Morning run")
+        self.assertEqual(_chart_title(period, spec, language=SupportedLanguage.FI), "Mittarit")
+        self.assertEqual(_chart_title(period, spec, language=SupportedLanguage.EN), "Metrics")
+
+    def test_period_chart_subtitle_uses_localized_route_style_summary(self) -> None:
+        period = _workout(
+            title="Kaikki treenit",
+            kind="period",
+            primary_kind="period",
+            local_date="2026-06-01..2026-06-17",
+            distance_km=66.7,
+            duration_s=33214,
+            avg_hr_bpm=119,
+        )
+
+        self.assertEqual(_chart_subtitle(period, language=SupportedLanguage.FI), "1/6/2026 - 17/6/2026 - 66.7 km - 9h 13min 34s - Keskisyke 119")
+
+    def test_chart_labels_are_localized(self) -> None:
+        spec = VisualizationSpec(
+            mark="pie",
+            x=Encoding(dataset_id="heart_rate_zones", column_id="zone_label"),
+            y=(Encoding(dataset_id="heart_rate_zones", column_id="heart_rate_zone_seconds"),),
+            transforms=("as_percentage_of_total",),
+        )
+
+        self.assertEqual(_metric_label("zone_label", language=SupportedLanguage.FI), "Sykealue")
+        self.assertEqual(_metric_label("heart_rate_bpm", language=SupportedLanguage.EN), "Heart rate")
+        self.assertEqual(_y_axis_label(spec, language=SupportedLanguage.FI), "Osuus (%)")
 
     def test_auto_layout_uses_small_multiples_for_different_units(self) -> None:
         request = dataset_request_from_metrics(
@@ -903,6 +1362,10 @@ def _workout(**overrides) -> WorkoutRecord:
     }
     values.update(overrides)
     return WorkoutRecord(**values)
+
+
+def _solid_png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
+    return _png(width, height, bytearray(color * width * height))
 
 
 if __name__ == "__main__":

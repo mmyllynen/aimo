@@ -251,6 +251,26 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(latest.workout_id, "workout-2")
         self.assertIsNone(workouts.get_for_user("user-2", "workout-1"))
 
+    def test_workouts_list_for_user_in_period_is_owner_scoped_and_filterable(self) -> None:
+        self._seed_two_user_workouts()
+        workouts = WorkoutsRepository(self.connection)
+
+        period = workouts.list_for_user_in_period(
+            "user-1",
+            start_date="2026-06-13",
+            end_date="2026-06-13",
+            primary_kind="run",
+        )
+        wrong_kind = workouts.list_for_user_in_period(
+            "user-1",
+            start_date="2026-06-13",
+            end_date="2026-06-13",
+            primary_kind="ride",
+        )
+
+        self.assertEqual([workout.workout_id for workout in period], ["workout-1", "workout-2"])
+        self.assertEqual(wrong_kind, ())
+
     def test_active_workout_returns_only_user_owned_workout(self) -> None:
         self._seed_two_user_workouts()
         active = ActiveWorkoutRepository(self.connection)

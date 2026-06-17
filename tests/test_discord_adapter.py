@@ -84,6 +84,20 @@ class DiscordAdapterTests(unittest.TestCase):
         self.assertEqual(event.metadata["command_name"], "aimo")
         self.assertNotIn("apua", event.metadata["options"])
 
+    def test_empty_slash_command_without_options_uses_command_text(self) -> None:
+        slash = DiscordSlashSnapshot(
+            interaction_id="interaction-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            command_name="aimo",
+        )
+
+        event = slash_to_event(slash)
+
+        self.assertEqual(event.text, "/aimo")
+        self.assertEqual(event.metadata["options"], {})
+
     def test_outgoing_payload_renders_i18n_and_disables_mentions(self) -> None:
         message = OutgoingMessage(
             kind=OutgoingKind.EPHEMERAL_TEXT,
@@ -114,9 +128,10 @@ class DiscordAdapterTests(unittest.TestCase):
         for message in result.messages:
             collector.send(outgoing_to_discord(message, translator))
 
-        self.assertEqual(len(collector.sent), 5)
+        self.assertEqual(len(collector.sent), 1)
         self.assertTrue(all(message.ephemeral for message in collector.sent))
-        self.assertIn("GPX", collector.sent[1].text)
+        self.assertIn("GPX", collector.sent[0].text)
+        self.assertIn("kielimallille", collector.sent[0].text)
 
 
 if __name__ == "__main__":

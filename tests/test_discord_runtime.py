@@ -11,8 +11,10 @@ from types import SimpleNamespace
 
 from adapters.discord.runtime import DiscordRuntimeError, build_discord_runtime, handle_interaction, handle_message, send_outbound
 from adapters.discord.outgoing import DiscordOutbound
+from app.dispatcher import DispatchContext
 from app.runtime import build_application_context
-from core.workflows import OutgoingComponent
+from core.i18n import LocalizedText, TranslationKey, Translator
+from core.workflows import OutgoingComponent, OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
 from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
 
 
@@ -20,10 +22,25 @@ class FakeChannel:
     def __init__(self) -> None:
         self.sent = []
         self.id = "channel-1"
+        self.typing_entries = 0
 
     async def send(self, **kwargs):
+        message = FakeSentMessage()
+        kwargs["_message"] = message
         self.sent.append(kwargs)
-        return FakeSentMessage()
+        return message
+
+    def typing(self):
+        channel = self
+
+        class TypingContext:
+            async def __aenter__(self):
+                channel.typing_entries += 1
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        return TypingContext()
 
 
 class FakeResponse:
@@ -81,6 +98,46 @@ class FakeDiscordClient:
     async def fetch_user(self, user_id):
         self.fetched.append(str(user_id))
         return self.users.get(str(user_id))
+
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(discord=SimpleNamespace(allowed_guild_ids=frozenset(), allowed_channel_ids=frozenset()))
+        self.translator = Translator()
+
+
+class FakeVisualizationDispatcher:
+    def dispatch(self, event, context: DispatchContext):
+        if context.status_callback is not None:
+            context.status_callback("visualization_started")
+        return WorkflowResult(
+            status=WorkflowStatus.SUCCESS,
+            messages=(
+                OutgoingMessage(
+                    kind=OutgoingKind.FILE,
+                    localized_text=LocalizedText(key=TranslationKey.VISUALIZATION_CREATED, params={"title": "Run"}),
+                    filename="route.png",
+                    content_type="image/png",
+                    content=b"png",
+                    metadata={"chart_type": "route"},
+                ),
+            ),
+        )
+
+
+class FakeVisualizationContext:
+    def __init__(self) -> None:
+        self.runtime = FakeRuntime()
+        self.dispatcher = FakeVisualizationDispatcher()
+
+    def hydrate_attachments(self, event):
+        return event
+
+    def dispatch_context(self) -> DispatchContext:
+        return DispatchContext(unit_of_work=None)
+
+    def dispatch_event_isolated(self, event, *, status_callback=None):
+        return self.dispatcher.dispatch(event, DispatchContext(unit_of_work=None, status_callback=status_callback))
 
 
 class FakeCommandTree:
@@ -186,8 +243,9 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
                 await handle_message(message, context, bot_user_id="bot-1", discord_module=FakeDiscordModule)
 
-                self.assertEqual(len(channel.sent), 5)
-                self.assertIn("GPX", channel.sent[1]["content"])
+                self.assertEqual(len(channel.sent), 1)
+                self.assertIn("GPX", channel.sent[0]["content"])
+                self.assertIn("kielimallille", channel.sent[0]["content"])
                 self.assertEqual(channel.sent[0]["allowed_mentions"].to_dict(), {"parse": []})
             finally:
                 context.close()
@@ -324,6 +382,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertEqual(channel.sent, [])
+                self.assertEqual(channel.typing_entries, 0)
                 self.assertEqual(admin.sent, [])
                 with context.dispatch_context().unit_of_work as repositories:
                     history = repositories.history.list_recent_for_channel("channel-1")
@@ -383,9 +442,10 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
             context = _context(tmpdir)
             original_dispatch = context.dispatch_event_isolated
 
-            def slow_dispatch(event):
+            def slow_dispatch(event, **kwargs):
                 import time
 
+                del kwargs
                 time.sleep(0.2)
                 return original_dispatch(event)
 
@@ -408,9 +468,34 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.02)
                 self.assertLess(perf_counter() - started, 0.15)
                 await task
-                self.assertEqual(len(channel.sent), 5)
+                self.assertEqual(len(channel.sent), 1)
             finally:
                 context.close()
+
+    async def test_handle_message_sends_and_replaces_visualization_status(self) -> None:
+        channel = FakeChannel()
+        message = SimpleNamespace(
+            id="message-1",
+            guild=SimpleNamespace(id="guild-1"),
+            channel=channel,
+            author=SimpleNamespace(id="user-1", name="runner", display_name="Runner", bot=False),
+            content="<@bot-1> piirrä reitti",
+            created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
+            attachments=(),
+            mentions=(SimpleNamespace(id="bot-1"),),
+        )
+        context = FakeVisualizationContext()
+
+        await handle_message(message, context, bot_user_id="bot-1", discord_module=FakeDiscordModule)
+
+        self.assertEqual(channel.typing_entries, 1)
+        self.assertEqual(len(channel.sent), 2)
+        status_message = channel.sent[0]["_message"]
+        self.assertEqual(channel.sent[0]["content"], "Työstän visualisointia...")
+        self.assertEqual(status_message.edits[0]["content"], "Piirsin kuvaajan treenistä: Run.")
+        self.assertIsNone(channel.sent[1]["content"])
+        self.assertEqual(channel.sent[1]["file"].filename, "route.png")
+        self.assertEqual(channel.sent[1]["file"].fp.read(), b"png")
 
     async def test_send_outbound_sends_file_payload(self) -> None:
         channel = FakeChannel()
@@ -492,6 +577,34 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(followup.sent), 1)
                 self.assertFalse(followup.sent[0]["ephemeral"])
                 self.assertIn("liitetyyppi", followup.sent[0]["content"])
+            finally:
+                context.close()
+
+    async def test_handle_interaction_empty_aimo_command_returns_help(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            context = _context(tmpdir)
+            try:
+                response = FakeResponse()
+                followup = FakeFollowup()
+                interaction = SimpleNamespace(
+                    id="interaction-1",
+                    guild=SimpleNamespace(id="guild-1"),
+                    channel=SimpleNamespace(id="channel-1"),
+                    user=SimpleNamespace(id="user-1", name="runner", display_name="Runner"),
+                    command=SimpleNamespace(name="aimo"),
+                    created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
+                    response=response,
+                    followup=followup,
+                )
+
+                await handle_interaction(interaction, context, discord_module=FakeDiscordModule)
+
+                self.assertEqual(response.deferred, [{"thinking": True}])
+                self.assertEqual(response.sent, [])
+                self.assertEqual(len(followup.sent), 1)
+                self.assertTrue(followup.sent[0]["ephemeral"])
+                self.assertIn("GPX", followup.sent[0]["content"])
+                self.assertIn("kielimallille", followup.sent[0]["content"])
             finally:
                 context.close()
 

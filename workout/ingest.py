@@ -73,6 +73,8 @@ def ingest_gpx(request: GpxIngestRequest, repositories: RepositoryBundle) -> Gpx
             request.owner_user_id,
             duplicate_attachment.attachment_id,
         )
+        if duplicate_workout is None:
+            return _create_workout_for_attachment(request, repositories, duplicate_attachment.attachment_id)
         return GpxIngestResult(
             status="duplicate",
             workout=duplicate_workout,
@@ -109,11 +111,7 @@ def ingest_gpx(request: GpxIngestRequest, repositories: RepositoryBundle) -> Gpx
         )
     )
     workout = repositories.workouts.add(_workout_record(request, attachment.attachment_id, parsed, timestamp))
-    repositories.workout_streams.replace_for_workout(
-        workout.workout_id,
-        points=_point_records(workout.workout_id, parsed),
-        streams=_stream_records(workout.workout_id, parsed),
-    )
+    _replace_streams(repositories, workout.workout_id, parsed)
     if request.make_active:
         repositories.active_workouts.set(
             user_id=request.owner_user_id,
@@ -121,6 +119,35 @@ def ingest_gpx(request: GpxIngestRequest, repositories: RepositoryBundle) -> Gpx
             updated_at=request.created_at,
         )
     return GpxIngestResult(status="created", workout=workout)
+
+
+def _create_workout_for_attachment(
+    request: GpxIngestRequest,
+    repositories: RepositoryBundle,
+    attachment_id: str,
+) -> GpxIngestResult:
+    try:
+        parsed = parse_gpx(request.content, fallback_title=request.filename)
+    except GpxParseError as exc:
+        raise InvalidGpxError(str(exc)) from exc
+
+    workout = repositories.workouts.add(_workout_record(request, attachment_id, parsed, _timestamp(request.created_at)))
+    _replace_streams(repositories, workout.workout_id, parsed)
+    if request.make_active:
+        repositories.active_workouts.set(
+            user_id=request.owner_user_id,
+            workout_id=workout.workout_id,
+            updated_at=request.created_at,
+        )
+    return GpxIngestResult(status="created", workout=workout)
+
+
+def _replace_streams(repositories: RepositoryBundle, workout_id: str, parsed: ParsedGpxWorkout) -> None:
+    repositories.workout_streams.replace_for_workout(
+        workout_id,
+        points=_point_records(workout_id, parsed),
+        streams=_stream_records(workout_id, parsed),
+    )
 
 
 def is_supported_gpx_attachment(filename: str, content_type: str) -> bool:

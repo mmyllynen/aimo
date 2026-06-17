@@ -4,7 +4,7 @@ import json
 import unittest
 
 from llm.gateway import LLMGateway, LLMGatewayError, LLMOperation, LLMRequest
-from llm.operations import VisualizationIntentInput, extract_visualization_intent
+from llm.operations import PeriodRequestInput, VisualizationIntentInput, extract_visualization_intent, interpret_period_request
 from llm.openai_client import OpenAIClientConfig, OpenAIResponsesClient
 
 
@@ -143,19 +143,69 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         self.assertIn("heart_rate_bpm", properties["requested_metrics"]["items"]["enum"])
         self.assertNotIn("heart_rate", properties["requested_metrics"]["items"]["enum"])
         self.assertEqual(properties["layout_mode"]["enum"], ["auto", "single_axis", "small_multiples"])
-        self.assertEqual(properties["chart_kind"]["enum"], ["auto", "line", "bar", "pie"])
+        self.assertEqual(properties["chart_kind"]["enum"], ["auto", "line", "bar", "pie", "map"])
+        self.assertIn("route", properties["requested_metrics"]["items"]["enum"])
         self.assertIn("chart_kind", body["text"]["format"]["schema"]["required"])
         self.assertIn("context_update", body["text"]["format"]["schema"]["required"])
         self.assertFalse(context_update["additionalProperties"])
         self.assertEqual(context_update["required"], ["set_current_workout"])
         self.assertFalse(date_range["additionalProperties"])
         self.assertEqual(date_range["required"], ["start", "end"])
+        self.assertIn("current_month", workout_selector["properties"]["type"]["enum"])
+        self.assertIn("all_workouts", workout_selector["properties"]["type"]["enum"])
+
+    def test_period_request_schema_uses_explicit_array_items_and_filters(self) -> None:
+        opener = FakeOpener(
+            {
+                "status": "completed",
+                "output_text": json.dumps(
+                    {
+                        "scope_type": "all_workouts",
+                        "scope_value": "",
+                        "start_date": "",
+                        "end_date": "",
+                        "rolling_days": None,
+                        "filters": {"kind": "", "primary_kind": "", "tags": []},
+                        "metrics": ["ascent_m"],
+                        "grouping": "none",
+                        "output_mode": "prose",
+                        "comparison_mode": "none",
+                        "reason": "all workouts",
+                    }
+                ),
+            }
+        )
+        client = OpenAIResponsesClient(OpenAIClientConfig(api_key="test-key", model="gpt-test"), opener=opener)
+
+        interpret_period_request(
+            LLMGateway(client),
+            PeriodRequestInput(
+                user_text="kaikkien treenien nousumetrit",
+                current_datetime="2026-06-16T16:00:00+03:00",
+                timezone="Europe/Helsinki",
+            ),
+        )
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        properties = body["text"]["format"]["schema"]["properties"]
+        self.assertEqual(properties["metrics"]["items"]["type"], "string")
+        self.assertIn("ascent_m", properties["metrics"]["items"]["enum"])
+        self.assertFalse(properties["filters"]["additionalProperties"])
+        self.assertEqual(properties["filters"]["required"], ["kind", "primary_kind", "tags"])
+        self.assertEqual(properties["filters"]["properties"]["tags"]["items"], {"type": "string"})
 
     def test_complete_json_rejects_missing_json_output(self) -> None:
         opener = FakeOpener({"status": "completed", "output_text": "not-json"})
         client = OpenAIResponsesClient(OpenAIClientConfig(api_key="test-key", model="gpt-test"), opener=opener)
 
         with self.assertRaises(LLMGatewayError):
+            client.complete_json(_chat_request())
+
+    def test_complete_json_reports_incomplete_reason(self) -> None:
+        opener = FakeOpener({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}})
+        client = OpenAIResponsesClient(OpenAIClientConfig(api_key="test-key", model="gpt-test"), opener=opener)
+
+        with self.assertRaisesRegex(LLMGatewayError, "max_output_tokens"):
             client.complete_json(_chat_request())
 
     def test_requires_api_key_and_model(self) -> None:

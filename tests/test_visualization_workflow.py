@@ -5,13 +5,20 @@ import unittest
 from pathlib import Path
 
 from app.dispatcher import DispatchContext, Dispatcher, route_event
+from core.config import MapsConfig, RenderersConfig
 from core.events import CanonicalEvent, EventKind, EventSource
 from core.i18n import SupportedLanguage, TranslationKey
 from core.routing import WorkflowTarget
 from core.workflows import OutgoingKind, WorkflowStatus
 from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
+from llm.operations import VisualizationIntent
 from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
 from storage.unit_of_work import UnitOfWork, open_database
+import visualization.service as visualization_service
+from visualization.render import DEFAULT_RENDER_HEIGHT, DEFAULT_RENDER_WIDTH, _decode_png_rgb, _png
+from visualization.tiles import TileFetchResult, TileImage
+from workflows.visualization import _apply_visualization_modifiers, _period_title, _visualization_modifiers
+from workout.periods import PeriodBounds
 
 
 class VisualizationWorkflowTests(unittest.TestCase):
@@ -21,6 +28,54 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.connection.close()
+
+    def test_period_titles_are_localized(self) -> None:
+        self.assertEqual(
+            _period_title(
+                _visualization_intent(("route",), workout_selector={"type": "all_workouts"}),
+                PeriodBounds(label="all_workouts"),
+                language=SupportedLanguage.FI,
+            ),
+            "Kaikki treenit",
+        )
+        self.assertEqual(
+            _period_title(
+                _visualization_intent(("route",), workout_selector={"type": "all_workouts"}),
+                PeriodBounds(label="all_workouts"),
+                language=SupportedLanguage.EN,
+            ),
+            "All workouts",
+        )
+
+    def test_visualization_modifiers_add_metrics_without_replacing_free_text_intent(self) -> None:
+        intent = _visualization_intent(("heart_rate_bpm",))
+
+        updated = _apply_visualization_modifiers(intent, "piirrä sykekäyrä +elevation +ELEVATION +portrait")
+
+        self.assertEqual(_visualization_modifiers("piirrä +HR ja +elevation"), ("hr", "elevation"))
+        self.assertEqual(_visualization_modifiers("piirrä #HR ja #elevation"), ())
+        self.assertEqual(updated.y_metrics, ("heart_rate_bpm", "elevation_m"))
+        self.assertEqual(updated.x_metric, intent.x_metric)
+        self.assertEqual(updated.chart_kind, intent.chart_kind)
+        self.assertEqual((updated.render_width, updated.render_height), (1080, 1920))
+
+    def test_visualization_aspect_modifiers_use_first_known_size(self) -> None:
+        intent = _visualization_intent(("heart_rate_bpm",))
+
+        portrait = _apply_visualization_modifiers(intent, "piirrä sykekäyrä +portrait +square")
+        square = _apply_visualization_modifiers(intent, "piirrä sykekäyrä +square +portrait")
+
+        self.assertEqual((portrait.render_width, portrait.render_height), (1080, 1920))
+        self.assertEqual((square.render_width, square.render_height), (1080, 1080))
+
+    def test_visualization_modifier_sets_route_color_metric_for_map(self) -> None:
+        intent = _visualization_intent(("route",), x_metric="longitude", chart_kind="map")
+
+        updated = _apply_visualization_modifiers(intent, "piirrä viimeisin treeni kartalle +hr +pace")
+
+        self.assertEqual(updated.y_metrics, ("route", "heart_rate_bpm"))
+        self.assertEqual(updated.route_color_metric, "heart_rate_bpm")
+        self.assertEqual(updated.route_color_ignored_metrics, ("pace_s_per_km",))
 
     def test_latest_workout_visualization_returns_png_file(self) -> None:
         self._seed_workout(with_heart_rate=True)
@@ -147,6 +202,125 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertTrue(result.messages[0].content.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_zone_seconds",))
 
+    def test_current_month_hr_zone_pie_uses_period_workout_set(self) -> None:
+        self._seed_workout(
+            workout_id="workout-1",
+            title="First run",
+            with_heart_rate=True,
+            with_zones=True,
+            local_date="2026-06-01",
+            start_time_local="2026-06-01T10:00:00+03:00",
+            created_at="2026-06-01T10:30:00Z",
+        )
+        self._seed_workout(
+            workout_id="workout-2",
+            title="Second run",
+            with_heart_rate=True,
+            with_zones=False,
+            local_date="2026-06-13",
+            start_time_local="2026-06-13T10:00:00+03:00",
+            created_at="2026-06-13T10:30:00Z",
+        )
+        client = _visualization_client(
+            _intent(
+                ("heart_rate_zone_seconds",),
+                transforms=("as_percentage_of_total",),
+                chart_kind="pie",
+                workout_selector={"type": "current_month", "value": "", "count": None, "limit": None},
+                date_range={"start": "", "end": ""},
+            )
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "näytä kuluvan kuun treenien sykealueet piirakkagraafina"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.FILE)
+        self.assertEqual(result.messages[0].metadata["scope_type"], "workout_set")
+        self.assertEqual(result.messages[0].metadata["workout_ids"], ("workout-1", "workout-2"))
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_zone_seconds",))
+        with UnitOfWork(self.connection) as repositories:
+            artifact = repositories.rendered_artifacts.latest_visualization_for_user("user-1", channel_id="channel-1")
+        self.assertEqual(artifact.metadata["scope_type"], "workout_set")
+        self.assertEqual(artifact.metadata["workout_ids"], ["workout-1", "workout-2"])
+        self.assertEqual(artifact.metadata["period_start_date"], "2026-06-01")
+        self.assertEqual(artifact.metadata["period_end_date"], "2026-06-17")
+        self.assertEqual(artifact.metadata["workout_id"], "period-event-1")
+
+    def test_date_selector_with_date_range_uses_period_workout_set(self) -> None:
+        self._seed_workout(
+            workout_id="workout-1",
+            title="First run",
+            with_heart_rate=True,
+            with_zones=True,
+            local_date="2026-06-01",
+            start_time_local="2026-06-01T10:00:00+03:00",
+            created_at="2026-06-01T10:30:00Z",
+        )
+        self._seed_workout(
+            workout_id="workout-2",
+            title="Second run",
+            with_heart_rate=True,
+            with_zones=False,
+            local_date="2026-06-13",
+            start_time_local="2026-06-13T10:00:00+03:00",
+            created_at="2026-06-13T10:30:00Z",
+        )
+        client = _visualization_client(
+            _intent(
+                ("heart_rate_zone_seconds",),
+                transforms=("as_percentage_of_total",),
+                chart_kind="pie",
+                workout_selector={"type": "date", "value": "", "count": None, "limit": None},
+                date_range={"start": "2026-06-01", "end": "2026-06-30"},
+            )
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "näytä kesäkuun treenien sykealueet piirakkagraafina"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["scope_type"], "workout_set")
+        self.assertEqual(result.messages[0].metadata["workout_ids"], ("workout-1", "workout-2"))
+
+    def test_current_month_ascent_bar_uses_generic_period_dataset(self) -> None:
+        self._seed_workout(
+            workout_id="workout-1",
+            title="First run",
+            with_heart_rate=True,
+            local_date="2026-06-01",
+            start_time_local="2026-06-01T10:00:00+03:00",
+            created_at="2026-06-01T10:30:00Z",
+        )
+        self._seed_workout(
+            workout_id="workout-2",
+            title="Second run",
+            with_heart_rate=True,
+            local_date="2026-06-13",
+            start_time_local="2026-06-13T10:00:00+03:00",
+            created_at="2026-06-13T10:30:00Z",
+        )
+        client = _visualization_client(
+            _intent(
+                ("ascent_m",),
+                chart_kind="bar",
+                workout_selector={"type": "current_month", "value": "", "count": None, "limit": None},
+            )
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä kuluvan kuun treenien nousumetrit pylväinä"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["scope_type"], "workout_set")
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("ascent_m",))
+
     def test_latest_workout_hr_zone_distribution_requires_configured_zones(self) -> None:
         self._seed_workout(with_heart_rate=True, with_zones=False)
         client = _visualization_client(_intent(("heart_rate_zone_seconds",)))
@@ -159,6 +333,215 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
         self.assertEqual(result.error.category.value, "missing_metric")
         self.assertEqual(result.messages[0].localized_text.key, TranslationKey.HR_ZONES_EMPTY)
+
+    def test_latest_workout_route_map_returns_png_file(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map"))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä viimeisimmän treenin reitti kartalle"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.FILE)
+        self.assertEqual(result.messages[0].filename, "workout-1-route-map.png")
+        self.assertEqual(result.messages[0].content_type, "image/png")
+        self.assertTrue(result.messages[0].content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("route",))
+        self.assertEqual(_decode_png_rgb(result.messages[0].content)[:2], (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT))
+
+    def test_route_map_modifier_colors_single_workout_route_by_heart_rate(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map"))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä viimeisin treeni kartalle +hr +portrait"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("route", "heart_rate_bpm"))
+        self.assertEqual(result.messages[0].metadata["route_color_metric"], "heart_rate_bpm")
+        self.assertEqual(result.messages[0].metadata["route_color_status"], "ok")
+        self.assertEqual(result.messages[0].metadata["render_width"], 1080)
+        self.assertEqual(result.messages[0].metadata["render_height"], 1920)
+        self.assertEqual(_decode_png_rgb(result.messages[0].content)[:2], (1080, 1920))
+
+    def test_route_map_multiple_color_modifiers_warn_and_use_first_metric(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map"))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä viimeisin treeni kartalle +hr +pace"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 2)
+        self.assertEqual(result.messages[0].metadata["route_color_metric"], "heart_rate_bpm")
+        self.assertEqual(result.messages[0].metadata["route_color_ignored_metrics"], ("pace_s_per_km",))
+        self.assertEqual(result.messages[1].localized_text.key, TranslationKey.VISUALIZATION_ROUTE_COLOR_LIMITED)
+        self.assertEqual(result.messages[1].localized_text.params["metric"], "syke")
+
+    def test_route_map_uses_tile_background_metadata_when_cache_root_is_configured(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map"))
+        original_fetch_tiles = visualization_service.fetch_tiles
+
+        def fake_fetch_tiles(coords, config):
+            del config
+            content = _png(256, 256, bytearray((171, 205, 239) * 256 * 256))
+            return TileFetchResult(tiles=tuple(TileImage(coord=coord, content=content, source="cache") for coord in coords))
+
+        visualization_service.fetch_tiles = fake_fetch_tiles
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = self.dispatcher.dispatch(
+                    _mention("event-1", "piirrä viimeisimmän treenin reitti kartalle"),
+                    DispatchContext(
+                        UnitOfWork(self.connection),
+                        artifact_path=Path(tmpdir) / "artifacts",
+                        llm_gateway=LLMGateway(client),
+                    ),
+                )
+        finally:
+            visualization_service.fetch_tiles = original_fetch_tiles
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["map_background"], "osm")
+        self.assertEqual(result.messages[0].metadata["tile_status"], "ok")
+        self.assertGreater(result.messages[0].metadata["tile_count"], 0)
+        with UnitOfWork(self.connection) as repositories:
+            artifact = repositories.rendered_artifacts.latest_visualization_for_user("user-1", channel_id="channel-1")
+        self.assertEqual(artifact.metadata["map_background"], "osm")
+        self.assertEqual(artifact.metadata["tile_status"], "ok")
+
+    def test_route_map_prefers_configured_maptiler_tile_provider(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map"))
+        original_fetch_tiles = visualization_service.fetch_tiles
+
+        def fake_fetch_tiles(coords, config):
+            del config
+            content = _png(512, 512, bytearray((171, 205, 239) * 512 * 512))
+            return TileFetchResult(tiles=tuple(TileImage(coord=coord, content=content, source="network") for coord in coords))
+
+        visualization_service.fetch_tiles = fake_fetch_tiles
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = self.dispatcher.dispatch(
+                    _mention("event-1", "piirrä viimeisimmän treenin reitti kartalle"),
+                    DispatchContext(
+                        UnitOfWork(self.connection),
+                        artifact_path=Path(tmpdir) / "artifacts",
+                        llm_gateway=LLMGateway(client),
+                        maps_config=MapsConfig(provider="maptiler", maptiler_api_key="test-key"),
+                        renderers_config=RenderersConfig(route="pillow"),
+                    ),
+                )
+        finally:
+            visualization_service.fetch_tiles = original_fetch_tiles
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["map_background"], "maptiler_tiles")
+        self.assertEqual(result.messages[0].metadata["tile_provider"], "maptiler")
+        self.assertEqual(result.messages[0].metadata["tile_size"], 512)
+        self.assertEqual(result.messages[0].metadata["route_overlay"], "aimo")
+        self.assertEqual(result.messages[0].metadata["renderer"], "pillow")
+        self.assertEqual(_decode_png_rgb(result.messages[0].content)[:2], (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT))
+
+    def test_current_month_route_map_uses_period_workout_set(self) -> None:
+        self._seed_workout(
+            workout_id="workout-1",
+            title="First run",
+            with_heart_rate=True,
+            with_location=True,
+            local_date="2026-06-01",
+            start_time_local="2026-06-01T10:00:00+03:00",
+            created_at="2026-06-01T10:30:00Z",
+        )
+        self._seed_workout(
+            workout_id="workout-2",
+            title="Second run",
+            with_heart_rate=True,
+            with_location=True,
+            local_date="2026-06-13",
+            start_time_local="2026-06-13T10:00:00+03:00",
+            created_at="2026-06-13T10:30:00Z",
+        )
+        client = _visualization_client(
+            _intent(
+                ("route",),
+                x_metric="longitude",
+                chart_kind="map",
+                workout_selector={"type": "current_month", "value": "", "count": None, "limit": None},
+            )
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä kuluvan kuun treenien reitit kartalle"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["scope_type"], "workout_set")
+        self.assertEqual(result.messages[0].metadata["workout_ids"], ("workout-1", "workout-2"))
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("route",))
+        self.assertTrue(result.messages[0].content.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_current_month_route_map_modifier_colors_multiple_routes_by_heart_rate(self) -> None:
+        self._seed_workout(
+            workout_id="workout-1",
+            title="First run",
+            with_heart_rate=True,
+            with_location=True,
+            local_date="2026-06-01",
+            start_time_local="2026-06-01T10:00:00+03:00",
+            created_at="2026-06-01T10:30:00Z",
+        )
+        self._seed_workout(
+            workout_id="workout-2",
+            title="Second run",
+            with_heart_rate=True,
+            with_location=True,
+            local_date="2026-06-13",
+            start_time_local="2026-06-13T10:00:00+03:00",
+            created_at="2026-06-13T10:30:00Z",
+        )
+        client = _visualization_client(
+            _intent(
+                ("route",),
+                x_metric="longitude",
+                chart_kind="map",
+                workout_selector={"type": "current_month", "value": "", "count": None, "limit": None},
+            )
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä kuluvan kuun treenien reitit kartalle +hr"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["scope_type"], "workout_set")
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("route", "heart_rate_bpm"))
+        self.assertEqual(result.messages[0].metadata["route_color_metric"], "heart_rate_bpm")
+        self.assertEqual(result.messages[0].metadata["route_color_status"], "ok")
+
+    def test_latest_workout_route_map_requires_gps_points(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=False)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map"))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä viimeisimmän treenin reitti kartalle"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(result.error.category.value, "missing_metric")
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_MISSING_METRIC)
+        self.assertEqual(result.messages[0].localized_text.params["metric"], "route")
 
     def test_latest_workout_missing_primary_metric_returns_specific_error_without_clarification(self) -> None:
         self._seed_workout(with_heart_rate=False)
@@ -436,6 +819,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
         *,
         with_heart_rate: bool,
         with_zones: bool = False,
+        with_location: bool = False,
         workout_id: str = "workout-1",
         title: str = "Morning run",
         distance_km: float = 1.0,
@@ -503,6 +887,8 @@ class VisualizationWorkflowTests(unittest.TestCase):
                         point_index=0,
                         elapsed_s=0,
                         distance_km=0,
+                        latitude=60.17 if with_location else None,
+                        longitude=24.94 if with_location else None,
                         elevation_m=10,
                         heart_rate_bpm=120 if with_heart_rate else None,
                         pace_s_per_km=620,
@@ -512,6 +898,8 @@ class VisualizationWorkflowTests(unittest.TestCase):
                         point_index=1,
                         elapsed_s=300,
                         distance_km=0.5,
+                        latitude=60.171 if with_location else None,
+                        longitude=24.945 if with_location else None,
                         elevation_m=15,
                         heart_rate_bpm=130 if with_heart_rate else None,
                         pace_s_per_km=600,
@@ -521,6 +909,8 @@ class VisualizationWorkflowTests(unittest.TestCase):
                         point_index=2,
                         elapsed_s=600,
                         distance_km=1.0,
+                        latitude=60.173 if with_location else None,
+                        longitude=24.95 if with_location else None,
                         elevation_m=20,
                         heart_rate_bpm=140 if with_heart_rate else None,
                         pace_s_per_km=580,
@@ -563,18 +953,44 @@ def _intent(
     chart_kind: str = "auto",
     workout_selector: dict[str, object] | None = None,
     context_update: dict[str, object] | None = None,
+    date_range: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "workout_selector": workout_selector or {"type": "latest"},
         "x_metric": x_metric,
         "requested_metrics": list(metrics),
         "transform_hints": list(transforms),
-        "date_range": {},
+        "date_range": date_range or {},
         "comparison_mode": comparison_mode,
         "layout_mode": layout_mode,
         "chart_kind": chart_kind,
         "context_update": context_update or {"set_current_workout": False},
     }
+
+
+def _visualization_intent(
+    metrics: tuple[str, ...],
+    *,
+    x_metric: str = "elapsed_s",
+    transforms: tuple[str, ...] = (),
+    comparison_mode: str = "",
+    layout_mode: str = "auto",
+    chart_kind: str = "auto",
+    workout_selector: dict[str, object] | None = None,
+    context_update: dict[str, object] | None = None,
+    date_range: dict[str, object] | None = None,
+) -> VisualizationIntent:
+    return VisualizationIntent(
+        workout_selector=workout_selector or {"type": "latest"},
+        x_metric=x_metric,
+        y_metrics=metrics,
+        transforms=transforms,
+        date_range=date_range or {},
+        comparison_mode=comparison_mode,
+        layout_mode=layout_mode,
+        chart_kind=chart_kind,
+        context_update=context_update or {"set_current_workout": False},
+    )
 
 
 def _visualization_client(intent: dict[str, object]) -> FakeLLMClient:
