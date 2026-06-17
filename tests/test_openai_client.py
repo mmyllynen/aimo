@@ -122,6 +122,7 @@ class OpenAIResponsesClientTests(unittest.TestCase):
                         "comparison_mode": "",
                         "layout_mode": "auto",
                         "chart_kind": "auto",
+                        "output_mode": "chart",
                         "context_update": {"set_current_workout": False},
                     }
                 ),
@@ -144,8 +145,10 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         self.assertNotIn("heart_rate", properties["requested_metrics"]["items"]["enum"])
         self.assertEqual(properties["layout_mode"]["enum"], ["auto", "single_axis", "small_multiples"])
         self.assertEqual(properties["chart_kind"]["enum"], ["auto", "line", "bar", "pie", "map"])
+        self.assertEqual(properties["output_mode"]["enum"], ["chart", "social_image"])
         self.assertIn("route", properties["requested_metrics"]["items"]["enum"])
         self.assertIn("chart_kind", body["text"]["format"]["schema"]["required"])
+        self.assertIn("output_mode", body["text"]["format"]["schema"]["required"])
         self.assertIn("context_update", body["text"]["format"]["schema"]["required"])
         self.assertFalse(context_update["additionalProperties"])
         self.assertEqual(context_update["required"], ["set_current_workout"])

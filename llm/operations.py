@@ -41,6 +41,7 @@ VISUALIZATION_METRICS = (
     "avg_hr_bpm",
     "max_hr_bpm",
     "point_count",
+    "local_date",
 )
 VISUALIZATION_TRANSFORMS = (
     "normalize_to_primary_range",
@@ -51,6 +52,7 @@ VISUALIZATION_TRANSFORMS = (
 )
 VISUALIZATION_LAYOUT_MODES = ("auto", "single_axis", "small_multiples")
 VISUALIZATION_CHART_KINDS = ("auto", "line", "bar", "pie", "map")
+VISUALIZATION_OUTPUT_MODES = ("chart", "social_image")
 PERIOD_SCOPE_TYPES = (
     "none",
     "single_workout",
@@ -208,6 +210,7 @@ class VisualizationIntent:
     route_color_ignored_metrics: tuple[str, ...] = ()
     render_width: int = 0
     render_height: int = 0
+    output_mode: str = "chart"
 
 
 def classify_intent(gateway: LLMGateway, data: IntentClassificationInput) -> RouteDecision:
@@ -255,6 +258,7 @@ def _workflow_catalog() -> JsonObject:
                 "draw latest heart-rate chart",
                 "piirrä sama piirakkakuviona jakauma prosentuaalisesti",
                 "vertaa kahta viimeisintä treeniä kuvaajana",
+                "piirrä somekuva viimeisestä treenistä",
             ],
         },
         "workout_chat": {
@@ -443,6 +447,9 @@ def extract_visualization_intent(gateway: LLMGateway, data: VisualizationIntentI
                 "Set chart_kind to pie only when the user explicitly asks for a pie/piirakka chart. "
                 "Set chart_kind to map and requested_metrics to route only when the user explicitly asks for a route map, "
                 "route plot, or map background visualization. "
+                "Set output_mode to social_image for shareable/social workout images such as Finnish somekuva. "
+                "For social_image, select exactly one workout, include route in requested_metrics, and include any explicitly "
+                "requested stat metrics such as distance_km, duration_s, avg_hr_bpm, or ascent_m. "
                 "For workout set or period requests, return a period selector such as current_month, last_week, "
                 "rolling_days, date_range, all_workouts, or calendar_year_to_date; do not return an empty single-workout "
                 "date selector for a period request. Python resolves dates, ownership, aggregation, and rendering. "
@@ -502,6 +509,7 @@ def _visualization_intent_from_payload(payload: JsonObject) -> VisualizationInte
         route_color_ignored_metrics=tuple(payload.get("route_color_ignored_metrics", ())),
         render_width=int(payload.get("render_width") or 0),
         render_height=int(payload.get("render_height") or 0),
+        output_mode=payload.get("output_mode", "chart"),
     )
 
 
@@ -623,6 +631,7 @@ def _visualization_intent_schema() -> JsonObject:
             "comparison_mode",
             "layout_mode",
             "chart_kind",
+            "output_mode",
             "context_update",
         ],
         "properties": {
@@ -658,6 +667,7 @@ def _visualization_intent_schema() -> JsonObject:
             "comparison_mode": {"type": "string"},
             "layout_mode": {"type": "string", "enum": list(VISUALIZATION_LAYOUT_MODES)},
             "chart_kind": {"type": "string", "enum": list(VISUALIZATION_CHART_KINDS)},
+            "output_mode": {"type": "string", "enum": list(VISUALIZATION_OUTPUT_MODES)},
             "context_update": {
                 "type": "object",
                 "required": ["set_current_workout"],

@@ -52,12 +52,34 @@ VISUALIZATION_MODIFIER_METRICS = {
     "vauhti": "pace_s_per_km",
     "ascent": "ascent_m",
     "nousu": "ascent_m",
+    "nousumetrit": "ascent_m",
+    "pace": "pace_s_per_km",
+    "vauhti": "pace_s_per_km",
+    "distance": "distance_km",
+    "matka": "distance_km",
+    "duration": "duration_s",
+    "kesto": "duration_s",
+    "date": "local_date",
+    "paiva": "local_date",
+    "päivä": "local_date",
+    "maxhr": "max_hr_bpm",
+    "maksimisyke": "max_hr_bpm",
 }
 ROUTE_COLOR_METRICS = frozenset({"heart_rate_bpm", "elevation_m", "pace_s_per_km"})
+SOCIAL_STAT_MODIFIER_METRICS = {
+    **VISUALIZATION_MODIFIER_METRICS,
+    "hr": "avg_hr_bpm",
+    "syke": "avg_hr_bpm",
+    "heart": "avg_hr_bpm",
+    "heartrate": "avg_hr_bpm",
+    "heart_rate": "avg_hr_bpm",
+}
 VISUALIZATION_ASPECT_SIZES = {
+    "landscape": (1920, 1080),
     "portrait": (1080, 1920),
     "square": (1080, 1080),
 }
+SOCIAL_OUTPUT_MODIFIERS = frozenset({"social", "somekuva"})
 
 
 @dataclass(frozen=True)
@@ -134,6 +156,13 @@ class VisualizationWorkflow:
                 "Heart-rate zone visualization requested without configured zones",
             )
         except MissingPrimaryMetricError as exc:
+            if rendered_intent_if_available := _social_route_error_key(resolved.intent, exc):
+                return _error_result(
+                    WorkflowStatus.USER_ERROR,
+                    ErrorCategory.MISSING_METRIC,
+                    rendered_intent_if_available,
+                    "Social image requested for workout without route points",
+                )
             return _error_result(
                 WorkflowStatus.USER_ERROR,
                 ErrorCategory.MISSING_METRIC,
@@ -270,6 +299,8 @@ def _render_with_optional_revision(
 ) -> tuple[VisualizationArtifact, VisualizationIntent]:
     _validate_zone_prerequisite(resolved.intent, heart_rate_zones)
     if resolved.scope_type == "workout_set":
+        if resolved.intent.output_mode == "social_image":
+            raise VisualizationSpecInvalidError("SocialImageRequiresSingleWorkout")
         manifest = _period_manifest(resolved, points, heart_rate_zones)
         try:
             return (
@@ -333,7 +364,7 @@ def _render_with_optional_revision(
             )
     try:
         return (
-            render_workout_visualization(
+                render_workout_visualization(
                 resolved.workout,
                 points,
                 resolved.intent,
@@ -343,6 +374,7 @@ def _render_with_optional_revision(
                 maps_config=maps_config,
                 renderers_config=renderers_config,
                 language=language,
+                social_background_image=_social_background_image(event),
             ),
             resolved.intent,
         )
@@ -381,6 +413,7 @@ def _render_with_optional_revision(
                 maps_config=maps_config,
                 renderers_config=renderers_config,
                 language=language,
+                social_background_image=_social_background_image(event),
             ),
             revised_intent,
         )
@@ -611,13 +644,17 @@ def _apply_visualization_modifiers(intent: VisualizationIntent, text: str) -> Vi
     modifiers = _visualization_modifiers(text)
     if not modifiers:
         return intent
-    extra_metrics = tuple(VISUALIZATION_MODIFIER_METRICS[modifier] for modifier in modifiers if modifier in VISUALIZATION_MODIFIER_METRICS)
+    output_mode = "social_image" if any(modifier in SOCIAL_OUTPUT_MODIFIERS for modifier in modifiers) else intent.output_mode
+    metric_map = SOCIAL_STAT_MODIFIER_METRICS if output_mode == "social_image" else VISUALIZATION_MODIFIER_METRICS
+    extra_metrics = tuple(metric_map[modifier] for modifier in modifiers if modifier in metric_map)
     render_size = next((VISUALIZATION_ASPECT_SIZES[modifier] for modifier in modifiers if modifier in VISUALIZATION_ASPECT_SIZES), None)
-    if not extra_metrics and render_size is None:
+    if output_mode != intent.output_mode:
+        extra_metrics = tuple(dict.fromkeys(("route", *extra_metrics)))
+    if not extra_metrics and render_size is None and output_mode == intent.output_mode:
         return intent
     route_color_metric = intent.route_color_metric
     ignored_route_metrics: tuple[str, ...] = ()
-    if intent.chart_kind == "map" and "route" in intent.y_metrics:
+    if intent.chart_kind == "map" and "route" in intent.y_metrics and output_mode != "social_image":
         route_metrics = tuple(metric for metric in extra_metrics if metric in ROUTE_COLOR_METRICS)
         if route_metrics:
             route_color_metric = route_metrics[0]
@@ -632,13 +669,20 @@ def _apply_visualization_modifiers(intent: VisualizationIntent, text: str) -> Vi
         date_range=intent.date_range,
         comparison_mode=intent.comparison_mode,
         layout_mode=intent.layout_mode,
-        chart_kind=intent.chart_kind,
+        chart_kind="map" if output_mode == "social_image" else intent.chart_kind,
         context_update=intent.context_update,
         route_color_metric=route_color_metric,
         route_color_ignored_metrics=ignored_route_metrics,
         render_width=render_size[0] if render_size is not None else intent.render_width,
         render_height=render_size[1] if render_size is not None else intent.render_height,
+        output_mode=output_mode,
     )
+
+
+def _social_route_error_key(intent: VisualizationIntent, exc: MissingPrimaryMetricError) -> TranslationKey | None:
+    if intent.output_mode == "social_image" and exc.metric == "route":
+        return TranslationKey.ERROR_SOCIAL_IMAGE_REQUIRES_ROUTE
+    return None
 
 
 def _visualization_modifiers(text: str) -> tuple[str, ...]:
@@ -666,6 +710,7 @@ def _structured_intent(event: CanonicalEvent) -> VisualizationIntent | None:
         layout_mode=str(options.get("layout_mode") or "auto"),
         chart_kind=str(options.get("chart_kind") or "auto"),
         context_update={"set_current_workout": bool(options.get("set_current_workout", False))},
+        output_mode=str(options.get("output_mode") or "chart"),
     )
 
 
@@ -725,6 +770,25 @@ def _intent_payload(intent: VisualizationIntent) -> dict[str, object]:
         "route_color_ignored_metrics": list(intent.route_color_ignored_metrics),
         "render_width": intent.render_width,
         "render_height": intent.render_height,
+        "output_mode": intent.output_mode,
+    }
+
+
+def _social_background_image(event: CanonicalEvent) -> bytes | None:
+    for attachment in event.attachments:
+        if not _is_supported_image_attachment(attachment.filename, attachment.content_type):
+            continue
+        content = attachment.metadata.get("content")
+        if isinstance(content, bytes):
+            return content
+    return None
+
+
+def _is_supported_image_attachment(filename: str, content_type: str) -> bool:
+    return filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp")) or content_type.split(";", 1)[0].strip().lower() in {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
     }
 
 

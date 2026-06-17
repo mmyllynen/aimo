@@ -21,6 +21,9 @@ SUPPORTED_ACTIONS = {
     "aktiivinen",
     "aseta_aktiivinen",
     "poista",
+    "nimea",
+    "tagaa",
+    "poista_tagi",
     "sykerajat",
     "aseta_sykerajat",
 }
@@ -63,6 +66,12 @@ class WorkoutManagementWorkflow:
             return self._set_active(event, repositories, str(options.get("viite", "")).strip())
         if action == "poista":
             return self._delete(event, repositories, str(options.get("viite", "")).strip())
+        if action == "nimea":
+            return self._rename(event, repositories, str(options.get("viite", "")).strip(), str(options.get("nimi", "")).strip())
+        if action == "tagaa":
+            return self._add_tag(event, repositories, str(options.get("viite", "")).strip(), str(options.get("tagi", "")).strip())
+        if action == "poista_tagi":
+            return self._remove_tag(event, repositories, str(options.get("viite", "")).strip(), str(options.get("tagi", "")).strip())
         if action == "sykerajat":
             return self._list_hr_zones(event, repositories)
         if action == "aseta_sykerajat":
@@ -202,6 +211,63 @@ class WorkoutManagementWorkflow:
         repositories.heart_rate_zones.replace_for_user(event.user_id, zones)
         return _message(TranslationKey.HR_ZONES_UPDATED)
 
+    def _rename(
+        self,
+        event: CanonicalEvent,
+        repositories: RepositoryBundle,
+        workout_id: str,
+        title: str,
+    ) -> WorkflowResult:
+        resolved = resolve_workout_reference(repositories, event.user_id, workout_id, default="latest")
+        if error := _reference_error(resolved):
+            return error
+        title = _clean_title(title)
+        if not title:
+            return _user_error(TranslationKey.ERROR_UNEXPECTED, ErrorCategory.UNEXPECTED)
+        assert resolved.workout is not None
+        repositories.workouts.rename_for_user(event.user_id, resolved.workout.workout_id, title)
+        updated = repositories.workouts.get_for_user(event.user_id, resolved.workout.workout_id) or resolved.workout
+        _set_current_workout(event, repositories, updated)
+        return _message(TranslationKey.WORKOUT_RENAMED, title=title)
+
+    def _add_tag(
+        self,
+        event: CanonicalEvent,
+        repositories: RepositoryBundle,
+        workout_id: str,
+        tag: str,
+    ) -> WorkflowResult:
+        resolved = resolve_workout_reference(repositories, event.user_id, workout_id, default="latest")
+        if error := _reference_error(resolved):
+            return error
+        tag = _clean_tag(tag)
+        if not tag:
+            return _user_error(TranslationKey.WORKOUT_TAG_INVALID, ErrorCategory.UNEXPECTED)
+        assert resolved.workout is not None
+        repositories.workouts.add_tag_for_user(event.user_id, resolved.workout.workout_id, tag)
+        _set_current_workout(event, repositories, resolved.workout)
+        return _message(TranslationKey.WORKOUT_TAG_ADDED, title=resolved.workout.title, tag=tag)
+
+    def _remove_tag(
+        self,
+        event: CanonicalEvent,
+        repositories: RepositoryBundle,
+        workout_id: str,
+        tag: str,
+    ) -> WorkflowResult:
+        resolved = resolve_workout_reference(repositories, event.user_id, workout_id, default="latest")
+        if error := _reference_error(resolved):
+            return error
+        tag = _clean_tag(tag)
+        if not tag:
+            return _user_error(TranslationKey.WORKOUT_TAG_INVALID, ErrorCategory.UNEXPECTED)
+        assert resolved.workout is not None
+        removed = repositories.workouts.remove_tag_for_user(event.user_id, resolved.workout.workout_id, tag)
+        if not removed:
+            return _user_error(TranslationKey.ERROR_NO_MATCHING_WORKOUT, ErrorCategory.NO_MATCHING_WORKOUT)
+        _set_current_workout(event, repositories, resolved.workout)
+        return _message(TranslationKey.WORKOUT_TAG_REMOVED, title=resolved.workout.title, tag=tag)
+
 
 def _options(event: CanonicalEvent) -> dict[str, Any]:
     options = event.metadata.get("options", {})
@@ -261,6 +327,19 @@ def _strictly_increasing(values: tuple[int, ...]) -> bool:
     return all(current > previous for previous, current in zip(values, values[1:]))
 
 
+def _clean_title(value: str) -> str:
+    return " ".join(value.split())[:120]
+
+
+def _clean_tag(value: str) -> str:
+    normalized = value.strip().lower().replace(" ", "-")
+    if not normalized or len(normalized) > 40:
+        return ""
+    if not all(character.isalnum() or character in {"-", "_"} for character in normalized):
+        return ""
+    return normalized
+
+
 def _message(
     key: TranslationKey,
     *,
@@ -306,6 +385,7 @@ def _reference_error(resolved: WorkoutReferenceResolution) -> WorkflowResult | N
 
 
 def _workout_details(workout: WorkoutRecord) -> WorkflowResult:
+    tags = ""
     return _message(
         TranslationKey.WORKOUT_DETAILS,
         title=workout.title or workout.workout_id,
@@ -315,6 +395,7 @@ def _workout_details(workout: WorkoutRecord) -> WorkflowResult:
         duration=_format_duration(workout.duration_s),
         avg_hr=_format_heart_rate(workout.avg_hr_bpm),
         ascent=_format_ascent(workout.ascent_m),
+        tags=tags,
     )
 
 

@@ -24,6 +24,20 @@ class UnsupportedAttachmentDownloadError(AttachmentDownloadError):
     pass
 
 
+IMAGE_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def is_supported_image_attachment(filename: str, content_type: str) -> bool:
+    normalized_type = content_type.split(";", 1)[0].strip().lower()
+    normalized_name = filename.lower()
+    return normalized_type in IMAGE_CONTENT_TYPES or normalized_name.endswith(IMAGE_EXTENSIONS)
+
+
 def hydrate_attachment_content(
     event: CanonicalEvent,
     *,
@@ -54,10 +68,12 @@ def _hydrate_attachment(
 ) -> AttachmentRef:
     if "content" in attachment.metadata:
         return attachment
-    if not is_supported_gpx_attachment(attachment.filename, attachment.content_type):
+    if not _is_downloadable_attachment(attachment):
         return attachment
     if attachment.size_bytes is not None and attachment.size_bytes > max_size_bytes:
         raise AttachmentTooLargeError(f"Attachment {attachment.attachment_id} exceeds configured size limit")
+    if not attachment.url and is_supported_image_attachment(attachment.filename, attachment.content_type):
+        return attachment
     if not attachment.url:
         raise UnsupportedAttachmentDownloadError(f"Attachment {attachment.attachment_id} has no download URL")
 
@@ -76,8 +92,8 @@ def _hydrate_attachment(
 
     if len(content) > max_size_bytes:
         raise AttachmentTooLargeError(f"Attachment {attachment.attachment_id} exceeds configured size limit")
-    if not is_supported_gpx_attachment(attachment.filename, content_type):
-        raise UnsupportedAttachmentDownloadError(f"Attachment {attachment.attachment_id} is not a supported GPX file")
+    if not _is_downloadable_attachment(replace(attachment, content_type=content_type)):
+        raise UnsupportedAttachmentDownloadError(f"Attachment {attachment.attachment_id} is not a supported GPX or image file")
 
     metadata = dict(attachment.metadata)
     metadata["content"] = content
@@ -87,6 +103,13 @@ def _hydrate_attachment(
         content_type=attachment.content_type or content_type,
         size_bytes=attachment.size_bytes if attachment.size_bytes is not None else len(content),
         metadata=metadata,
+    )
+
+
+def _is_downloadable_attachment(attachment: AttachmentRef) -> bool:
+    return is_supported_gpx_attachment(attachment.filename, attachment.content_type) or is_supported_image_attachment(
+        attachment.filename,
+        attachment.content_type,
     )
 
 

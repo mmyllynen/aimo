@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Literal, Protocol
 
 from core.config import RenderersConfig
-from visualization.render import BarChart, LineChart, MultiPanelLineChart, PieChart, RouteMap
+from visualization.render import BarChart, LineChart, MultiPanelLineChart, PieChart, RouteMap, SocialImage
 
 
-ChartType = Literal["line", "multi_panel_line", "bar", "pie", "route"]
+ChartType = Literal["line", "multi_panel_line", "bar", "pie", "route", "social_image"]
 RendererName = Literal["internal", "pillow"]
 
 
@@ -26,6 +26,8 @@ class VisualizationRenderer(Protocol):
     def render_pie_chart_png(self, chart: PieChart) -> bytes: ...
 
     def render_route_map_png(self, chart: RouteMap) -> bytes: ...
+
+    def render_social_image_png(self, chart: SocialImage) -> bytes: ...
 
 
 def renderer_name(config: RenderersConfig | None, chart_type: ChartType) -> RendererName:

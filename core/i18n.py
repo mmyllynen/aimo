@@ -34,6 +34,10 @@ class TranslationKey(StrEnum):
     WORKOUT_DELETE_CONFIRMATION_EXPIRED = "workout.delete_confirmation_expired"
     WORKOUT_DELETE_CANCELLED = "workout.delete_cancelled"
     WORKOUT_DELETED = "workout.deleted"
+    WORKOUT_RENAMED = "workout.renamed"
+    WORKOUT_TAG_ADDED = "workout.tag_added"
+    WORKOUT_TAG_REMOVED = "workout.tag_removed"
+    WORKOUT_TAG_INVALID = "workout.tag_invalid"
     HR_ZONES_EMPTY = "hr_zones.empty"
     HR_ZONES_INVALID = "hr_zones.invalid"
     HR_ZONES_SUMMARY = "hr_zones.summary"
@@ -52,6 +56,7 @@ class TranslationKey(StrEnum):
     ERROR_NO_WORKOUTS_IN_PERIOD = "error.no_workouts_in_period"
     ERROR_PERIOD_REQUEST_INVALID = "error.period_request_invalid"
     ERROR_VISUALIZATION_PLAN_INVALID = "error.visualization_plan_invalid"
+    ERROR_SOCIAL_IMAGE_REQUIRES_ROUTE = "error.social_image_requires_route"
     ERROR_RENDER_FAILED = "error.render_failed"
     ERROR_MODEL_UNAVAILABLE = "error.model_unavailable"
     ERROR_PERMISSION_DENIED = "error.permission_denied"
@@ -106,6 +111,10 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         ),
         TranslationKey.WORKOUT_DELETE_CANCELLED: "Peruin poiston.",
         TranslationKey.WORKOUT_DELETED: "Poistin treenin: {title}.",
+        TranslationKey.WORKOUT_RENAMED: "Nimesin treenin uudelleen: {title}.",
+        TranslationKey.WORKOUT_TAG_ADDED: "Lisäsin tagin {tag} treenille: {title}.",
+        TranslationKey.WORKOUT_TAG_REMOVED: "Poistin tagin {tag} treeniltä: {title}.",
+        TranslationKey.WORKOUT_TAG_INVALID: "Tagin muoto ei kelpaa.",
         TranslationKey.HR_ZONES_EMPTY: "Sinulle ei ole vielä asetettu sykerajoja.",
         TranslationKey.HR_ZONES_INVALID: (
             "Sykerajojen muoto ei kelpaa. Anna maksimisyke tai viisi nousevaa ylärajaa, "
@@ -129,6 +138,7 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.ERROR_NO_WORKOUTS_IN_PERIOD: "En löytänyt treenejä pyydetyltä jaksolta.",
         TranslationKey.ERROR_PERIOD_REQUEST_INVALID: "En saanut muodostettua kelvollista treenijakson rajausta.",
         TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID: "En saanut muodostettua kelvollista kuvaajasuunnitelmaa.",
+        TranslationKey.ERROR_SOCIAL_IMAGE_REQUIRES_ROUTE: "Somekuva tarvitsee treenin, jossa on reittipisteet.",
         TranslationKey.ERROR_RENDER_FAILED: "Kuvaajan piirtäminen epäonnistui.",
         TranslationKey.ERROR_MODEL_UNAVAILABLE: "Kielimalli ei ole juuri nyt käytettävissä.",
         TranslationKey.ERROR_PERMISSION_DENIED: "Sinulla ei ole oikeutta tähän toimintoon.",
@@ -177,6 +187,10 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         ),
         TranslationKey.WORKOUT_DELETE_CANCELLED: "Cancelled deletion.",
         TranslationKey.WORKOUT_DELETED: "Deleted workout: {title}.",
+        TranslationKey.WORKOUT_RENAMED: "Renamed workout to: {title}.",
+        TranslationKey.WORKOUT_TAG_ADDED: "Added tag {tag} to workout: {title}.",
+        TranslationKey.WORKOUT_TAG_REMOVED: "Removed tag {tag} from workout: {title}.",
+        TranslationKey.WORKOUT_TAG_INVALID: "The tag format is invalid.",
         TranslationKey.HR_ZONES_EMPTY: "You do not have heart-rate zones configured yet.",
         TranslationKey.HR_ZONES_INVALID: (
             "The heart-rate zone format is invalid. Provide max heart rate or five increasing upper limits, "
@@ -200,6 +214,7 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.ERROR_NO_WORKOUTS_IN_PERIOD: "I did not find workouts in the requested period.",
         TranslationKey.ERROR_PERIOD_REQUEST_INVALID: "I could not build a valid workout-period selection.",
         TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID: "I could not build a valid chart plan.",
+        TranslationKey.ERROR_SOCIAL_IMAGE_REQUIRES_ROUTE: "A social image needs a workout with route points.",
         TranslationKey.ERROR_RENDER_FAILED: "Rendering the chart failed.",
         TranslationKey.ERROR_MODEL_UNAVAILABLE: "The language model is not available right now.",
         TranslationKey.ERROR_PERMISSION_DENIED: "You do not have permission for that action.",

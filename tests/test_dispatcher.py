@@ -219,6 +219,7 @@ class DispatcherTests(unittest.TestCase):
                     "comparison_mode": "",
                     "layout_mode": "auto",
                     "chart_kind": "auto",
+                    "output_mode": "chart",
                     "context_update": {"set_current_workout": False},
                 },
             }

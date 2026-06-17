@@ -47,6 +47,20 @@ HEART_RATE_ZONES_OPTION = DiscordCommandOptionSpec(
     option_type=DiscordCommandOptionType.STRING,
 )
 
+WORKOUT_TITLE_OPTION = DiscordCommandOptionSpec(
+    name="nimi",
+    description="Uusi treenin nimi.",
+    option_type=DiscordCommandOptionType.STRING,
+    required=True,
+)
+
+WORKOUT_TAG_OPTION = DiscordCommandOptionSpec(
+    name="tagi",
+    description="Lisättävä tai poistettava tagi.",
+    option_type=DiscordCommandOptionType.STRING,
+    required=True,
+)
+
 
 COMMAND_SPECS = (
     DiscordCommandSpec(
@@ -78,6 +92,21 @@ COMMAND_SPECS = (
                 options=(WORKOUT_REFERENCE_OPTION,),
             ),
             DiscordSubcommandSpec(name="poista", description="Aloita treenin poisto.", options=(WORKOUT_REFERENCE_OPTION,)),
+            DiscordSubcommandSpec(
+                name="nimea",
+                description="Nimeä treeni uudelleen.",
+                options=(WORKOUT_REFERENCE_OPTION, WORKOUT_TITLE_OPTION),
+            ),
+            DiscordSubcommandSpec(
+                name="tagaa",
+                description="Lisää treenille tagi.",
+                options=(WORKOUT_REFERENCE_OPTION, WORKOUT_TAG_OPTION),
+            ),
+            DiscordSubcommandSpec(
+                name="poista_tagi",
+                description="Poista treeniltä tagi.",
+                options=(WORKOUT_REFERENCE_OPTION, WORKOUT_TAG_OPTION),
+            ),
             DiscordSubcommandSpec(name="sykerajat", description="Näytä sykerajat."),
             DiscordSubcommandSpec(
                 name="aseta_sykerajat",

@@ -54,3 +54,4 @@ multi_panel_line = pillow
 bar = pillow
 pie = pillow
 route = pillow
+social_image = pillow
