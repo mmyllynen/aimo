@@ -117,7 +117,10 @@ def _schema_name(operation: str) -> str:
 
 def _output_text(payload: JsonObject) -> str:
     if payload.get("status") not in {None, "completed"}:
-        raise LLMGatewayError(f"OpenAI response status was {payload.get('status')!r}")
+        details = payload.get("incomplete_details")
+        reason = details.get("reason", "") if isinstance(details, dict) else ""
+        suffix = f" ({reason})" if reason else ""
+        raise LLMGatewayError(f"OpenAI response status was {payload.get('status')!r}{suffix}")
     if isinstance(payload.get("error"), dict) and payload["error"]:
         message = payload["error"].get("message", "OpenAI response error")
         raise LLMGatewayError(str(message))

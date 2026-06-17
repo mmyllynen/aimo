@@ -598,6 +598,40 @@ class WorkoutsRepository:
         ).fetchall()
         return tuple(_workout_from_row(row) for row in rows)
 
+    def list_for_user_in_period(
+        self,
+        owner_user_id: str,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        kind: str | None = None,
+        primary_kind: str | None = None,
+    ) -> tuple[WorkoutRecord, ...]:
+        where = ["owner_user_id = ?"]
+        params: list[str] = [owner_user_id]
+        if start_date:
+            where.append("local_date >= ?")
+            params.append(start_date)
+        if end_date:
+            where.append("local_date <= ?")
+            params.append(end_date)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
+        if primary_kind:
+            where.append("primary_kind = ?")
+            params.append(primary_kind)
+        rows = self.connection.execute(
+            f"""
+            SELECT *
+            FROM workouts
+            WHERE {" AND ".join(where)}
+            ORDER BY local_date ASC, start_time_local ASC, created_at ASC, workout_id ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        return tuple(_workout_from_row(row) for row in rows)
+
     def latest_for_user(self, owner_user_id: str) -> WorkoutRecord | None:
         rows = self.list_for_user(owner_user_id, limit=1)
         if not rows:

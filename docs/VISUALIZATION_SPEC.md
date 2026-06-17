@@ -85,6 +85,7 @@ Canonical metric ids include:
 - `max_hr_bpm`
 - `time_in_zone_s`
 - `zone_share`
+- `route`
 
 Common language aliases are interpreted by the LLM and must be returned to Python as canonical metric ids:
 
@@ -94,6 +95,7 @@ Common language aliases are interpreted by the LLM and must be returned to Pytho
 - `aika`, `time` -> `elapsed_s` for point charts
 - `matka`, `distance` -> `distance_km`
 - `kadenssi`, `cadence` -> `cadence_spm`
+- `reitti`, `route`, `kartta`, `map` -> `route` with `chart_kind=map`
 
 Python does not infer metrics, transforms, chart types, or previous-chart references from natural-language substrings.
 
@@ -146,6 +148,7 @@ Supported chart kinds:
 - `line`
 - `bar`
 - `pie`
+- `map` (formal intent support; route-map renderer is planned)
 
 Supported transforms:
 
@@ -181,6 +184,8 @@ Before rendering:
 
 ## Rendering
 
+The deterministic application selects the concrete renderer from `[renderers]` config. Supported renderer names are `internal` and `pillow`; chart-specific settings for `line`, `multi_panel_line`, `bar`, `pie`, and `route` override `default` when set. The default renderer is `pillow`; set `internal` explicitly to use the dependency-free fallback. The LLM does not choose the renderer.
+
 All chart types use the same renderer frame:
 
 - a readable title and compact workout subtitle
@@ -190,12 +195,13 @@ All chart types use the same renderer frame:
 - shared tick, duration, pace, and percentage value formatting
 - generic supersampling/downsampling antialiasing for rendered marks and chart edges
 - native-resolution text overlay after downsampling so title, axes, ticks, labels, and legend text stay crisp
+- 1920x1080 default output for HD social sharing unless a chart model explicitly overrides dimensions
 
 Legend content is driven by render metadata, not chart-specific text assembly. Percentage values are shown once, for example `PK1 12.5%`, not as duplicate value/share pairs. Categorical zero-value rows remain renderable legend entries when they are part of the resolved dataset, even if the mark itself has no visible geometry for zero.
 
 Color is generic metadata. Datasets may expose optional `color_hint` values such as named palette entries or hex RGB values; renderers may use them for any categorical bar or pie chart. Python must not infer colors from natural-language user text or add metric-specific color branches. If no hint exists, the renderer uses the shared default palette.
 
-The dependency-free bitmap renderer owns font size hierarchy and text placement. Title, subtitle, axes, ticks, labels, and sidebar entries must use stable layout constraints so new data does not resize or overlap the chart frame. Text is not downsampled; mark antialiasing must not make labels blurry.
+The `internal` dependency-free bitmap renderer is retained as a fallback. The `pillow` renderer may be used for all chart types and is preferred for route maps when high-quality tile stitching, crop, resize, and overlay antialiasing are needed. Title, subtitle, axes, ticks, labels, and sidebar entries must use stable layout constraints so new data does not resize or overlap the chart frame.
 
 ## Output
 

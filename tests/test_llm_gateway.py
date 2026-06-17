@@ -8,6 +8,8 @@ from llm.gateway import FakeLLMClient, LLMGateway, LLMGatewayError, LLMOperation
 from llm.operations import (
     ChatReplyInput,
     IntentClassificationInput,
+    PeriodAnalysisReplyInput,
+    PeriodRequestInput,
     VisualizationIntentInput,
     VisualizationIntentRevisionInput,
     WorkoutReplyInput,
@@ -15,8 +17,10 @@ from llm.operations import (
     classify_intent,
     extract_visualization_intent,
     extract_workout_reference,
+    interpret_period_request,
     revise_visualization_intent,
     write_chat_reply,
+    write_period_analysis_reply,
     write_workout_reply,
 )
 
@@ -92,25 +96,86 @@ class LLMGatewayTests(unittest.TestCase):
             )
 
     def test_extract_workout_reference_preserves_latest_selector(self) -> None:
-        gateway = LLMGateway(
-            FakeLLMClient(
-                {
-                    LLMOperation.WORKOUT_REFERENCE_EXTRACTION: {
-                        "selector_type": "latest",
-                        "selector_value": "latest",
-                        "matched_workout_ids": [],
-                        "ambiguity_reason": "",
-                        "requires_clarification": False,
-                        "set_current_workout": False,
-                    }
+        client = FakeLLMClient(
+            {
+                LLMOperation.WORKOUT_REFERENCE_EXTRACTION: {
+                    "selector_type": "latest",
+                    "selector_value": "latest",
+                    "matched_workout_ids": [],
+                    "ambiguity_reason": "",
+                    "requires_clarification": False,
+                    "set_current_workout": False,
                 }
-            )
+            }
         )
+        gateway = LLMGateway(client)
 
         reference = extract_workout_reference(gateway, WorkoutReferenceInput(user_text="viimeisin treeni"))
 
         self.assertEqual(reference.selector_type, "latest")
         self.assertFalse(reference.requires_clarification)
+        self.assertEqual(client.requests[0].max_tokens, 1200)
+
+    def test_interpret_period_request_returns_structured_scope(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.PERIOD_REQUEST_INTERPRETATION: {
+                    "scope_type": "all_workouts",
+                    "scope_value": "",
+                    "start_date": "",
+                    "end_date": "",
+                    "rolling_days": None,
+                    "filters": {"kind": "", "primary_kind": "", "tags": []},
+                    "metrics": ["ascent_m"],
+                    "grouping": "none",
+                    "output_mode": "prose",
+                    "comparison_mode": "none",
+                    "reason": "User asked for all workouts.",
+                }
+            }
+        )
+
+        request = interpret_period_request(
+            LLMGateway(client),
+            PeriodRequestInput(
+                user_text="tee yhteenveto kaikkien treenien nousumetreistä",
+                current_datetime="2026-06-16T16:00:00+03:00",
+                timezone="Europe/Helsinki",
+            ),
+        )
+
+        self.assertTrue(request.is_period_request)
+        self.assertEqual(request.scope_type, "all_workouts")
+        self.assertEqual(request.metrics, ("ascent_m",))
+        self.assertIn("allowed_scope_types", client.requests[0].user_payload)
+        self.assertIn("Python resolves dates", client.requests[0].system_prompt)
+
+    def test_write_period_analysis_reply_uses_bounded_period_facts(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.PERIOD_ANALYSIS_REPLY: {
+                    "reply_text": "Yhteensä 50 m nousua.",
+                    "claims_used": ["ascent_m"],
+                    "missing_data_notes": [],
+                }
+            }
+        )
+
+        reply = write_period_analysis_reply(
+            LLMGateway(client),
+            PeriodAnalysisReplyInput(
+                user_text="nousumetrit",
+                period_facts={
+                    "workout_count": 2,
+                    "summary": {"ascent_m": {"sum": 50}},
+                },
+            ),
+            language=SupportedLanguage.FI,
+        )
+
+        self.assertEqual(reply.reply_text, "Yhteensä 50 m nousua.")
+        self.assertNotIn("workout_points", client.requests[0].user_payload)
+        self.assertIn("Respond in fi", client.requests[0].system_prompt)
 
     def test_chat_reply_includes_configured_language_instruction(self) -> None:
         client = FakeLLMClient(
@@ -163,6 +228,34 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertEqual(intent.y_metrics, ("heart_rate_bpm",))
         self.assertEqual(intent.layout_mode, "auto")
         self.assertEqual(intent.chart_kind, "auto")
+
+    def test_extract_visualization_intent_accepts_route_map_intent(self) -> None:
+        gateway = LLMGateway(
+            FakeLLMClient(
+                {
+                    LLMOperation.VISUALIZATION_INTENT: {
+                        "workout_selector": {"type": "latest"},
+                        "x_metric": "longitude",
+                        "requested_metrics": ["route"],
+                        "transform_hints": [],
+                        "date_range": {},
+                        "comparison_mode": "",
+                        "layout_mode": "auto",
+                        "chart_kind": "map",
+                        "context_update": {"set_current_workout": False},
+                    }
+                }
+            )
+        )
+
+        intent = extract_visualization_intent(
+            gateway,
+            VisualizationIntentInput(user_text="piirrä reitti kartalle"),
+        )
+
+        self.assertEqual(intent.x_metric, "longitude")
+        self.assertEqual(intent.y_metrics, ("route",))
+        self.assertEqual(intent.chart_kind, "map")
 
     def test_revise_visualization_intent_uses_typed_operation(self) -> None:
         client = FakeLLMClient(
@@ -265,6 +358,7 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertGreaterEqual(traces[0].duration_ms, 0)
         self.assertEqual(traces[1].status, "error")
         self.assertEqual(traces[1].error_type, "LLMGatewayError")
+        self.assertIn("Forbidden large/raw payload field", traces[1].error_message)
 
 
 if __name__ == "__main__":

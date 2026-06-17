@@ -5,8 +5,13 @@ import struct
 import zlib
 from dataclasses import dataclass
 
+from visualization.tiles import TileCoord
+
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+TILE_SIZE = 256
+DEFAULT_RENDER_WIDTH = 1920
+DEFAULT_RENDER_HEIGHT = 1080
 COLORS = (
     (37, 99, 235),
     (22, 163, 74),
@@ -42,13 +47,14 @@ class LineChart:
     x_values: tuple[float | None, ...]
     series: tuple[RenderSeries, ...]
     subtitle: str = ""
+    legend_title: str = "Legend"
     x_label: str = ""
     y_label: str = ""
     x_tick_format: str = "number"
     y_tick_format: str = "number"
     invert_y: bool = False
-    width: int = 900
-    height: int = 520
+    width: int = DEFAULT_RENDER_WIDTH
+    height: int = DEFAULT_RENDER_HEIGHT
 
 
 @dataclass(frozen=True)
@@ -65,10 +71,11 @@ class MultiPanelLineChart:
     x_values: tuple[float | None, ...]
     panels: tuple[LinePanel, ...]
     subtitle: str = ""
+    legend_title: str = "Legend"
     x_label: str = ""
     x_tick_format: str = "number"
-    width: int = 900
-    height: int = 640
+    width: int = DEFAULT_RENDER_WIDTH
+    height: int = DEFAULT_RENDER_HEIGHT
 
 
 @dataclass(frozen=True)
@@ -83,11 +90,12 @@ class BarChart:
     title: str
     bars: tuple[Bar, ...]
     subtitle: str = ""
+    legend_title: str = "Legend"
     x_label: str = ""
     y_label: str = ""
     y_tick_format: str = "number"
-    width: int = 900
-    height: int = 520
+    width: int = DEFAULT_RENDER_WIDTH
+    height: int = DEFAULT_RENDER_HEIGHT
 
 
 @dataclass(frozen=True)
@@ -102,10 +110,58 @@ class PieChart:
     title: str
     slices: tuple[PieSlice, ...]
     subtitle: str = ""
+    legend_title: str = "Legend"
     value_label: str = ""
     value_format: str = "number"
-    width: int = 900
-    height: int = 520
+    width: int = DEFAULT_RENDER_WIDTH
+    height: int = DEFAULT_RENDER_HEIGHT
+
+
+@dataclass(frozen=True)
+class RoutePoint:
+    latitude: float
+    longitude: float
+    color_value: float | None = None
+
+
+@dataclass(frozen=True)
+class RoutePolyline:
+    label: str
+    points: tuple[RoutePoint, ...]
+    color: tuple[int, int, int] | None = None
+    color_metric: str = ""
+
+
+@dataclass(frozen=True)
+class RouteMapTile:
+    coord: TileCoord
+    content: bytes
+
+
+@dataclass(frozen=True)
+class RouteMap:
+    title: str
+    routes: tuple[RoutePolyline, ...]
+    subtitle: str = ""
+    legend_title: str = "Routes"
+    color_metric_label: str = ""
+    color_domain: tuple[float, float] | None = None
+    color_tick_format: str = "number"
+    color_direction: str = "ascending"
+    tiles: tuple[RouteMapTile, ...] = ()
+    tile_zoom: int | None = None
+    tile_size: int = TILE_SIZE
+    attribution: str = ""
+    x_domain: tuple[float, float] | None = None
+    y_domain: tuple[float, float] | None = None
+    width: int = DEFAULT_RENDER_WIDTH
+    height: int = DEFAULT_RENDER_HEIGHT
+
+
+@dataclass(frozen=True)
+class RouteMapViewport:
+    x_domain: tuple[float, float]
+    y_domain: tuple[float, float]
 
 
 @dataclass(frozen=True)
@@ -205,7 +261,7 @@ def render_line_chart_png(chart: LineChart) -> bytes:
         grid_right=output_right,
         draw_lines=False,
     )
-    _draw_sidebar_legend(output, chart.width, output_frame, _line_legend_items(render_series), title="Legend")
+    _draw_sidebar_legend(output, chart.width, output_frame, _line_legend_items(render_series), title=chart.legend_title)
     return _png(chart.width, chart.height, output)
 
 
@@ -319,7 +375,7 @@ def render_multi_panel_line_chart_png(chart: MultiPanelLineChart) -> bytes:
         tick_format=chart.x_tick_format,
         draw_lines=False,
     )
-    _draw_sidebar_legend(output, chart.width, output_frame, _line_legend_items(tuple(panel.series for panel in chart.panels)), title="Panels")
+    _draw_sidebar_legend(output, chart.width, output_frame, _line_legend_items(tuple(panel.series for panel in chart.panels)), title=chart.legend_title)
     return _png(chart.width, chart.height, output)
 
 
@@ -373,7 +429,7 @@ def render_bar_chart_png(chart: BarChart) -> bytes:
             LegendItem(label=bar.label, color=bar.color or COLORS[index % len(COLORS)], value=bar.value, value_format=chart.y_tick_format)
             for index, bar in enumerate(chart.bars)
         ),
-        title="Legend",
+        title=chart.legend_title,
     )
     return _png(chart.width, chart.height, output)
 
@@ -418,11 +474,420 @@ def render_pie_chart_png(chart: PieChart) -> bytes:
             LegendItem(label=item.label, color=item.color or COLORS[index % len(COLORS)], value=item.value, value_format=chart.value_format)
             for index, item in enumerate(all_slices)
         ),
-        title="Legend",
+        title=chart.legend_title,
     )
     if chart.value_label:
         _draw_centered_text(output, chart.width, output_center_x, output_center_y + output_radius + 18, chart.value_label, MUTED_TEXT)
     return _png(chart.width, chart.height, output)
+
+
+def render_route_map_png(chart: RouteMap) -> bytes:
+    width, height = chart.width, chart.height
+    pixels = _background(width, height)
+
+    projected_routes = tuple(_project_route(route) for route in chart.routes if len(route.points) >= 2)
+    projected_points = tuple(point for route in projected_routes for point in route[1])
+    if not projected_points:
+        _rect(pixels, width, 0, 0, width - 1, height - 1, (230, 236, 243))
+        _draw_route_map_overlays(pixels, width, height, chart)
+        return _png(width, height, pixels)
+    viewport = (
+        RouteMapViewport(chart.x_domain, chart.y_domain)
+        if chart.x_domain is not None and chart.y_domain is not None
+        else route_map_viewport(chart.routes, width=width, height=height)
+    )
+    x_domain = viewport.x_domain
+    y_domain = viewport.y_domain
+    if not _draw_tile_background(pixels, width, 0, 0, width - 1, height - 1, x_domain, y_domain, chart.tiles, chart.tile_zoom, chart.tile_size):
+        _rect(pixels, width, 0, 0, width - 1, height - 1, (230, 236, 243))
+        _draw_map_grid(pixels, width, 0, 0, width - 1, height - 1)
+    for index, (route, points) in enumerate(projected_routes):
+        color = route.color or COLORS[index % len(COLORS)]
+        previous: tuple[int, int] | None = None
+        previous_value: float | None = None
+        data_color_active = chart.color_domain is not None and bool(route.color_metric)
+        for route_point, (x_value, y_value) in zip(route.points, points, strict=False):
+            x = _scale(x_value, x_domain, 0, width - 1)
+            y = _scale(y_value, y_domain, 0, height - 1)
+            if previous is not None:
+                segment_color = (
+                    _route_segment_color(
+                        (100, 116, 139),
+                        previous_value,
+                        route_point.color_value,
+                        chart.color_domain,
+                        direction=chart.color_direction,
+                    )
+                    if data_color_active
+                    else color
+                )
+                _stroke_line(pixels, width, previous[0], previous[1], x, y, segment_color, stroke=3)
+            previous = (x, y)
+            previous_value = route_point.color_value
+        start = points[0]
+        end = points[-1]
+        _dot(pixels, width, _scale(start[0], x_domain, 0, width - 1), _scale(start[1], y_domain, 0, height - 1), (22, 163, 74), scale=3)
+        _dot(pixels, width, _scale(end[0], x_domain, 0, width - 1), _scale(end[1], y_domain, 0, height - 1), (220, 38, 38), scale=3)
+    _draw_route_map_overlays(pixels, width, height, chart)
+    if chart.attribution:
+        _draw_attribution(pixels, width, height, chart.attribution)
+    return _png(width, height, pixels)
+
+
+def route_map_viewport(routes: tuple[RoutePolyline, ...], *, width: int = DEFAULT_RENDER_WIDTH, height: int = DEFAULT_RENDER_HEIGHT) -> RouteMapViewport:
+    projected_points = tuple(
+        _mercator_xy(point.latitude, point.longitude)
+        for route in routes
+        for point in route.points
+    )
+    if not projected_points:
+        return RouteMapViewport((0.0, 1.0), (0.0, 1.0))
+    x_values = tuple(point[0] for point in projected_points)
+    y_values = tuple(point[1] for point in projected_points)
+    route_x = _padded_domain((min(x_values), max(x_values)), ratio=0.06)
+    route_y = _padded_domain((min(y_values), max(y_values)), ratio=0.06)
+    safe_left, safe_top, safe_right, safe_bottom = _best_route_safe_rect(route_x, route_y, width, height)
+    return _route_map_viewport_for_rect(route_x, route_y, width, height, (safe_left, safe_top, safe_right, safe_bottom))
+
+
+def _best_route_safe_rect(route_x: tuple[float, float], route_y: tuple[float, float], width: int, height: int) -> tuple[int, int, int, int]:
+    candidates = (
+        (48, 156, width - 48, height - 28),
+        _route_safe_rect(width, height),
+        (48, 156, width - 448, height - 28),
+    )
+    valid_candidates = tuple(rect for rect in candidates if rect[2] - rect[0] > 64 and rect[3] - rect[1] > 64)
+    if not valid_candidates:
+        return _route_safe_rect(width, height)
+    return min(valid_candidates, key=lambda rect: _route_mercator_per_pixel(route_x, route_y, rect))
+
+
+def _route_mercator_per_pixel(route_x: tuple[float, float], route_y: tuple[float, float], rect: tuple[int, int, int, int]) -> float:
+    safe_left, safe_top, safe_right, safe_bottom = rect
+    safe_width = max(1, safe_right - safe_left)
+    safe_height = max(1, safe_bottom - safe_top)
+    route_width = max(route_x[1] - route_x[0], 0.000001)
+    route_height = max(route_y[1] - route_y[0], 0.000001)
+    return max(route_width / safe_width, route_height / safe_height)
+
+
+def _route_map_viewport_for_rect(
+    route_x: tuple[float, float],
+    route_y: tuple[float, float],
+    width: int,
+    height: int,
+    rect: tuple[int, int, int, int],
+) -> RouteMapViewport:
+    safe_left, safe_top, safe_right, safe_bottom = rect
+    mercator_per_pixel = _route_mercator_per_pixel(route_x, route_y, rect)
+    domain_width = mercator_per_pixel * width
+    domain_height = mercator_per_pixel * height
+    route_center_x = (route_x[0] + route_x[1]) / 2.0
+    route_center_y = (route_y[0] + route_y[1]) / 2.0
+    safe_center_x = (safe_left + safe_right) / 2.0
+    safe_center_y = (safe_top + safe_bottom) / 2.0
+    x_low = route_center_x - (safe_center_x / width) * domain_width
+    y_low = route_center_y - (safe_center_y / height) * domain_height
+    x_domain = _clamped_domain(x_low, x_low + domain_width, 0.0, 1.0)
+    y_domain = _clamped_domain(y_low, y_low + domain_height, 0.0, 1.0)
+    return RouteMapViewport(x_domain, y_domain)
+
+
+def _route_safe_rect(width: int, height: int) -> tuple[int, int, int, int]:
+    return 48, 156, width - 448, height - 28
+
+
+def _draw_route_map_overlays(pixels: bytearray, width: int, height: int, chart: RouteMap, *, scale: int = 1) -> None:
+    title_width = min(width - 260 * scale, max(430 * scale, len(chart.title) * 12 * scale))
+    title_height = 56 * scale if chart.subtitle else 38 * scale
+    _rect(pixels, width, 14 * scale, 12 * scale, title_width, 12 * scale + title_height, SIDEBAR_BG)
+    _line(pixels, width, 14 * scale, 12 * scale + title_height, title_width, 12 * scale + title_height, SIDEBAR_BORDER)
+    _line(pixels, width, title_width, 12 * scale, title_width, 12 * scale + title_height, SIDEBAR_BORDER)
+    _draw_chart_text(pixels, width, 24 * scale, 18 * scale, chart.title, TEXT, scale=2 * scale)
+    if chart.subtitle:
+        _draw_chart_text(pixels, width, 24 * scale, 42 * scale, chart.subtitle, MUTED_TEXT, scale=scale)
+    items = tuple(
+        LegendItem(label=route.label, color=route.color or COLORS[index % len(COLORS)], line=True)
+        for index, route in enumerate(chart.routes)
+    )
+    if chart.color_metric_label and chart.color_domain is not None:
+        _draw_route_legend_overlay(pixels, width, height, (), title=chart.color_metric_label, scale=scale)
+        return
+    _draw_route_legend_overlay(pixels, width, height, items, title=chart.legend_title, scale=scale)
+
+
+def _draw_route_legend_overlay(
+    pixels: bytearray,
+    width: int,
+    height: int,
+    items: tuple[LegendItem, ...],
+    *,
+    title: str = "Routes",
+    scale: int = 1,
+) -> None:
+    if not items and not title:
+        return
+    overlay_width = 196 * scale
+    max_items = min(20, max(1, (height - 68 * scale) // (22 * scale)))
+    visible_items = items[:max_items]
+    overlay_height = min(42 * scale + len(visible_items) * 22 * scale, height - 24 * scale)
+    left = width - overlay_width - 14 * scale
+    top = 12 * scale
+    right = width - 14 * scale
+    bottom = top + overlay_height
+    _rect(pixels, width, left, top, right, bottom, SIDEBAR_BG)
+    _line(pixels, width, left, bottom, right, bottom, SIDEBAR_BORDER)
+    _line(pixels, width, left, top, left, bottom, SIDEBAR_BORDER)
+    _draw_chart_text(pixels, width, left + 14 * scale, top + 8 * scale, title, TEXT, scale=scale)
+    y = top + 34 * scale
+    for item in visible_items:
+        _stroke_line(pixels, width, left + 14 * scale, y + 6 * scale, left + 32 * scale, y + 6 * scale, item.color, stroke=scale)
+        _draw_chart_text(pixels, width, left + 40 * scale, y + 2 * scale, _ellipsize(item.label, 18), TEXT, scale=scale)
+        y += 22 * scale
+    if len(items) > len(visible_items):
+        _draw_chart_text(pixels, width, left + 40 * scale, y + 2 * scale, "...", MUTED_TEXT, scale=scale)
+
+
+def _route_segment_color(
+    fallback: tuple[int, int, int],
+    first: float | None,
+    second: float | None,
+    domain: tuple[float, float] | None,
+    *,
+    direction: str = "ascending",
+) -> tuple[int, int, int]:
+    if domain is None:
+        return fallback
+    if first is not None:
+        return route_metric_color(first, domain, direction=direction)
+    if second is not None:
+        return route_metric_color(second, domain, direction=direction)
+    return fallback
+
+
+def route_metric_color(value: float, domain: tuple[float, float], *, direction: str = "ascending") -> tuple[int, int, int]:
+    low, high = domain
+    if high <= low:
+        ratio = 0.5
+    else:
+        ratio = (value - low) / (high - low)
+    ratio = max(0.0, min(1.0, ratio))
+    if direction == "descending":
+        ratio = 1.0 - ratio
+    stops = (
+        (37, 99, 235),
+        (22, 163, 74),
+        (234, 179, 8),
+        (220, 38, 38),
+    )
+    scaled = ratio * (len(stops) - 1)
+    index = min(int(scaled), len(stops) - 2)
+    local = scaled - index
+    return _lerp_color(stops[index], stops[index + 1], local)
+
+
+def _draw_attribution(pixels: bytearray, width: int, height: int, attribution: str) -> None:
+    text_width = min(260, max(160, len(attribution) * 7))
+    left = width - text_width - 8
+    top = height - 24
+    _rect(pixels, width, left, top, width - 6, height - 7, SIDEBAR_BG)
+    _draw_right_aligned_text(pixels, width, width - 10, height - 20, attribution, TEXT)
+
+
+def _draw_tile_background(
+    pixels: bytearray,
+    width: int,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    x_domain: tuple[float, float],
+    y_domain: tuple[float, float],
+    tiles: tuple[RouteMapTile, ...],
+    zoom: int | None,
+    tile_size: int,
+) -> bool:
+    if zoom is None or not tiles:
+        return False
+    decoded = {}
+    for tile in tiles:
+        image = _decode_png_rgb(tile.content)
+        if image is not None:
+            decoded[(tile.coord.x, tile.coord.y)] = image
+    if not decoded:
+        return False
+    n = 2**zoom
+    map_width = n * tile_size
+    for y in range(top, bottom + 1):
+        y_ratio = (y - top) / max(bottom - top, 1)
+        mercator_y = y_domain[0] + (y_domain[1] - y_domain[0]) * y_ratio
+        global_y = _clamp_int(int(mercator_y * map_width), 0, map_width - 1)
+        tile_y, local_y = divmod(global_y, tile_size)
+        for x in range(left, right + 1):
+            x_ratio = (x - left) / max(right - left, 1)
+            mercator_x = x_domain[0] + (x_domain[1] - x_domain[0]) * x_ratio
+            global_x = _clamp_int(int(mercator_x * map_width), 0, map_width - 1)
+            tile_x, local_x = divmod(global_x, tile_size)
+            image = decoded.get((tile_x, tile_y))
+            if image is None:
+                continue
+            tile_width, _, tile_pixels = image
+            source_index = (local_y * tile_width + local_x) * 3
+            target_index = (y * width + x) * 3
+            pixels[target_index : target_index + 3] = tile_pixels[source_index : source_index + 3]
+    return True
+
+
+def _decode_png_rgb(content: bytes) -> tuple[int, int, bytes] | None:
+    if not content.startswith(PNG_SIGNATURE):
+        return None
+    offset = len(PNG_SIGNATURE)
+    png_width = png_height = color_type = bit_depth = None
+    palette: list[tuple[int, int, int]] = []
+    data = bytearray()
+    while offset + 8 <= len(content):
+        length = struct.unpack(">I", content[offset : offset + 4])[0]
+        chunk_type = content[offset + 4 : offset + 8]
+        chunk_data = content[offset + 8 : offset + 8 + length]
+        offset += 12 + length
+        if chunk_type == b"IHDR":
+            png_width, png_height, bit_depth, color_type, _, _, interlace = struct.unpack(">IIBBBBB", chunk_data)
+            if bit_depth != 8 or interlace != 0:
+                return None
+        elif chunk_type == b"PLTE":
+            palette = [
+                (chunk_data[index], chunk_data[index + 1], chunk_data[index + 2])
+                for index in range(0, len(chunk_data) - 2, 3)
+            ]
+        elif chunk_type == b"IDAT":
+            data.extend(chunk_data)
+        elif chunk_type == b"IEND":
+            break
+    if png_width is None or png_height is None or color_type is None:
+        return None
+    channels = {0: 1, 2: 3, 3: 1, 6: 4}.get(color_type)
+    if channels is None:
+        return None
+    try:
+        raw = zlib.decompress(bytes(data))
+    except zlib.error:
+        return None
+    stride = png_width * channels
+    rows: list[bytearray] = []
+    cursor = 0
+    previous = bytearray(stride)
+    for _ in range(png_height):
+        if cursor >= len(raw):
+            return None
+        filter_type = raw[cursor]
+        cursor += 1
+        row = bytearray(raw[cursor : cursor + stride])
+        cursor += stride
+        if len(row) != stride:
+            return None
+        _unfilter_png_row(row, previous, filter_type, channels)
+        rows.append(row)
+        previous = row
+    pixels = bytearray()
+    for row in rows:
+        if color_type == 0:
+            for value in row:
+                pixels.extend((value, value, value))
+        elif color_type == 2:
+            pixels.extend(row)
+        elif color_type == 3:
+            for value in row:
+                if value >= len(palette):
+                    return None
+                pixels.extend(palette[value])
+        elif color_type == 6:
+            for index in range(0, len(row), 4):
+                alpha = row[index + 3] / 255.0
+                pixels.extend(
+                    (
+                        round(row[index] * alpha + 255 * (1.0 - alpha)),
+                        round(row[index + 1] * alpha + 255 * (1.0 - alpha)),
+                        round(row[index + 2] * alpha + 255 * (1.0 - alpha)),
+                    )
+                )
+    return png_width, png_height, bytes(pixels)
+
+
+def _unfilter_png_row(row: bytearray, previous: bytearray, filter_type: int, bytes_per_pixel: int) -> None:
+    for index, value in enumerate(row):
+        left = row[index - bytes_per_pixel] if index >= bytes_per_pixel else 0
+        up = previous[index]
+        up_left = previous[index - bytes_per_pixel] if index >= bytes_per_pixel else 0
+        if filter_type == 0:
+            predictor = 0
+        elif filter_type == 1:
+            predictor = left
+        elif filter_type == 2:
+            predictor = up
+        elif filter_type == 3:
+            predictor = (left + up) // 2
+        elif filter_type == 4:
+            predictor = _paeth(left, up, up_left)
+        else:
+            predictor = 0
+        row[index] = (value + predictor) & 0xFF
+
+
+def _paeth(left: int, up: int, up_left: int) -> int:
+    estimate = left + up - up_left
+    distance_left = abs(estimate - left)
+    distance_up = abs(estimate - up)
+    distance_up_left = abs(estimate - up_left)
+    if distance_left <= distance_up and distance_left <= distance_up_left:
+        return left
+    if distance_up <= distance_up_left:
+        return up
+    return up_left
+
+
+def _clamp_int(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
+
+
+def _project_route(route: RoutePolyline) -> tuple[RoutePolyline, tuple[tuple[float, float], ...]]:
+    return route, tuple(_mercator_xy(point.latitude, point.longitude) for point in route.points)
+
+
+def _mercator_xy(latitude: float, longitude: float) -> tuple[float, float]:
+    clamped_latitude = max(min(latitude, 85.05112878), -85.05112878)
+    lat_rad = math.radians(clamped_latitude)
+    x = (longitude + 180.0) / 360.0
+    y = (1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0
+    return x, y
+
+
+def _padded_domain(domain: tuple[float, float], *, ratio: float = 0.08) -> tuple[float, float]:
+    low, high = domain
+    if low == high:
+        return low - 0.0001, high + 0.0001
+    padding = (high - low) * ratio
+    return low - padding, high + padding
+
+
+def _clamped_domain(low: float, high: float, domain_low: float, domain_high: float) -> tuple[float, float]:
+    span = high - low
+    if span >= domain_high - domain_low:
+        return domain_low, domain_high
+    if low < domain_low:
+        return domain_low, domain_low + span
+    if high > domain_high:
+        return domain_high - span, domain_high
+    return low, high
+
+
+def _draw_map_grid(pixels: bytearray, width: int, left: int, top: int, right: int, bottom: int) -> None:
+    _line(pixels, width, left, bottom, right, bottom, (88, 96, 110))
+    _line(pixels, width, left, top, left, bottom, (88, 96, 110))
+    for index in range(1, 5):
+        x = left + (right - left) * index // 5
+        y = top + (bottom - top) * index // 5
+        _line(pixels, width, x, top, x, bottom, (214, 222, 232))
+        _line(pixels, width, left, y, right, y, (214, 222, 232))
 
 
 def _draw_panel_series(
@@ -1197,6 +1662,8 @@ FONT = {
     "-": ("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
     "_": ("00000", "00000", "00000", "00000", "00000", "00000", "11111"),
     "/": ("00001", "00010", "00100", "01000", "10000", "00000", "00000"),
+    "#": ("01010", "01010", "11111", "01010", "11111", "01010", "01010"),
+    "©": ("01110", "10001", "10111", "10100", "10111", "10001", "01110"),
     "(": ("00010", "00100", "01000", "01000", "01000", "00100", "00010"),
     ")": ("01000", "00100", "00010", "00010", "00010", "00100", "01000"),
     "%": ("11001", "11010", "00100", "01000", "10110", "00110", "00000"),

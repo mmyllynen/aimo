@@ -9,15 +9,33 @@ from llm.gateway import LLMGateway, LLMOperation, LLMRequest
 
 
 JsonObject = dict[str, Any]
-VISUALIZATION_SELECTOR_TYPES = ("latest", "active", "id", "date", "text", "list_index")
+VISUALIZATION_SELECTOR_TYPES = (
+    "latest",
+    "active",
+    "id",
+    "date",
+    "text",
+    "list_index",
+    "all_workouts",
+    "current_week",
+    "last_week",
+    "current_month",
+    "last_month",
+    "rolling_days",
+    "date_range",
+    "calendar_year_to_date",
+)
 VISUALIZATION_METRICS = (
     "elapsed_s",
     "distance_km",
+    "latitude",
+    "longitude",
     "elevation_m",
     "heart_rate_bpm",
     "cadence_spm",
     "pace_s_per_km",
     "heart_rate_zone_seconds",
+    "route",
     "duration_s",
     "ascent_m",
     "avg_hr_bpm",
@@ -32,7 +50,31 @@ VISUALIZATION_TRANSFORMS = (
     "as_percentage_of_total",
 )
 VISUALIZATION_LAYOUT_MODES = ("auto", "single_axis", "small_multiples")
-VISUALIZATION_CHART_KINDS = ("auto", "line", "bar", "pie")
+VISUALIZATION_CHART_KINDS = ("auto", "line", "bar", "pie", "map")
+PERIOD_SCOPE_TYPES = (
+    "none",
+    "single_workout",
+    "all_workouts",
+    "current_week",
+    "last_week",
+    "current_month",
+    "last_month",
+    "rolling_days",
+    "date_range",
+    "calendar_year_to_date",
+)
+PERIOD_GROUPINGS = ("none", "day", "week", "month")
+PERIOD_OUTPUT_MODES = ("prose", "visualization", "both")
+PERIOD_COMPARISON_MODES = ("none", "previous_period")
+PERIOD_METRICS = (
+    "workout_count",
+    "distance_km",
+    "duration_s",
+    "ascent_m",
+    "avg_hr_bpm",
+    "max_hr_bpm",
+    "point_count",
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +101,47 @@ class WorkoutReference:
     ambiguity_reason: str
     requires_clarification: bool
     set_current_workout: bool = False
+
+
+@dataclass(frozen=True)
+class PeriodRequestInput:
+    user_text: str
+    current_datetime: str
+    timezone: str
+    compact_routing_context: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PeriodRequest:
+    scope_type: str
+    scope_value: str
+    start_date: str
+    end_date: str
+    rolling_days: int | None
+    filters: JsonObject
+    metrics: tuple[str, ...]
+    grouping: str
+    output_mode: str
+    comparison_mode: str
+    reason: str = ""
+
+    @property
+    def is_period_request(self) -> bool:
+        return self.scope_type not in {"none", "single_workout"}
+
+
+@dataclass(frozen=True)
+class PeriodAnalysisReplyInput:
+    user_text: str
+    period_facts: JsonObject
+    bounded_recent_context: tuple[JsonObject, ...] = ()
+
+
+@dataclass(frozen=True)
+class PeriodAnalysisReply:
+    reply_text: str
+    claims_used: tuple[str, ...]
+    missing_data_notes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -121,6 +204,10 @@ class VisualizationIntent:
     layout_mode: str = "auto"
     chart_kind: str = "auto"
     context_update: JsonObject = field(default_factory=dict)
+    route_color_metric: str = ""
+    route_color_ignored_metrics: tuple[str, ...] = ()
+    render_width: int = 0
+    render_height: int = 0
 
 
 def classify_intent(gateway: LLMGateway, data: IntentClassificationInput) -> RouteDecision:
@@ -201,7 +288,7 @@ def extract_workout_reference(gateway: LLMGateway, data: WorkoutReferenceInput) 
                 "active_workout": data.active_workout,
             },
             response_schema=_workout_reference_schema(),
-            max_tokens=300,
+            max_tokens=1200,
         )
     )
     return WorkoutReference(
@@ -211,6 +298,79 @@ def extract_workout_reference(gateway: LLMGateway, data: WorkoutReferenceInput) 
         ambiguity_reason=payload.get("ambiguity_reason", ""),
         requires_clarification=payload["requires_clarification"],
         set_current_workout=payload.get("set_current_workout", False),
+    )
+
+
+def interpret_period_request(gateway: LLMGateway, data: PeriodRequestInput) -> PeriodRequest:
+    payload = gateway.run(
+        LLMRequest(
+            operation=LLMOperation.PERIOD_REQUEST_INTERPRETATION,
+            system_prompt=(
+                "Interpret whether the user asks about a set or period of workouts. Return structured JSON only. "
+                "Use scope_type none when the request is general conversation or clearly about one workout. "
+                "Use all_workouts for requests covering the user's complete stored workout set. "
+                "Use relative period selectors such as current_week, last_week, current_month, last_month, "
+                "rolling_days, date_range, or calendar_year_to_date when the language asks for a period. "
+                "Map user-language metric names to canonical metric ids from allowed_metrics. "
+                "Do not calculate totals, query data, or infer ownership. Python resolves dates, filters, data access, "
+                "aggregation, validation, and rendering."
+            ),
+            user_payload={
+                "user_text": data.user_text,
+                "current_datetime": data.current_datetime,
+                "timezone": data.timezone,
+                "allowed_scope_types": list(PERIOD_SCOPE_TYPES),
+                "allowed_metrics": list(PERIOD_METRICS),
+                "allowed_groupings": list(PERIOD_GROUPINGS),
+                "allowed_output_modes": list(PERIOD_OUTPUT_MODES),
+                "allowed_comparison_modes": list(PERIOD_COMPARISON_MODES),
+                "compact_routing_context": data.compact_routing_context,
+            },
+            response_schema=_period_request_schema(),
+            max_tokens=1600,
+        )
+    )
+    return PeriodRequest(
+        scope_type=payload["scope_type"],
+        scope_value=payload["scope_value"],
+        start_date=payload.get("start_date", ""),
+        end_date=payload.get("end_date", ""),
+        rolling_days=payload.get("rolling_days"),
+        filters=payload.get("filters", {}),
+        metrics=tuple(payload.get("metrics", ())),
+        grouping=payload["grouping"],
+        output_mode=payload["output_mode"],
+        comparison_mode=payload["comparison_mode"],
+        reason=payload.get("reason", ""),
+    )
+
+
+def write_period_analysis_reply(
+    gateway: LLMGateway,
+    data: PeriodAnalysisReplyInput,
+    *,
+    language: SupportedLanguage,
+) -> PeriodAnalysisReply:
+    payload = gateway.run(
+        LLMRequest(
+            operation=LLMOperation.PERIOD_ANALYSIS_REPLY,
+            system_prompt=(
+                f"Write a concise grounded workout period summary. Respond in {language.value}. "
+                "Use period_facts as ground truth. Do not invent workouts, metrics, dates, or comparisons."
+            ),
+            user_payload={
+                "user_text": data.user_text,
+                "period_facts": data.period_facts,
+                "bounded_recent_context": list(data.bounded_recent_context),
+            },
+            response_schema=_period_analysis_reply_schema(),
+            max_tokens=2000,
+        )
+    )
+    return PeriodAnalysisReply(
+        reply_text=payload["reply_text"],
+        claims_used=tuple(payload.get("claims_used", ())),
+        missing_data_notes=tuple(payload.get("missing_data_notes", ())),
     )
 
 
@@ -281,6 +441,11 @@ def extract_visualization_intent(gateway: LLMGateway, data: VisualizationIntentI
                 "Use normalize_to_primary_range only for explicit scale/normalize/skaala requests, not merely for same image. "
                 "Use as_percentage_of_total for percentage/share/osuus/prosentuaalinen part-to-total requests. "
                 "Set chart_kind to pie only when the user explicitly asks for a pie/piirakka chart. "
+                "Set chart_kind to map and requested_metrics to route only when the user explicitly asks for a route map, "
+                "route plot, or map background visualization. "
+                "For workout set or period requests, return a period selector such as current_month, last_week, "
+                "rolling_days, date_range, all_workouts, or calendar_year_to_date; do not return an empty single-workout "
+                "date selector for a period request. Python resolves dates, ownership, aggregation, and rendering. "
                 "Set context_update.set_current_workout true only when the request concretely selects one workout "
                 "that should become the current workout context for later requests."
             ),
@@ -333,6 +498,10 @@ def _visualization_intent_from_payload(payload: JsonObject) -> VisualizationInte
         layout_mode=payload.get("layout_mode", "auto"),
         chart_kind=payload.get("chart_kind", "auto"),
         context_update=payload.get("context_update", {}),
+        route_color_metric=payload.get("route_color_metric", ""),
+        route_color_ignored_metrics=tuple(payload.get("route_color_ignored_metrics", ())),
+        render_width=int(payload.get("render_width") or 0),
+        render_height=int(payload.get("render_height") or 0),
     )
 
 
@@ -366,6 +535,57 @@ def _workout_reference_schema() -> JsonObject:
             "ambiguity_reason": {"type": "string"},
             "requires_clarification": {"type": "boolean"},
             "set_current_workout": {"type": "boolean"},
+        },
+    }
+
+
+def _period_request_schema() -> JsonObject:
+    return {
+        "required": [
+            "scope_type",
+            "scope_value",
+            "start_date",
+            "end_date",
+            "rolling_days",
+            "filters",
+            "metrics",
+            "grouping",
+            "output_mode",
+            "comparison_mode",
+            "reason",
+        ],
+        "properties": {
+            "scope_type": {"type": "string", "enum": list(PERIOD_SCOPE_TYPES)},
+            "scope_value": {"type": "string"},
+            "start_date": {"type": "string"},
+            "end_date": {"type": "string"},
+            "rolling_days": {"type": ["integer", "null"]},
+            "filters": {
+                "type": "object",
+                "required": ["kind", "primary_kind", "tags"],
+                "properties": {
+                    "kind": {"type": "string"},
+                    "primary_kind": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "additionalProperties": False,
+            },
+            "metrics": {"type": "array", "items": {"type": "string", "enum": list(PERIOD_METRICS)}},
+            "grouping": {"type": "string", "enum": list(PERIOD_GROUPINGS)},
+            "output_mode": {"type": "string", "enum": list(PERIOD_OUTPUT_MODES)},
+            "comparison_mode": {"type": "string", "enum": list(PERIOD_COMPARISON_MODES)},
+            "reason": {"type": "string"},
+        },
+    }
+
+
+def _period_analysis_reply_schema() -> JsonObject:
+    return {
+        "required": ["reply_text", "claims_used", "missing_data_notes"],
+        "properties": {
+            "reply_text": {"type": "string"},
+            "claims_used": {"type": "array", "items": {"type": "string"}},
+            "missing_data_notes": {"type": "array", "items": {"type": "string"}},
         },
     }
 

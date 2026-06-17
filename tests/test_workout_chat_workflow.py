@@ -97,6 +97,26 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
         self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_AMBIGUOUS_WORKOUT)
         self.assertFalse([request for request in client.requests if request.operation == LLMOperation.WORKOUT_REPLY])
 
+    def test_all_workouts_ascent_summary_uses_period_path(self) -> None:
+        self._seed_workouts()
+        client = _period_client("Kahdessa treenissä oli yhteensä 50 m nousua.")
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "tee yhteenveto kaikkien treenien nousumetreistä"),
+            DispatchContext(
+                UnitOfWork(self.connection),
+                language=SupportedLanguage.FI,
+                llm_gateway=LLMGateway(client),
+            ),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].text, "Kahdessa treenissä oli yhteensä 50 m nousua.")
+        payload = _request_payload(client, LLMOperation.PERIOD_ANALYSIS_REPLY)
+        self.assertEqual(payload["period_facts"]["workout_count"], 2)
+        self.assertEqual(payload["period_facts"]["summary"]["ascent_m"]["sum"], 50)
+        self.assertFalse([request for request in client.requests if request.operation == LLMOperation.WORKOUT_REFERENCE_EXTRACTION])
+
     def test_missing_summary_facts_are_explicit_in_llm_input(self) -> None:
         self._seed_workouts(avg_hr=None)
         client = _workout_client("Sykedata puuttuu, mutta matka ja kesto löytyvät.", selector_type="latest", selector_value="latest")
@@ -207,6 +227,7 @@ def _workout_client(
     return FakeLLMClient(
         {
             LLMOperation.INTENT_CLASSIFICATION: _classification(),
+            LLMOperation.PERIOD_REQUEST_INTERPRETATION: _period_none(),
             LLMOperation.WORKOUT_REFERENCE_EXTRACTION: {
                 "selector_type": selector_type,
                 "selector_value": selector_value,
@@ -222,6 +243,48 @@ def _workout_client(
             }
         }
     )
+
+
+def _period_client(reply_text: str) -> FakeLLMClient:
+    return FakeLLMClient(
+        {
+            LLMOperation.INTENT_CLASSIFICATION: _classification(),
+            LLMOperation.PERIOD_REQUEST_INTERPRETATION: {
+                "scope_type": "all_workouts",
+                "scope_value": "",
+                "start_date": "",
+                "end_date": "",
+                "rolling_days": None,
+                "filters": {"kind": "", "primary_kind": "", "tags": []},
+                "metrics": ["ascent_m"],
+                "grouping": "none",
+                "output_mode": "prose",
+                "comparison_mode": "none",
+                "reason": "User asked for all workouts.",
+            },
+            LLMOperation.PERIOD_ANALYSIS_REPLY: {
+                "reply_text": reply_text,
+                "claims_used": ["ascent_m"],
+                "missing_data_notes": [],
+            },
+        }
+    )
+
+
+def _period_none() -> dict[str, object]:
+    return {
+        "scope_type": "none",
+        "scope_value": "",
+        "start_date": "",
+        "end_date": "",
+        "rolling_days": None,
+        "filters": {"kind": "", "primary_kind": "", "tags": []},
+        "metrics": [],
+        "grouping": "none",
+        "output_mode": "prose",
+        "comparison_mode": "none",
+        "reason": "Single-workout request.",
+    }
 
 
 def _classification() -> dict[str, object]:

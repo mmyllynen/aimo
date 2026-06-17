@@ -8,9 +8,20 @@ from core.i18n import LocalizedText, SupportedLanguage, TranslationKey
 from core.routing import RouteDecision
 from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
 from llm.gateway import LLMGateway, LLMGatewayError
-from llm.operations import WorkoutReferenceInput, WorkoutReplyInput, extract_workout_reference, write_workout_reply
+from llm.operations import (
+    PeriodAnalysisReplyInput,
+    PeriodRequest,
+    PeriodRequestInput,
+    WorkoutReferenceInput,
+    WorkoutReplyInput,
+    extract_workout_reference,
+    interpret_period_request,
+    write_period_analysis_reply,
+    write_workout_reply,
+)
 from storage.repositories import HistoryEventRecord, WorkoutRecord, WorkoutStreamRecord
 from storage.unit_of_work import RepositoryBundle
+from workout.periods import DEFAULT_PERIOD_TIMEZONE, PeriodRequestError, aggregate_period, local_now, resolve_period_bounds
 from workout.references import WorkoutReferenceResolution, WorkoutReferenceStatus, resolve_workout_reference
 
 
@@ -39,6 +50,18 @@ class WorkoutChatWorkflow:
                 TranslationKey.ERROR_MODEL_UNAVAILABLE,
                 "Workout chat requires an LLM gateway",
             )
+
+        try:
+            period_request = _interpret_period_request(event, repositories, gateway)
+        except LLMGatewayError:
+            return _error_result(
+                WorkflowStatus.SYSTEM_ERROR,
+                ErrorCategory.MODEL_UNAVAILABLE,
+                TranslationKey.ERROR_MODEL_UNAVAILABLE,
+                "Workout period interpretation failed",
+            )
+        if period_request.is_period_request:
+            return _handle_period_request(event, repositories, gateway, language, period_request)
 
         try:
             resolved = _resolve_workout(event, repositories, gateway)
@@ -124,6 +147,128 @@ class WorkoutChatWorkflow:
                 ),
             ),
         )
+
+
+def _interpret_period_request(
+    event: CanonicalEvent,
+    repositories: RepositoryBundle,
+    gateway: LLMGateway,
+) -> PeriodRequest:
+    current = local_now(event.created_at)
+    return interpret_period_request(
+        gateway,
+        PeriodRequestInput(
+            user_text=event.text,
+            current_datetime=current.isoformat(),
+            timezone=DEFAULT_PERIOD_TIMEZONE,
+            compact_routing_context={
+                "recent_workout_count": len(repositories.workouts.list_for_user(event.user_id, limit=20)),
+                "active_workout_id": _active_workout_id(repositories, event.user_id),
+            },
+        ),
+    )
+
+
+def _handle_period_request(
+    event: CanonicalEvent,
+    repositories: RepositoryBundle,
+    gateway: LLMGateway,
+    language: SupportedLanguage,
+    period_request: PeriodRequest,
+) -> WorkflowResult:
+    try:
+        bounds = resolve_period_bounds(period_request, local_now(event.created_at))
+    except PeriodRequestError:
+        return _error_result(
+            WorkflowStatus.SYSTEM_ERROR,
+            ErrorCategory.PERIOD_REQUEST_INVALID,
+            TranslationKey.ERROR_PERIOD_REQUEST_INVALID,
+            "Invalid workout period request",
+        )
+    filters = period_request.filters
+    workouts = repositories.workouts.list_for_user_in_period(
+        event.user_id,
+        start_date=bounds.start_date,
+        end_date=bounds.end_date,
+        kind=str(filters.get("kind", "") or "") or None,
+        primary_kind=str(filters.get("primary_kind", "") or "") or None,
+    )
+    if not workouts:
+        return _error_result(
+            WorkflowStatus.USER_ERROR,
+            ErrorCategory.NO_WORKOUTS_IN_PERIOD,
+            TranslationKey.ERROR_NO_WORKOUTS_IN_PERIOD,
+            "No workouts found for workout period request",
+        )
+    try:
+        facts = aggregate_period(workouts, period_request, bounds)
+    except PeriodRequestError:
+        return _error_result(
+            WorkflowStatus.SYSTEM_ERROR,
+            ErrorCategory.PERIOD_REQUEST_INVALID,
+            TranslationKey.ERROR_PERIOD_REQUEST_INVALID,
+            "Invalid workout period aggregation request",
+        )
+    try:
+        reply = write_period_analysis_reply(
+            gateway,
+            PeriodAnalysisReplyInput(
+                user_text=event.text,
+                period_facts=facts,
+                bounded_recent_context=_recent_context(repositories, event.channel_id),
+            ),
+            language=language,
+        )
+    except LLMGatewayError:
+        return _error_result(
+            WorkflowStatus.SYSTEM_ERROR,
+            ErrorCategory.MODEL_UNAVAILABLE,
+            TranslationKey.ERROR_MODEL_UNAVAILABLE,
+            "Workout period reply generation failed",
+        )
+
+    repositories.history.add(
+        HistoryEventRecord(
+            history_id=f"{event.event_id}:assistant",
+            guild_id=event.guild_id,
+            channel_id=event.channel_id,
+            user_id=None,
+            role="assistant",
+            event_type="workout_period_reply",
+            content=reply.reply_text,
+            source_event_id=event.event_id,
+            created_at=event.created_at.isoformat(),
+            metadata={
+                "claims_used": list(reply.claims_used),
+                "missing_data_notes": list(reply.missing_data_notes),
+                "period_scope_type": period_request.scope_type,
+                "period_start_date": bounds.start_date or "",
+                "period_end_date": bounds.end_date or "",
+            },
+        )
+    )
+    return WorkflowResult(
+        status=WorkflowStatus.SUCCESS,
+        messages=(
+            OutgoingMessage(
+                kind=OutgoingKind.TEXT,
+                text=reply.reply_text,
+                metadata={
+                    "claims_used": reply.claims_used,
+                    "missing_data_notes": reply.missing_data_notes,
+                    "period_scope_type": period_request.scope_type,
+                    "period_start_date": bounds.start_date or "",
+                    "period_end_date": bounds.end_date or "",
+                    "workout_count": facts["workout_count"],
+                },
+            ),
+        ),
+    )
+
+
+def _active_workout_id(repositories: RepositoryBundle, user_id: str) -> str:
+    active = repositories.active_workouts.get(user_id)
+    return active.workout_id if active is not None else ""
 
 
 def _resolve_workout(

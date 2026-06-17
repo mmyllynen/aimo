@@ -5,6 +5,11 @@ from datetime import datetime, timezone
 from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
 from xml.etree import ElementTree
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+ASCENT_DEADBAND_M = 3.0
+LOCAL_TIMEZONE = "Europe/Helsinki"
 
 
 class GpxParseError(ValueError):
@@ -112,8 +117,8 @@ def parse_gpx(content: bytes, *, fallback_title: str = "Workout") -> ParsedGpxWo
         kind=kind,
         primary_kind=primary_kind,
         start_time_utc=_format_time(start_time),
-        start_time_local=_format_time(start_time),
-        local_date=start_time.date().isoformat() if start_time is not None else None,
+        start_time_local=_format_local_time(start_time),
+        local_date=_local_date(start_time),
         distance_km=round(total_distance_m / 1000, 3) if total_distance_m is not None else None,
         duration_s=duration_s,
         pace_s_per_km=pace_s_per_km,
@@ -252,17 +257,34 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _ascent(points: tuple[ParsedGpxPoint, ...]) -> float | None:
-    ascent = 0.0
-    previous: float | None = None
-    saw_elevation = False
-    for point in points:
-        if point.elevation_m is None:
+    elevations = [point.elevation_m for point in points if point.elevation_m is not None]
+    if not elevations:
+        return None
+
+    total = 0.0
+    valley = elevations[0]
+    peak = elevations[0]
+    climbing = False
+    for elevation in elevations[1:]:
+        if elevation > peak:
+            peak = elevation
+            if peak - valley >= ASCENT_DEADBAND_M:
+                climbing = True
             continue
-        saw_elevation = True
-        if previous is not None and point.elevation_m > previous:
-            ascent += point.elevation_m - previous
-        previous = point.elevation_m
-    return ascent if saw_elevation else None
+        if elevation >= peak:
+            continue
+        if climbing and peak - elevation >= ASCENT_DEADBAND_M:
+            total += peak - valley
+            valley = elevation
+            peak = elevation
+            climbing = False
+        elif not climbing and elevation < valley:
+            valley = elevation
+            peak = elevation
+
+    if climbing:
+        total += peak - valley
+    return total
 
 
 def _classify(*, has_activity: bool, has_track: bool, has_route: bool) -> tuple[str, str]:
@@ -312,6 +334,25 @@ def _format_time(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _format_local_time(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(_local_timezone()).isoformat()
+
+
+def _local_date(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(_local_timezone()).date().isoformat()
+
+
+def _local_timezone() -> ZoneInfo:
+    try:
+        return ZoneInfo(LOCAL_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
 
 
 def _title_from_filename(value: str) -> str:

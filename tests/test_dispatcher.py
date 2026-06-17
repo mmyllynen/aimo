@@ -284,7 +284,7 @@ class DispatcherTests(unittest.TestCase):
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
-        self.assertEqual(len(result.messages), 5)
+        self.assertEqual(len(result.messages), 1)
         self.assertTrue(all(message.kind == OutgoingKind.TEXT for message in result.messages))
 
     def test_slash_aimo_help_routes_to_ephemeral_help(self) -> None:
@@ -300,6 +300,24 @@ class DispatcherTests(unittest.TestCase):
         result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 1)
+        self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
+
+    def test_slash_aimo_empty_text_routes_to_ephemeral_help(self) -> None:
+        slash = DiscordSlashSnapshot(
+            interaction_id="interaction-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            command_name="aimo",
+        )
+        event = replace(slash_to_event(slash), text="")
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 1)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.HELP_INTRO)
         self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
 
     def test_slash_aimo_attachment_routes_to_ingest_without_help_flag(self) -> None:

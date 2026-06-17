@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from io import BytesIO
 from typing import Any, Awaitable, Callable
 
@@ -182,16 +183,17 @@ def _register_real_app_commands(command_tree: Any, app_context: ApplicationConte
     async def debug_command(interaction: DiscordInteraction, tila: str = "") -> None:
         await handle_interaction(interaction, app_context, discord_module=discord_module)
 
+    _add_real_app_commands(command_tree, aimo_command, treenit_group, debug_command)
     guilds = _allowed_guild_objects(app_context.runtime.config.discord, discord_module=discord_module)
     if guilds:
         for guild in guilds:
-            command_tree.add_command(aimo_command, guild=guild)
-            command_tree.add_command(treenit_group, guild=guild)
-            command_tree.add_command(debug_command, guild=guild)
+            _add_real_app_commands(command_tree, aimo_command, treenit_group, debug_command, guild=guild)
         return
-    command_tree.add_command(aimo_command)
-    command_tree.add_command(treenit_group)
-    command_tree.add_command(debug_command)
+
+
+def _add_real_app_commands(command_tree: Any, *commands: Any, guild: Any | None = None) -> None:
+    for command in commands:
+        command_tree.add_command(command, guild=guild)
 
 
 async def handle_message(
@@ -232,21 +234,64 @@ async def handle_message(
         len(event.text),
     )
     event = app_context.hydrate_attachments(event)
-    result = await asyncio.to_thread(app_context.dispatch_event_isolated, event)
+    result, status_message = await _dispatch_message_with_feedback(message, app_context, event, discord_module=discord_module)
     logger.info(
         "Discord message dispatch finished: event_id=%s status=%s outbound_count=%s",
         event.event_id,
         result.status.value,
         len(result.messages),
     )
+    first = True
     for outgoing in (outgoing_to_discord(message, app_context.runtime.translator) for message in result.messages):
+        if first and status_message is not None:
+            await _replace_status_message(status_message, outgoing, discord_module=discord_module)
+            if outgoing.content is not None:
+                await send_outbound(
+                    getattr(message, "channel"),
+                    replace(outgoing, text=""),
+                    discord_module=discord_module,
+                )
+            first = False
+            continue
         await send_outbound(getattr(message, "channel"), outgoing, discord_module=discord_module)
+        first = False
     await _send_first_interaction_admin_dm(
         result,
         app_context,
         discord_client=discord_client,
         discord_module=discord_module,
     )
+
+
+async def _dispatch_message_with_feedback(
+    message: Any,
+    app_context: ApplicationContext,
+    event: Any,
+    *,
+    discord_module: Any | None,
+) -> tuple[Any, Any | None]:
+    loop = asyncio.get_running_loop()
+    status_future = {"value": None}
+
+    def status_callback(status: str) -> None:
+        if status != "visualization_started" or status_future["value"] is not None:
+            return
+        status_future["value"] = asyncio.run_coroutine_threadsafe(
+            _send_visualization_status(getattr(message, "channel"), app_context, discord_module=discord_module),
+            loop,
+        )
+
+    channel = getattr(message, "channel", None) if event.kind.value == "mention" else None
+    async with _typing_context(channel):
+        result = await asyncio.to_thread(app_context.dispatch_event_isolated, event, status_callback=status_callback)
+    status_message = None
+    future = status_future["value"]
+    if future is not None:
+        try:
+            status_message = await asyncio.wrap_future(future)
+        except Exception:
+            logger.exception("Failed to send Discord visualization status message.")
+    return result, status_message
 
 
 async def handle_interaction(
@@ -334,6 +379,40 @@ async def send_outbound(
     message = await _send_destination(destination, kwargs, wait_for_message=view is not None)
     if view is not None and message is not None:
         _schedule_component_disable(message, view, delay_seconds=COMPONENT_DISABLE_AFTER_SECONDS)
+
+
+async def _send_visualization_status(destination: Any, app_context: ApplicationContext, *, discord_module: Any | None) -> Any | None:
+    outbound = DiscordOutbound(text=app_context.runtime.translator.text(TranslationKey.VISUALIZATION_WORKING))
+    kwargs: dict[str, Any] = {
+        "content": outbound.text,
+        "allowed_mentions": _allowed_mentions(outbound.allowed_mentions, discord_module=discord_module),
+    }
+    return await _send_destination(destination, kwargs, wait_for_message=True)
+
+
+async def _replace_status_message(status_message: Any, outbound: DiscordOutbound, *, discord_module: Any | None) -> None:
+    edit = getattr(status_message, "edit", None)
+    if edit is None:
+        return
+    kwargs = {
+        "content": outbound.text or None,
+        "allowed_mentions": _allowed_mentions(outbound.allowed_mentions, discord_module=discord_module),
+    }
+    await edit(**kwargs)
+
+
+@asynccontextmanager
+async def _typing_context(channel: Any):
+    typing = getattr(channel, "typing", None)
+    if typing is None:
+        yield
+        return
+    context = typing()
+    if hasattr(context, "__aenter__") and hasattr(context, "__aexit__"):
+        async with context:
+            yield
+        return
+    yield
 
 
 def _discord_view(

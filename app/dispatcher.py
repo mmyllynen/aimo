@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from app.policy import AdminPolicy
 from app.redaction import redact_payload
+from core.config import MapsConfig, RenderersConfig
 from core.events import CanonicalEvent, EventKind
 from core.errors import AppError, ErrorCategory
 from core.i18n import DEFAULT_LANGUAGE, LocalizedText, SupportedLanguage, TranslationKey
@@ -37,6 +38,9 @@ class DispatchContext:
     max_attachment_size_bytes: int = 25 * 1024 * 1024
     raw_gpx_path: Path | None = None
     artifact_path: Path | None = None
+    maps_config: MapsConfig = MapsConfig()
+    renderers_config: RenderersConfig = RenderersConfig()
+    status_callback: Callable[[str], None] | None = None
     trace_keep_limit: int = 1000
 
 
@@ -179,6 +183,8 @@ class Dispatcher:
                     raw_storage_root=context.raw_gpx_path,
                 )
             elif route.target == WorkflowTarget.VISUALIZATION:
+                if context.status_callback is not None:
+                    context.status_callback("visualization_started")
                 result = self.visualization_workflow.handle(
                     event,
                     route,
@@ -186,6 +192,8 @@ class Dispatcher:
                     gateway=llm_gateway,
                     language=context.language,
                     artifact_root=context.artifact_path,
+                    maps_config=context.maps_config,
+                    renderers_config=context.renderers_config,
                 )
             elif route.target == WorkflowTarget.WORKOUT_CHAT:
                 result = self.workout_chat_workflow.handle(
@@ -442,7 +450,7 @@ def _is_help_request(event: CanonicalEvent) -> bool:
     command_name = str(event.metadata.get("command_name", "")).lower()
     options = event.metadata.get("options", {})
     text = event.text.strip().lower()
-    if command_name == "aimo" and text == "/aimo":
+    if command_name == "aimo" and text in {"", "aimo", "/aimo"}:
         return not _has_useful_options(options)
     return command_name in {"help"} or text in {"apua", "help", "/help", "/aimo"}
 
@@ -590,6 +598,7 @@ def _trace_llm_gateway(
                 "max_tokens": call.max_tokens,
                 "response_keys": list(call.response_keys),
                 "error_type": call.error_type,
+                "error_message": call.error_message,
             },
             created_at=event.created_at.isoformat(),
         )

@@ -215,6 +215,69 @@ Rules:
 - set `set_current_workout` only when the user is concretely referring to one workout that should become the current workout context
 - Python owns owner checks, selector resolution, ambiguity handling, and the actual current-workout update
 
+## Period Request Interpretation
+
+Input:
+
+- user text
+- current datetime
+- timezone
+- allowed scope types
+- allowed canonical metrics
+- allowed grouping values
+- allowed output modes
+- compact routing context
+
+Output:
+
+```text
+scope_type
+scope_value
+start_date
+end_date
+rolling_days
+filters
+metrics
+grouping
+output_mode
+comparison_mode
+reason
+```
+
+Rules:
+
+- use `none` when the request is not about a workout set or period
+- use `single_workout` only when the request clearly belongs to the existing workout-reference path
+- use `all_workouts` for the user's complete stored workout set
+- use relative scopes such as `current_week`, `last_week`, `current_month`, `last_month`, and `rolling_days` for period requests
+- map user-language metric aliases to canonical ids
+- do not calculate totals, resolve ownership, query data, or render output
+- Python owns date resolution, owner-scoped storage queries, filtering, aggregation, validation, and rendering
+- input must not include raw GPX, raw points, secrets, or unrelated history
+
+## Period Analysis Reply
+
+Input:
+
+- user text
+- compact period facts calculated by Python
+- bounded recent context
+
+Output:
+
+```text
+reply_text
+claims_used
+missing_data_notes
+```
+
+Rules:
+
+- write concise prose in the configured language
+- use `period_facts` as ground truth
+- do not invent workouts, metrics, dates, comparisons, or unavailable data
+- mention missing requested metrics when `missing_data_notes` require it
+
 ## Future: History Summary
 
 Input:

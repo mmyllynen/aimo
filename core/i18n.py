@@ -18,10 +18,6 @@ DEFAULT_LANGUAGE = SupportedLanguage.FI
 
 class TranslationKey(StrEnum):
     HELP_INTRO = "help.intro"
-    HELP_UPLOAD_GPX = "help.upload_gpx"
-    HELP_WORKOUTS = "help.workouts"
-    HELP_VISUALIZATION = "help.visualization"
-    HELP_DEBUG = "help.debug"
     CLARIFY_GENERIC = "clarify.generic"
     WORKFLOW_ACCEPTED = "workflow.accepted"
     WORKFLOW_NOOP = "workflow.noop"
@@ -45,12 +41,16 @@ class TranslationKey(StrEnum):
     GPX_ACCEPTED = "gpx.accepted"
     GPX_DUPLICATE = "gpx.duplicate"
     GPX_REJECTED = "gpx.rejected"
+    VISUALIZATION_WORKING = "visualization.working"
     VISUALIZATION_CREATED = "visualization.created"
+    VISUALIZATION_ROUTE_COLOR_LIMITED = "visualization.route_color_limited"
     ERROR_UNSUPPORTED_ATTACHMENT = "error.unsupported_attachment"
     ERROR_INVALID_GPX = "error.invalid_gpx"
     ERROR_NO_MATCHING_WORKOUT = "error.no_matching_workout"
     ERROR_MISSING_METRIC = "error.missing_metric"
     ERROR_AMBIGUOUS_WORKOUT = "error.ambiguous_workout"
+    ERROR_NO_WORKOUTS_IN_PERIOD = "error.no_workouts_in_period"
+    ERROR_PERIOD_REQUEST_INVALID = "error.period_request_invalid"
     ERROR_VISUALIZATION_PLAN_INVALID = "error.visualization_plan_invalid"
     ERROR_RENDER_FAILED = "error.render_failed"
     ERROR_MODEL_UNAVAILABLE = "error.model_unavailable"
@@ -64,11 +64,16 @@ Catalog = dict[TranslationKey, str]
 
 CATALOGS: dict[SupportedLanguage, Catalog] = {
     SupportedLanguage.FI: {
-        TranslationKey.HELP_INTRO: "Voin jutella, tallentaa GPX-treenejä, hallita treenejä ja piirtää treenikuvaajia.",
-        TranslationKey.HELP_UPLOAD_GPX: "Lähetä GPX-liite maininnan kanssa, niin tallennan sen treeniksi.",
-        TranslationKey.HELP_WORKOUTS: "Käytä /treenit-komentoa treenien listaamiseen, tarkasteluun ja hallintaan.",
-        TranslationKey.HELP_VISUALIZATION: "Voit pyytää kuvaajaa luonnollisella kielellä, esimerkiksi viimeisimmästä tai aktiivisesta treenistä.",
-        TranslationKey.HELP_DEBUG: "/debug palauttaa viimeisimmän rajatun debug-jäljen.",
+        TranslationKey.HELP_INTRO: (
+            "Osaan jutella lyhyesti, tallentaa GPX-treenejä, näyttää ja hallita treenejä sekä piirtää "
+            "treenikuvaajia.\n"
+            "- Lähetä GPX-liite maininnan tai /aimo-komennon kanssa.\n"
+            "- Käytä /treenit: listaa, näytä, aseta aktiivinen, poista ja sykerajat.\n"
+            "- Pyydä luonnollisesti: esimerkiksi \"analysoi viimeisin treeni\" tai \"piirrä syke ajan funktiona\".\n"
+            "- /debug näyttää rajatun debug-jäljen.\n"
+            "Välitän kielimallille vain pyynnön kannalta tarpeellisen rajatun kontekstin, en raakaa GPX-dataa "
+            "tai kokonaisia pistejoukkoja."
+        ),
         TranslationKey.CLARIFY_GENERIC: "Tarvitsen vielä tarkennuksen ennen kuin voin jatkaa.",
         TranslationKey.WORKFLOW_ACCEPTED: "Selvä, käsittelen pyynnön.",
         TranslationKey.WORKFLOW_NOOP: "Tällä pyynnöllä ei ollut tehtävää toimenpidettä.",
@@ -108,15 +113,21 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         ),
         TranslationKey.HR_ZONES_SUMMARY: "Sykerajasi:\n{zones}",
         TranslationKey.HR_ZONES_UPDATED: "Päivitin sykerajat.",
-        TranslationKey.GPX_ACCEPTED: "Tallensin GPX-tiedoston treeniksi: {title}.",
-        TranslationKey.GPX_DUPLICATE: "Tämä GPX on jo tallennettu treeniksi: {title}.",
-        TranslationKey.GPX_REJECTED: "Tuo liite ei näytä kelvolliselta GPX-tiedostolta.",
+        TranslationKey.GPX_ACCEPTED: "Tallensin GPX-tiedoston {filename} treeniksi: {title}.",
+        TranslationKey.GPX_DUPLICATE: "GPX-tiedosto {filename} on jo tallennettu treeniksi: {title}.",
+        TranslationKey.GPX_REJECTED: "Tuo liite ei näytä kelvolliselta GPX-tiedostolta: {filename}.",
+        TranslationKey.VISUALIZATION_WORKING: "Työstän visualisointia...",
         TranslationKey.VISUALIZATION_CREATED: "Piirsin kuvaajan treenistä: {title}.",
+        TranslationKey.VISUALIZATION_ROUTE_COLOR_LIMITED: (
+            "Kartalla voi korostaa vain yhtä data-arvoa kerrallaan. Valitsin ensimmäisen: {metric}."
+        ),
         TranslationKey.ERROR_UNSUPPORTED_ATTACHMENT: "Tuo liitetyyppi ei ole tuettu.",
         TranslationKey.ERROR_INVALID_GPX: "Tuo liite ei näytä kelvolliselta GPX-tiedostolta.",
         TranslationKey.ERROR_NO_MATCHING_WORKOUT: "En löytänyt pyynnölle sopivaa treeniä.",
         TranslationKey.ERROR_MISSING_METRIC: "Treenistä puuttuu tarvittava mittari: {metric}.",
         TranslationKey.ERROR_AMBIGUOUS_WORKOUT: "Löysin useamman mahdollisen treenin. Tarvitsen tarkemman viitteen.",
+        TranslationKey.ERROR_NO_WORKOUTS_IN_PERIOD: "En löytänyt treenejä pyydetyltä jaksolta.",
+        TranslationKey.ERROR_PERIOD_REQUEST_INVALID: "En saanut muodostettua kelvollista treenijakson rajausta.",
         TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID: "En saanut muodostettua kelvollista kuvaajasuunnitelmaa.",
         TranslationKey.ERROR_RENDER_FAILED: "Kuvaajan piirtäminen epäonnistui.",
         TranslationKey.ERROR_MODEL_UNAVAILABLE: "Kielimalli ei ole juuri nyt käytettävissä.",
@@ -125,11 +136,15 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.ERROR_UNEXPECTED: "Tapahtui odottamaton virhe.",
     },
     SupportedLanguage.EN: {
-        TranslationKey.HELP_INTRO: "I can chat, store GPX workouts, manage workouts, and draw workout charts.",
-        TranslationKey.HELP_UPLOAD_GPX: "Send a GPX attachment with a mention and I will save it as a workout.",
-        TranslationKey.HELP_WORKOUTS: "Use /treenit to list, inspect, and manage workouts.",
-        TranslationKey.HELP_VISUALIZATION: "You can ask for charts in natural language, for example from the latest or active workout.",
-        TranslationKey.HELP_DEBUG: "/debug returns the latest bounded debug trace.",
+        TranslationKey.HELP_INTRO: (
+            "I can chat briefly, store GPX workouts, show and manage workouts, and draw workout charts.\n"
+            "- Send a GPX attachment with a mention or /aimo.\n"
+            "- Use /treenit to list, inspect, activate, delete, and configure heart-rate zones.\n"
+            "- Ask naturally, for example \"analyze my latest workout\" or \"draw heart rate over time\".\n"
+            "- /debug shows the latest bounded debug trace.\n"
+            "I only send the language model the bounded context needed for the request, not raw GPX data "
+            "or full point arrays."
+        ),
         TranslationKey.CLARIFY_GENERIC: "I need one clarification before I can continue.",
         TranslationKey.WORKFLOW_ACCEPTED: "Got it, I will handle the request.",
         TranslationKey.WORKFLOW_NOOP: "There was nothing to do for that request.",
@@ -169,15 +184,21 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         ),
         TranslationKey.HR_ZONES_SUMMARY: "Your heart-rate zones:\n{zones}",
         TranslationKey.HR_ZONES_UPDATED: "Updated heart-rate zones.",
-        TranslationKey.GPX_ACCEPTED: "Saved the GPX file as a workout: {title}.",
-        TranslationKey.GPX_DUPLICATE: "This GPX is already saved as workout: {title}.",
-        TranslationKey.GPX_REJECTED: "That attachment does not look like a valid GPX file.",
+        TranslationKey.GPX_ACCEPTED: "Saved GPX file {filename} as workout: {title}.",
+        TranslationKey.GPX_DUPLICATE: "GPX file {filename} is already saved as workout: {title}.",
+        TranslationKey.GPX_REJECTED: "That attachment does not look like a valid GPX file: {filename}.",
+        TranslationKey.VISUALIZATION_WORKING: "Working on the visualization...",
         TranslationKey.VISUALIZATION_CREATED: "I drew the chart for workout: {title}.",
+        TranslationKey.VISUALIZATION_ROUTE_COLOR_LIMITED: (
+            "A route map can highlight only one data value at a time. I used the first one: {metric}."
+        ),
         TranslationKey.ERROR_UNSUPPORTED_ATTACHMENT: "That attachment type is not supported.",
         TranslationKey.ERROR_INVALID_GPX: "That attachment does not look like a valid GPX file.",
         TranslationKey.ERROR_NO_MATCHING_WORKOUT: "I could not find a workout matching the request.",
         TranslationKey.ERROR_MISSING_METRIC: "The workout is missing a required metric: {metric}.",
         TranslationKey.ERROR_AMBIGUOUS_WORKOUT: "I found several possible workouts. I need a more specific reference.",
+        TranslationKey.ERROR_NO_WORKOUTS_IN_PERIOD: "I did not find workouts in the requested period.",
+        TranslationKey.ERROR_PERIOD_REQUEST_INVALID: "I could not build a valid workout-period selection.",
         TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID: "I could not build a valid chart plan.",
         TranslationKey.ERROR_RENDER_FAILED: "Rendering the chart failed.",
         TranslationKey.ERROR_MODEL_UNAVAILABLE: "The language model is not available right now.",

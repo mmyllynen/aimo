@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
-from visualization.metrics import canonical_metric
+from visualization.metrics import canonical_metric, clean_metric_series
 
 
 @dataclass(frozen=True)
@@ -99,8 +99,37 @@ SUMMARY_COLUMNS = (
 
 SUMMARY_OUTPUT_COLUMNS = frozenset(column.column_id for column in SUMMARY_COLUMNS)
 
+PERIOD_COLUMNS = (
+    DatasetColumn("workout_label", semantic_type="nominal"),
+    DatasetColumn("workout_id", semantic_type="nominal"),
+    DatasetColumn("workout_date", semantic_type="temporal"),
+    DatasetColumn("workout_start_local", semantic_type="temporal"),
+    DatasetColumn("workout_index", semantic_type="ordinal"),
+    DatasetColumn("workout_distance_km", unit="km"),
+    *SUMMARY_COLUMNS,
+)
+
 
 DERIVED_DATASETS = (
+    DatasetDefinition(
+        dataset_id="route_points",
+        output_columns=frozenset(
+            {
+                "route",
+                "workout_id",
+                "workout_title",
+                "point_index",
+                "latitude",
+                "longitude",
+                "elapsed_s",
+                "distance_km",
+                "elevation_m",
+                "heart_rate_bpm",
+                "segment_index",
+            }
+        ),
+        build=lambda points, zones, workout: _route_points_dataset(points, workout),
+    ),
     DatasetDefinition(
         dataset_id="hr_zone_distribution",
         output_columns=frozenset({"zone_key", "zone_label", "heart_rate_zone_seconds", "lower_bpm", "upper_bpm", "color_hint"}),
@@ -139,10 +168,13 @@ def resolve_datasets(
     heart_rate_zones: tuple[HeartRateZoneRecord, ...] = (),
     workout: WorkoutRecord | None = None,
     comparison_workouts: tuple[WorkoutRecord, ...] = (),
+    period_workouts: tuple[WorkoutRecord, ...] = (),
 ) -> DatasetManifest:
     datasets = [_point_dataset(points)]
     if request.comparison:
         datasets.append(_workout_comparison_dataset(comparison_workouts))
+    if period_workouts:
+        datasets.append(_workout_period_dataset(period_workouts))
     requested = set(request.metrics)
     for definition in DERIVED_DATASETS:
         if requested & definition.output_columns:
@@ -151,25 +183,50 @@ def resolve_datasets(
 
 
 def _point_dataset(points: tuple[WorkoutPointRecord, ...]) -> Dataset:
-    rows = tuple(
-        {
-            "elapsed_s": point.elapsed_s,
-            "distance_m": point.distance_m,
-            "distance_km": point.distance_km,
-            "latitude": point.latitude,
-            "longitude": point.longitude,
-            "elevation_m": point.elevation_m,
-            "heart_rate_bpm": point.heart_rate_bpm,
-            "cadence_spm": point.cadence_spm,
-            "pace_s_per_km": point.pace_s_per_km,
-        }
-        for point in points
+    rows = _clean_dataset_rows(
+        tuple(
+            {
+                "elapsed_s": point.elapsed_s,
+                "distance_m": point.distance_m,
+                "distance_km": point.distance_km,
+                "latitude": point.latitude,
+                "longitude": point.longitude,
+                "elevation_m": point.elevation_m,
+                "heart_rate_bpm": point.heart_rate_bpm,
+                "cadence_spm": point.cadence_spm,
+                "pace_s_per_km": point.pace_s_per_km,
+            }
+            for point in points
+        ),
+        tuple(column.column_id for column in POINT_COLUMNS),
     )
     return Dataset(
         dataset_id="workout_points",
         rows=rows,
         columns=tuple(_with_stats(column, rows) for column in POINT_COLUMNS),
     )
+
+
+def _clean_dataset_rows(rows: tuple[dict[str, Any], ...], metrics: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
+    if not rows:
+        return rows
+    cleaned_by_metric = {
+        metric: clean_metric_series(metric, tuple(_optional_float(row.get(metric)) for row in rows))
+        for metric in metrics
+    }
+    cleaned_rows: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        cleaned = dict(row)
+        for metric, values in cleaned_by_metric.items():
+            cleaned[metric] = values[index]
+        cleaned_rows.append(cleaned)
+    return tuple(cleaned_rows)
+
+
+def _optional_float(value: object) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _hr_zone_dataset(
@@ -208,6 +265,40 @@ def _hr_zone_dataset(
     return Dataset(dataset_id="hr_zone_distribution", rows=rows, columns=columns)
 
 
+def _route_points_dataset(points: tuple[WorkoutPointRecord, ...], workout: WorkoutRecord | None) -> Dataset:
+    title_by_workout = {workout.workout_id: workout.title} if workout is not None else {}
+    rows = tuple(
+        {
+            "route": 1 if point.latitude is not None and point.longitude is not None else None,
+            "workout_id": point.workout_id,
+            "workout_title": title_by_workout.get(point.workout_id, point.workout_id),
+            "point_index": point.point_index,
+            "latitude": point.latitude,
+            "longitude": point.longitude,
+            "elapsed_s": point.elapsed_s,
+            "distance_km": point.distance_km,
+            "elevation_m": point.elevation_m,
+            "heart_rate_bpm": point.heart_rate_bpm,
+            "segment_index": point.segment_index,
+        }
+        for point in points
+    )
+    columns = (
+        DatasetColumn("workout_id", semantic_type="nominal"),
+        DatasetColumn("workout_title", semantic_type="nominal"),
+        _with_stats(DatasetColumn("point_index"), rows),
+        _with_stats(DatasetColumn("latitude"), rows),
+        _with_stats(DatasetColumn("longitude"), rows),
+        _with_stats(DatasetColumn("elapsed_s", unit="s"), rows),
+        _with_stats(DatasetColumn("distance_km", unit="km"), rows),
+        _with_stats(DatasetColumn("elevation_m", unit="m"), rows),
+        _with_stats(DatasetColumn("heart_rate_bpm", unit="bpm"), rows),
+        _with_stats(DatasetColumn("segment_index"), rows),
+        _with_stats(DatasetColumn("route", semantic_type="geometry"), rows),
+    )
+    return Dataset(dataset_id="route_points", rows=rows, columns=columns)
+
+
 def _workout_summary_dataset(workout: WorkoutRecord | None) -> Dataset:
     rows: tuple[dict[str, Any], ...]
     if workout is None:
@@ -228,6 +319,73 @@ def _workout_comparison_dataset(workouts: tuple[WorkoutRecord, ...]) -> Dataset:
         rows=rows,
         columns=tuple(_with_stats(column, rows) for column in SUMMARY_COLUMNS),
     )
+
+
+def _workout_period_dataset(workouts: tuple[WorkoutRecord, ...]) -> Dataset:
+    rows = _workout_period_rows(workouts)
+    return Dataset(
+        dataset_id="workout_period",
+        rows=rows,
+        columns=tuple(_with_stats(column, rows) for column in PERIOD_COLUMNS),
+    )
+
+
+def _workout_period_rows(workouts: tuple[WorkoutRecord, ...]) -> tuple[dict[str, Any], ...]:
+    date_counts: dict[str, int] = {}
+    for workout in workouts:
+        if workout.local_date:
+            date_counts[workout.local_date] = date_counts.get(workout.local_date, 0) + 1
+    seen_dates: dict[str, int] = {}
+    rows: list[dict[str, Any]] = []
+    for index, workout in enumerate(workouts, start=1):
+        date_value = workout.local_date or ""
+        if date_value:
+            seen_dates[date_value] = seen_dates.get(date_value, 0) + 1
+        rows.append(
+            {
+                "workout_label": _workout_period_label(
+                    workout,
+                    index=index,
+                    date_count=date_counts.get(date_value, 0),
+                    date_index=seen_dates.get(date_value, 0),
+                ),
+                "workout_id": workout.workout_id,
+                "workout_date": date_value,
+                "workout_start_local": workout.start_time_local or "",
+                "workout_index": index,
+                "workout_distance_km": workout.distance_km,
+                **_workout_summary_row(workout),
+            }
+        )
+    return tuple(rows)
+
+
+def _workout_period_label(
+    workout: WorkoutRecord,
+    *,
+    index: int,
+    date_count: int,
+    date_index: int,
+) -> str:
+    label = _format_day_month(workout.local_date)
+    if not label:
+        label = f"#{index}"
+    if date_count > 1:
+        label = f"{label} #{date_index}"
+    return label
+
+
+def _format_day_month(value: str | None) -> str:
+    if not value:
+        return ""
+    parts = value.split("-")
+    if len(parts) != 3:
+        return value
+    year, month, day = parts
+    del year
+    if not month.isdecimal() or not day.isdecimal():
+        return value
+    return f"{int(day)}/{int(month)}"
 
 
 def _workout_summary_row(workout: WorkoutRecord) -> dict[str, Any]:

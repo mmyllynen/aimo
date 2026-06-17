@@ -8,10 +8,6 @@ from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, Workfl
 
 HELP_KEYS = (
     TranslationKey.HELP_INTRO,
-    TranslationKey.HELP_UPLOAD_GPX,
-    TranslationKey.HELP_WORKOUTS,
-    TranslationKey.HELP_VISUALIZATION,
-    TranslationKey.HELP_DEBUG,
 )
 
 
@@ -31,4 +27,3 @@ def build_help_result(*, ephemeral: bool = True) -> WorkflowResult:
         for key in HELP_KEYS
     )
     return WorkflowResult(status=WorkflowStatus.SUCCESS, messages=messages)
-

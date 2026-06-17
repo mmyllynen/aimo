@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from configparser import ConfigParser, Error as ConfigParserError
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +62,24 @@ class DebugConfig:
 
 
 @dataclass(frozen=True)
+class MapsConfig:
+    provider: str = "osm"
+    maptiler_api_key: str = ""
+    maptiler_map_id: str = "streets-v4"
+    timeout_s: float = 10.0
+
+
+@dataclass(frozen=True)
+class RenderersConfig:
+    default: str = "pillow"
+    line: str = ""
+    multi_panel_line: str = ""
+    bar: str = ""
+    pie: str = ""
+    route: str = ""
+
+
+@dataclass(frozen=True)
 class AppConfig:
     bot: BotConfig = field(default_factory=BotConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
@@ -70,6 +89,8 @@ class AppConfig:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    maps: MapsConfig = field(default_factory=MapsConfig)
+    renderers: RenderersConfig = field(default_factory=RenderersConfig)
 
 
 def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = False) -> AppConfig:
@@ -118,6 +139,20 @@ def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = F
         debug=DebugConfig(
             enabled=_getbool(parser, "debug", "enabled", fallback=True),
         ),
+        maps=MapsConfig(
+            provider=_get(parser, "maps", "provider", fallback="osm") or "osm",
+            maptiler_api_key=_get(parser, "maps", "maptiler_api_key", fallback="") or os.environ.get("MAPTILER_API_KEY", ""),
+            maptiler_map_id=_get(parser, "maps", "maptiler_map_id", fallback="streets-v4") or "streets-v4",
+            timeout_s=_getfloat(parser, "maps", "timeout_s", fallback=10.0),
+        ),
+        renderers=RenderersConfig(
+            default=_get(parser, "renderers", "default", fallback="pillow") or "pillow",
+            line=_get(parser, "renderers", "line", fallback="") or "",
+            multi_panel_line=_get(parser, "renderers", "multi_panel_line", fallback="") or "",
+            bar=_get(parser, "renderers", "bar", fallback="") or "",
+            pie=_get(parser, "renderers", "pie", fallback="") or "",
+            route=_get(parser, "renderers", "route", fallback="") or "",
+        ),
     )
     validate_config(config, require_secrets=require_secrets)
     return config
@@ -132,6 +167,11 @@ def validate_config(config: AppConfig, *, require_secrets: bool = False) -> None
         raise ConfigError("limits.max_attachment_size_bytes must be positive")
     if config.history.retention_days <= 0:
         raise ConfigError("history.retention_days must be positive")
+    if config.maps.provider not in {"osm", "maptiler"}:
+        raise ConfigError("maps.provider must be osm or maptiler")
+    if config.maps.timeout_s <= 0:
+        raise ConfigError("maps.timeout_s must be positive")
+    _validate_renderers(config.renderers)
     _validate_discord_ids("discord.allowed_guild_ids", config.discord.allowed_guild_ids)
     _validate_discord_ids("discord.allowed_channel_ids", config.discord.allowed_channel_ids)
     if not str(config.storage.database_path):
@@ -182,3 +222,18 @@ def _validate_discord_ids(name: str, values: frozenset[str]) -> None:
     invalid = sorted(value for value in values if not value.isdecimal())
     if invalid:
         raise ConfigError(f"{name} must contain numeric Discord ids")
+
+
+def _validate_renderers(config: RenderersConfig) -> None:
+    allowed = {"internal", "pillow"}
+    if config.default not in allowed:
+        raise ConfigError("renderers.default must be internal or pillow")
+    for name, value in (
+        ("line", config.line),
+        ("multi_panel_line", config.multi_panel_line),
+        ("bar", config.bar),
+        ("pie", config.pie),
+        ("route", config.route),
+    ):
+        if value and value not in allowed:
+            raise ConfigError(f"renderers.{name} must be internal, pillow, or empty")

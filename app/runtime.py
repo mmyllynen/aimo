@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from adapters.discord.attachments import hydrate_attachment_content
 from app.dispatcher import DispatchContext, Dispatcher
@@ -31,12 +32,14 @@ class ApplicationContext:
             max_attachment_size_bytes=self.runtime.config.limits.max_attachment_size_bytes,
             raw_gpx_path=self.runtime.config.storage.raw_gpx_path,
             artifact_path=self.runtime.config.storage.artifact_path,
+            maps_config=self.runtime.config.maps,
+            renderers_config=self.runtime.config.renderers,
         )
 
     def dispatch_event(self, event: CanonicalEvent):
         return self.dispatcher.dispatch(event, self.dispatch_context())
 
-    def dispatch_event_isolated(self, event: CanonicalEvent):
+    def dispatch_event_isolated(self, event: CanonicalEvent, *, status_callback: Callable[[str], None] | None = None):
         connection = open_database(str(self.runtime.config.storage.database_path))
         try:
             return self.dispatcher.dispatch(
@@ -49,6 +52,9 @@ class ApplicationContext:
                     max_attachment_size_bytes=self.runtime.config.limits.max_attachment_size_bytes,
                     raw_gpx_path=self.runtime.config.storage.raw_gpx_path,
                     artifact_path=self.runtime.config.storage.artifact_path,
+                    maps_config=self.runtime.config.maps,
+                    renderers_config=self.runtime.config.renderers,
+                    status_callback=status_callback,
                 ),
             )
         finally:

@@ -7,7 +7,7 @@ from visualization.datasets import DatasetManifest, DatasetRequest
 
 
 SUPPORTED_MARKS = {"line", "bar", "pie"}
-SUPPORTED_CHART_KINDS = SUPPORTED_MARKS | {"auto"}
+SUPPORTED_CHART_KINDS = SUPPORTED_MARKS | {"auto", "map"}
 SUPPORTED_TRANSFORMS = {
     "normalize_to_primary_range",
     "filter_non_null",
