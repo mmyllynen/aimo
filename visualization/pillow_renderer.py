@@ -22,6 +22,8 @@ from visualization.render import (
     PieChart,
     RouteMap,
     RoutePolyline,
+    SocialImage,
+    SocialImageStat,
     _axis,
     _chart_frame,
     _clean_float,
@@ -278,6 +280,15 @@ class PillowVisualizationRenderer:
             _draw_attribution(draw, image.width, image.height, chart.attribution, scale=scale)
         return _png_bytes(_downsample(image, width, height))
 
+    def render_social_image_png(self, chart: SocialImage) -> bytes:
+        scale = RENDER_SCALE
+        width, height = chart.width, chart.height
+        image = _social_background(chart, width * scale, height * scale)
+        draw = ImageDraw.Draw(image, "RGBA")
+        _draw_social_routes(draw, chart, width * scale, height * scale, scale=scale)
+        _draw_social_overlays(image, chart, scale=scale)
+        return _png_bytes(_downsample(image, width, height))
+
 
 def _project_route(route: RoutePolyline) -> tuple[RoutePolyline, tuple[tuple[float, float], ...]]:
     return route, tuple(_mercator_xy(point.latitude, point.longitude) for point in route.points)
@@ -353,6 +364,179 @@ def _route_background(chart: RouteMap, x_domain: tuple[float, float], y_domain: 
     )
     cropped = mosaic.crop(crop)
     return cropped.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def _social_background(chart: SocialImage, width: int, height: int) -> Image.Image:
+    if chart.background_image:
+        try:
+            with Image.open(BytesIO(chart.background_image)) as source:
+                image = _cover_resize(source.convert("RGB"), width, height).convert("RGBA")
+                dim = Image.new("RGBA", image.size, (0, 0, 0, 76))
+                image.alpha_composite(dim)
+                return image
+        except OSError:
+            pass
+    if chart.map_background is not None:
+        route_map = chart.map_background
+        if route_map.x_domain is not None and route_map.y_domain is not None:
+            x_domain, y_domain = route_map.x_domain, route_map.y_domain
+        else:
+            viewport = route_map_viewport(route_map.routes, width=chart.width, height=chart.height)
+            x_domain, y_domain = viewport.x_domain, viewport.y_domain
+        return _route_background(route_map, x_domain, y_domain, width, height).convert("RGBA")
+    return _background_image(width, height)
+
+
+def _cover_resize(source: Image.Image, width: int, height: int) -> Image.Image:
+    source_width, source_height = source.size
+    target_ratio = width / max(height, 1)
+    source_ratio = source_width / max(source_height, 1)
+    if source_ratio > target_ratio:
+        crop_width = round(source_height * target_ratio)
+        left = max(0, (source_width - crop_width) // 2)
+        box = (left, 0, left + crop_width, source_height)
+    else:
+        crop_height = round(source_width / target_ratio)
+        top = max(0, (source_height - crop_height) // 2)
+        box = (0, top, source_width, top + crop_height)
+    return source.crop(box).resize((width, height), Image.Resampling.LANCZOS)
+
+
+def _draw_social_routes(draw: ImageDraw.ImageDraw, chart: SocialImage, width: int, height: int, *, scale: int) -> None:
+    for route in chart.routes:
+        points = _social_route_points(chart, route, width, height, scale=scale)
+        if len(points) < 2:
+            continue
+        shadow_width = max(18 * scale, round(min(width, height) * 0.022))
+        glow_width = max(11 * scale, round(min(width, height) * 0.014))
+        line_width = max(7 * scale, round(min(width, height) * 0.009))
+        draw.line(points, fill=(2, 6, 23, 150), width=shadow_width, joint="curve")
+        draw.line(points, fill=(255, 255, 255, 210), width=glow_width, joint="curve")
+        draw.line(points, fill=(37, 99, 235, 255), width=line_width, joint="curve")
+        draw.line(points, fill=(125, 211, 252, 235), width=max(2 * scale, line_width // 3), joint="curve")
+        _draw_marker(draw, points[0], (22, 163, 74), scale=scale)
+        _draw_marker(draw, points[-1], (220, 38, 38), scale=scale)
+
+
+def _social_route_points(
+    chart: SocialImage,
+    route: RoutePolyline,
+    width: int,
+    height: int,
+    *,
+    scale: int,
+) -> list[tuple[float, float]]:
+    projected = tuple(_mercator_xy(point.latitude, point.longitude) for point in route.points)
+    if not projected:
+        return []
+    if chart.background_image or chart.map_background is None:
+        return _decorative_route_points(projected, width, height, scale=scale)
+    route_map = chart.map_background
+    if route_map.x_domain is not None and route_map.y_domain is not None:
+        x_domain, y_domain = route_map.x_domain, route_map.y_domain
+    else:
+        viewport = route_map_viewport(route_map.routes, width=chart.width, height=chart.height)
+        x_domain, y_domain = viewport.x_domain, viewport.y_domain
+    return [
+        (
+            _scale_float(x_value, x_domain, 0, width - 1),
+            _scale_float(y_value, y_domain, 0, height - 1),
+        )
+        for x_value, y_value in projected
+    ]
+
+
+def _decorative_route_points(points: tuple[tuple[float, float], ...], width: int, height: int, *, scale: int) -> list[tuple[float, float]]:
+    x_values = tuple(point[0] for point in points)
+    y_values = tuple(point[1] for point in points)
+    x_domain = (min(x_values), max(x_values))
+    y_domain = (min(y_values), max(y_values))
+    route_ratio = (x_domain[1] - x_domain[0]) / max(y_domain[1] - y_domain[0], 1e-9)
+    available_width = width * 0.78
+    available_height = height * 0.62
+    if route_ratio >= available_width / max(available_height, 1):
+        route_width = available_width
+        route_height = route_width / max(route_ratio, 1e-9)
+    else:
+        route_height = available_height
+        route_width = route_height * route_ratio
+    route_width = max(width * 0.54, min(route_width, width * 0.86))
+    route_height = max(height * 0.34, min(route_height, height * 0.70))
+    left = (width - route_width) / 2.0
+    top = (height - route_height) / 2.0 + height * 0.05
+    right = left + route_width
+    bottom = top + route_height
+    return [
+        (
+            _scale_float(x_value, x_domain, left, right),
+            _scale_float(y_value, y_domain, top, bottom),
+        )
+        for x_value, y_value in points
+    ]
+
+
+def _draw_social_overlays(image: Image.Image, chart: SocialImage, *, scale: int) -> None:
+    panel_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    panel_draw = ImageDraw.Draw(panel_layer, "RGBA")
+    overlay_scale = 2 * scale
+    padding = 20 * scale
+    title_left = 22 * scale
+    title_top = 22 * scale
+    title_width = image.width - 44 * scale
+    title_font = _font(24 * overlay_scale, bold=True)
+    title_text_width = title_width - 2 * padding
+    title_lines = _wrap_text(panel_draw, chart.title, title_text_width, title_font, max_lines=2)
+    title_height = padding * 2 + len(title_lines) * 48 * scale
+    _dark_panel(panel_draw, (title_left, title_top, title_left + title_width, title_top + title_height))
+    stats_box = _social_stats_box(image.width, image.height, chart.stats, scale=scale)
+    if stats_box is not None:
+        _dark_panel(panel_draw, stats_box)
+    image.alpha_composite(panel_layer)
+    draw = ImageDraw.Draw(image, "RGBA")
+    text = (255, 255, 255)
+    muted = (226, 232, 240)
+    for index, line in enumerate(title_lines):
+        _draw_text_center(draw, image.width // 2, title_top + padding + index * 48 * scale, line, text, title_font)
+    if stats_box is not None:
+        _draw_social_stats(draw, stats_box, chart.stats, text, muted, scale=scale)
+
+
+def _social_stats_box(width: int, height: int, stats: tuple[SocialImageStat, ...], *, scale: int) -> tuple[int, int, int, int] | None:
+    if not stats:
+        return None
+    padding = 18 * scale
+    box_width = min(460 * scale, width - 44 * scale)
+    row_height = 48 * scale
+    box_height = padding * 2 + row_height * min(len(stats), 4)
+    left = 22 * scale
+    bottom = height - 22 * scale
+    return (left, bottom - box_height, left + box_width, bottom)
+
+
+def _draw_social_stats(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    stats: tuple[SocialImageStat, ...],
+    text: tuple[int, int, int],
+    muted: tuple[int, int, int],
+    *,
+    scale: int,
+) -> None:
+    overlay_scale = 2 * scale
+    padding = 18 * scale
+    row_height = 48 * scale
+    x = box[0] + padding
+    y = box[1] + padding
+    value_x = box[2] - padding
+    label_font = _font(10 * overlay_scale, bold=True)
+    value_font = _font(16 * overlay_scale, bold=True)
+    for stat in stats[:4]:
+        label_height = _text_size(draw, stat.label, label_font)[1]
+        value_height = _text_size(draw, stat.value, value_font)[1]
+        row_center = y + row_height / 2.0
+        _draw_text(draw, x, round(row_center - label_height / 2.0), stat.label, muted, label_font)
+        _draw_text_right(draw, value_x, round(row_center - value_height / 2.0), stat.value, text, value_font)
+        y += row_height
 
 
 def _background_image(width: int, height: int) -> Image.Image:
@@ -834,6 +1018,8 @@ def _draw_marker(draw: ImageDraw.ImageDraw, point: tuple[float, float], color: t
 
 def _scale_float(value: float, domain: tuple[float, float], low_px: int, high_px: int) -> float:
     low, high = domain
+    if math.isclose(high, low):
+        return (low_px + high_px) / 2.0
     ratio = (value - low) / (high - low)
     return low_px + ratio * (high_px - low_px)
 
@@ -876,6 +1062,37 @@ def _ellipsize_to_width(draw: ImageDraw.ImageDraw, text: str, max_width: int, fo
         else:
             high = mid - 1
     return text[:low].rstrip() + ellipsis
+
+
+def _wrap_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    max_width: int,
+    font: ImageFont.ImageFont,
+    *,
+    max_lines: int,
+) -> tuple[str, ...]:
+    words = [word for word in text.split() if word]
+    if not words:
+        return ("",)
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and _text_size(draw, candidate, font)[0] > max_width:
+            lines.append(current)
+            current = word
+            if len(lines) >= max_lines:
+                break
+        else:
+            current = candidate
+    if len(lines) < max_lines and current:
+        lines.append(current)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+    if lines:
+        lines[-1] = _ellipsize_to_width(draw, lines[-1], max_width, font)
+    return tuple(lines)
 
 
 def _route_subtitle_lines(draw: ImageDraw.ImageDraw, subtitle: str, max_width: int, font: ImageFont.ImageFont) -> tuple[str, ...]:

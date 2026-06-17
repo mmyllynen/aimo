@@ -252,6 +252,7 @@ def allowed_visualization_primitives() -> dict[str, Any]:
     return {
         "chart_kinds": list(sorted(SUPPORTED_CHART_KINDS)),
         "marks": list(sorted(SUPPORTED_MARKS)),
+        "output_modes": ["chart", "social_image"],
         "transforms": list(sorted(SUPPORTED_TRANSFORMS)),
     }
 

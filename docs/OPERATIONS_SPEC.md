@@ -122,7 +122,10 @@ Current CLI checks:
 python3 aimo.py --check --config aimo.conf.example
 python3 aimo.py --check-services --config aimo.conf.example
 python3 aimo.py --preflight --config aimo.conf
+python3 scripts/production_smoke.py --config aimo.conf --log logs/bot.log
 ```
+
+`scripts/production_smoke.py` must not make live OpenAI calls. It validates config loading, SQLite schema creation on a temporary database, Discord command spec registration, deterministic mention/slash dispatch paths, and recent log health.
 
 ## Admin Operations
 

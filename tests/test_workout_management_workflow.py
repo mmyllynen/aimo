@@ -163,6 +163,58 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         self.assertIn("Keskisyke: 132", text)
         self.assertIn("Nousu: 30 m", text)
 
+    def test_treenit_nimea_renames_owned_workout_and_sets_active(self) -> None:
+        self._seed_workouts()
+        event = self._treenit_event("event-rename", "user-1", "nimea", {"viite": "2", "nimi": "Sipoo Running"})
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(_render_first(result), "Nimesin treenin uudelleen: Sipoo Running.")
+        with UnitOfWork(self.connection) as repositories:
+            workout = repositories.workouts.get_for_user("user-1", "workout-1")
+            active = repositories.active_workouts.get("user-1")
+        self.assertEqual(workout.title, "Sipoo Running")
+        self.assertEqual(active.workout_id, "workout-1")
+
+    def test_treenit_nimea_rejects_other_users_workout(self) -> None:
+        self._seed_workouts()
+        event = self._treenit_event("event-rename", "user-1", "nimea", {"viite": "workout-3", "nimi": "Nope"})
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        with UnitOfWork(self.connection) as repositories:
+            workout = repositories.workouts.get_for_user("user-2", "workout-3")
+        self.assertEqual(workout.title, "Other user run")
+
+    def test_treenit_tagaa_adds_and_removes_owned_tag(self) -> None:
+        self._seed_workouts()
+
+        add_result = self.dispatcher.dispatch(
+            self._treenit_event("event-tag", "user-1", "tagaa", {"viite": "workout-1", "tagi": "Trail Run"}),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+        remove_result = self.dispatcher.dispatch(
+            self._treenit_event("event-untag", "user-1", "poista_tagi", {"viite": "workout-1", "tagi": "trail-run"}),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(_render_first(add_result), "Lisäsin tagin trail-run treenille: Morning run.")
+        self.assertEqual(_render_first(remove_result), "Poistin tagin trail-run treeniltä: Morning run.")
+        with UnitOfWork(self.connection) as repositories:
+            tags = repositories.workouts.tags_for_workout("user-1", "workout-1")
+        self.assertEqual(tags, ())
+
+    def test_treenit_tagaa_rejects_invalid_tag(self) -> None:
+        self._seed_workouts()
+        event = self._treenit_event("event-tag", "user-1", "tagaa", {"viite": "workout-1", "tagi": "bad/tag"})
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(_render_first(result), "Tagin muoto ei kelpaa.")
+
     def test_treenit_poista_requires_confirmation_before_deleting_owned_workout(self) -> None:
         self._seed_workouts()
         start = datetime(2026, 6, 13, 21, 0, tzinfo=timezone.utc)

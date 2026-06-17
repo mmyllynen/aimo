@@ -159,6 +159,23 @@ class RouteMap:
 
 
 @dataclass(frozen=True)
+class SocialImageStat:
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class SocialImage:
+    title: str
+    routes: tuple[RoutePolyline, ...]
+    stats: tuple[SocialImageStat, ...]
+    background_image: bytes | None = None
+    map_background: RouteMap | None = None
+    width: int = 1080
+    height: int = 1080
+
+
+@dataclass(frozen=True)
 class RouteMapViewport:
     x_domain: tuple[float, float]
     y_domain: tuple[float, float]
@@ -534,7 +551,14 @@ def render_route_map_png(chart: RouteMap) -> bytes:
     return _png(width, height, pixels)
 
 
-def route_map_viewport(routes: tuple[RoutePolyline, ...], *, width: int = DEFAULT_RENDER_WIDTH, height: int = DEFAULT_RENDER_HEIGHT) -> RouteMapViewport:
+def route_map_viewport(
+    routes: tuple[RoutePolyline, ...],
+    *,
+    width: int = DEFAULT_RENDER_WIDTH,
+    height: int = DEFAULT_RENDER_HEIGHT,
+    margin_ratio: float = 0.06,
+    safe_rect: tuple[int, int, int, int] | None = None,
+) -> RouteMapViewport:
     projected_points = tuple(
         _mercator_xy(point.latitude, point.longitude)
         for route in routes
@@ -544,9 +568,9 @@ def route_map_viewport(routes: tuple[RoutePolyline, ...], *, width: int = DEFAUL
         return RouteMapViewport((0.0, 1.0), (0.0, 1.0))
     x_values = tuple(point[0] for point in projected_points)
     y_values = tuple(point[1] for point in projected_points)
-    route_x = _padded_domain((min(x_values), max(x_values)), ratio=0.06)
-    route_y = _padded_domain((min(y_values), max(y_values)), ratio=0.06)
-    safe_left, safe_top, safe_right, safe_bottom = _best_route_safe_rect(route_x, route_y, width, height)
+    route_x = _padded_domain((min(x_values), max(x_values)), ratio=margin_ratio)
+    route_y = _padded_domain((min(y_values), max(y_values)), ratio=margin_ratio)
+    safe_left, safe_top, safe_right, safe_bottom = safe_rect or _best_route_safe_rect(route_x, route_y, width, height)
     return _route_map_viewport_for_rect(route_x, route_y, width, height, (safe_left, safe_top, safe_right, safe_bottom))
 
 

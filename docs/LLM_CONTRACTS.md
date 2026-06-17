@@ -116,6 +116,7 @@ date_range
 comparison_mode
 layout_mode
 chart_kind
+output_mode
 context_update
 ```
 
@@ -125,7 +126,9 @@ Rules:
 - no dataset rows
 - map user-language metric aliases to canonical ids before returning output
 - Python validates and normalizes before repository access
-- `chart_kind` is a generic mark hint such as `auto`, `line`, `bar`, or `pie`; it must not encode metric-specific behavior
+- `chart_kind` is a generic mark hint such as `auto`, `line`, `bar`, `pie`, or `map`; it must not encode metric-specific behavior
+- `output_mode` is `chart` by default; use `social_image` for shareable single-workout images such as Finnish `somekuva`
+- for `social_image`, return a single-workout selector, include `route` in `requested_metrics`, and include explicit requested stat metrics such as `distance_km`, `duration_s`, `avg_hr_bpm`, or `ascent_m`
 - previous visualization context may be present even for new requests; use it only when the user refers to the previous/current/same chart or asks for a refinement
 - when using previous visualization context, return a complete updated intent rather than a partial patch
 - previous visualization context may contain prior intent/spec metadata and selected ids, but never raw rows, raw GPX, or image bytes

@@ -118,6 +118,7 @@ Current workout updates:
 
 - GPX ingest sets the imported workout as current.
 - `/treenit nayta` sets the shown workout as current.
+- `/treenit nimea`, `/treenit tagaa`, and `/treenit poista_tagi` update only safely resolved user-owned workouts and set the edited workout as current.
 - Workout chat and visualization may set the resolved workout as current only when the LLM returns the explicit structured context-update flag and the selector resolves to exactly one user-owned workout.
 - Ambiguous, missing, general, or comparison requests must not update current workout.
 

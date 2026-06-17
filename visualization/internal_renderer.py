@@ -6,6 +6,7 @@ from visualization.render import (
     MultiPanelLineChart,
     PieChart,
     RouteMap,
+    SocialImage,
     render_bar_chart_png,
     render_line_chart_png,
     render_multi_panel_line_chart_png,
@@ -31,3 +32,6 @@ class InternalVisualizationRenderer:
 
     def render_route_map_png(self, chart: RouteMap) -> bytes:
         return render_route_map_png(chart)
+
+    def render_social_image_png(self, chart: SocialImage) -> bytes:
+        raise NotImplementedError("social_image rendering requires the Pillow renderer")

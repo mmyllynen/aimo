@@ -77,6 +77,7 @@ class RenderersConfig:
     bar: str = ""
     pie: str = ""
     route: str = ""
+    social_image: str = ""
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,7 @@ def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = F
             bar=_get(parser, "renderers", "bar", fallback="") or "",
             pie=_get(parser, "renderers", "pie", fallback="") or "",
             route=_get(parser, "renderers", "route", fallback="") or "",
+            social_image=_get(parser, "renderers", "social_image", fallback="") or "",
         ),
     )
     validate_config(config, require_secrets=require_secrets)
@@ -234,6 +236,7 @@ def _validate_renderers(config: RenderersConfig) -> None:
         ("bar", config.bar),
         ("pie", config.pie),
         ("route", config.route),
+        ("social_image", config.social_image),
     ):
         if value and value not in allowed:
             raise ConfigError(f"renderers.{name} must be internal, pillow, or empty")

@@ -74,6 +74,19 @@ class AttachmentDownloadTests(unittest.TestCase):
         self.assertEqual(hydrated.attachments[0].metadata, {})
         self.assertEqual(opener.requests, [])
 
+    def test_hydrates_supported_image_attachment_content(self) -> None:
+        response = FakeResponse(b"image-bytes", {"Content-Type": "image/png", "Content-Length": "11"})
+        opener = FakeOpener(response)
+
+        hydrated = hydrate_attachment_content(
+            _event(_attachment(filename="photo.png", content_type="image/png", url="https://example.test/photo.png")),
+            max_size_bytes=100,
+            opener=opener,
+        )
+
+        self.assertEqual(hydrated.attachments[0].metadata["content"], b"image-bytes")
+        self.assertEqual(hydrated.attachments[0].metadata["downloaded_content_type"], "image/png")
+
     def test_rejects_declared_size_over_limit_before_download(self) -> None:
         opener = FakeOpener(FakeResponse(b"ignored"))
 

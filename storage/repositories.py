@@ -663,6 +663,57 @@ class WorkoutsRepository:
         )
         return cursor.rowcount > 0
 
+    def rename_for_user(self, owner_user_id: str, workout_id: str, title: str) -> bool:
+        cursor = self.connection.execute(
+            """
+            UPDATE workouts
+            SET title = ?
+            WHERE owner_user_id = ? AND workout_id = ?
+            """,
+            (title, owner_user_id, workout_id),
+        )
+        return cursor.rowcount > 0
+
+    def tags_for_workout(self, owner_user_id: str, workout_id: str) -> tuple[str, ...]:
+        rows = self.connection.execute(
+            """
+            SELECT workout_tags.tag
+            FROM workout_tags
+            JOIN workouts ON workouts.workout_id = workout_tags.workout_id
+            WHERE workouts.owner_user_id = ? AND workouts.workout_id = ?
+            ORDER BY workout_tags.tag ASC
+            """,
+            (owner_user_id, workout_id),
+        ).fetchall()
+        return tuple(str(row["tag"]) for row in rows)
+
+    def add_tag_for_user(self, owner_user_id: str, workout_id: str, tag: str) -> bool:
+        if self.get_for_user(owner_user_id, workout_id) is None:
+            return False
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO workout_tags (workout_id, tag)
+            VALUES (?, ?)
+            """,
+            (workout_id, tag),
+        )
+        return True
+
+    def remove_tag_for_user(self, owner_user_id: str, workout_id: str, tag: str) -> bool:
+        cursor = self.connection.execute(
+            """
+            DELETE FROM workout_tags
+            WHERE workout_id = (
+                SELECT workout_id
+                FROM workouts
+                WHERE owner_user_id = ? AND workout_id = ?
+            )
+              AND tag = ?
+            """,
+            (owner_user_id, workout_id, tag),
+        )
+        return cursor.rowcount > 0
+
 
 class ActiveWorkoutRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:

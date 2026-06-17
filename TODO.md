@@ -32,7 +32,6 @@ Operational guardrails currently in place:
 
 ## Priority 2: Reliability And Operations
 
-- Add a production smoke-test script that checks config, migrations, Discord command registration, mention handling, slash handling, and log health without using live OpenAI in tests.
 - Add an operator health command or CLI report for process status, database path, migration version, configured guilds, and recent errors.
 - Add retention jobs for debug traces, rendered artifacts, and old channel history according to config.
 - Add backup/restore runbook and a tested SQLite backup command.

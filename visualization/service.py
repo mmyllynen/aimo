@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+from io import BytesIO
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from PIL import Image
 
 from core.config import MapsConfig, RenderersConfig
 from core.i18n import SupportedLanguage
@@ -35,6 +38,8 @@ from visualization.render import (
     RoutePoint,
     RoutePolyline,
     RenderSeries,
+    SocialImage,
+    SocialImageStat,
     route_map_viewport,
 )
 from visualization.renderer import ChartType, resolve_renderer
@@ -103,7 +108,20 @@ def render_workout_visualization(
     maps_config: MapsConfig | None = None,
     renderers_config: RenderersConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
+    social_background_image: bytes | None = None,
 ) -> VisualizationArtifact:
+    if _is_social_image_intent(intent):
+        return _render_social_image_visualization(
+            workout,
+            points,
+            intent,
+            filename_prefix=workout.workout_id,
+            tile_cache_root=tile_cache_root,
+            maps_config=maps_config,
+            renderers_config=renderers_config,
+            language=language,
+            background_image=social_background_image,
+        )
     if _is_route_map_intent(intent):
         return _render_route_map_visualization(
             workout,
@@ -284,10 +302,109 @@ def _is_route_map_intent(intent: VisualizationIntent) -> bool:
     return intent.chart_kind == "map" and "route" in intent.y_metrics
 
 
+def _is_social_image_intent(intent: VisualizationIntent) -> bool:
+    return intent.output_mode == "social_image"
+
+
 def _render_size(intent: VisualizationIntent) -> tuple[int, int]:
     if intent.render_width > 0 and intent.render_height > 0:
         return intent.render_width, intent.render_height
     return DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT
+
+
+def _social_render_size(intent: VisualizationIntent) -> tuple[int, int]:
+    if intent.render_width > 0 and intent.render_height > 0:
+        return intent.render_width, intent.render_height
+    return 1080, 1080
+
+
+def _render_social_image_visualization(
+    workout: WorkoutRecord,
+    points: tuple[WorkoutPointRecord, ...],
+    intent: VisualizationIntent,
+    *,
+    filename_prefix: str,
+    tile_cache_root: Path | None = None,
+    maps_config: MapsConfig | None = None,
+    renderers_config: RenderersConfig | None = None,
+    language: SupportedLanguage = SupportedLanguage.FI,
+    background_image: bytes | None = None,
+) -> VisualizationArtifact:
+    routes = _route_polylines(points, workouts_by_id={workout.workout_id: workout})
+    if not routes:
+        raise MissingPrimaryMetricError("route")
+    render_size = _social_render_size(intent)
+    requested_attachment_background = background_image is not None
+    if background_image is not None and not _is_decodable_image(background_image):
+        background_image = None
+    tile_data: dict[str, Any] | None = None
+    map_background: RouteMap | None = None
+    if background_image is None:
+        tile_data = _route_tiles(
+            routes,
+            tile_cache_root,
+            maps_config=maps_config,
+            width=render_size[0],
+            height=render_size[1],
+            margin_ratio=0.03,
+            safe_rect=(24, 24, render_size[0] - 24, render_size[1] - 24),
+        )
+        map_background = RouteMap(
+            title=workout.title,
+            subtitle="",
+            routes=routes,
+            tiles=tile_data["tiles"],
+            tile_zoom=tile_data["tile_zoom"],
+            tile_size=tile_data["tile_size"],
+            attribution=tile_data["attribution"],
+            x_domain=tile_data["x_domain"],
+            y_domain=tile_data["y_domain"],
+            width=render_size[0],
+            height=render_size[1],
+        )
+    renderer = resolve_renderer(renderers_config, "social_image")
+    rendered = renderer.render_social_image_png(
+        SocialImage(
+            title=workout.title,
+            routes=routes,
+            stats=_social_stats(workout, intent, language=language),
+            background_image=background_image,
+            map_background=map_background,
+            width=render_size[0],
+            height=render_size[1],
+        )
+    )
+    metadata = {
+        "renderer": renderer.name,
+        "chart_type": "social_image",
+        "output_mode": "social_image",
+        "render_width": render_size[0],
+        "render_height": render_size[1],
+        "social_background": "attachment" if background_image is not None else "map",
+        "social_background_requested": "attachment" if requested_attachment_background else "map",
+        "social_background_status": "ok" if background_image is not None or not requested_attachment_background else "invalid_image_fallback_to_map",
+        "social_layout_version": "2",
+    }
+    if tile_data is not None:
+        metadata.update(tile_data["metadata"])
+    return VisualizationArtifact(
+        content=rendered,
+        filename=f"{filename_prefix}-social-image.png",
+        content_type="image/png",
+        rendered_metrics=tuple(_social_metric_selection(intent)),
+        missing_metrics=(),
+        scaled_metrics=(),
+        metadata=metadata,
+    )
+
+
+def _is_decodable_image(content: bytes) -> bool:
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image.verify()
+        return True
+    except OSError:
+        return False
 
 
 def _render_route_map_visualization(
@@ -375,8 +492,10 @@ def _route_tiles(
     maps_config: MapsConfig | None = None,
     width: int = DEFAULT_RENDER_WIDTH,
     height: int = DEFAULT_RENDER_HEIGHT,
+    margin_ratio: float = 0.06,
+    safe_rect: tuple[int, int, int, int] | None = None,
 ) -> dict[str, Any]:
-    viewport = route_map_viewport(routes, width=width, height=height)
+    viewport = route_map_viewport(routes, width=width, height=height, margin_ratio=margin_ratio, safe_rect=safe_rect)
     base_payload = {
         "x_domain": viewport.x_domain,
         "y_domain": viewport.y_domain,
@@ -934,6 +1053,62 @@ def _route_color_metric_label(metric: str, *, language: SupportedLanguage) -> st
     return labels.get(metric, _series_label(metric, language=language))
 
 
+SOCIAL_STAT_METRICS = frozenset(
+    {"distance_km", "duration_s", "avg_hr_bpm", "heart_rate_bpm", "max_hr_bpm", "ascent_m", "pace_s_per_km", "local_date"}
+)
+SOCIAL_DEFAULT_STATS = ("distance_km", "duration_s", "avg_hr_bpm")
+
+
+def _social_metric_selection(intent: VisualizationIntent) -> tuple[str, ...]:
+    requested = tuple(metric for metric in intent.y_metrics if metric in SOCIAL_STAT_METRICS)
+    if requested:
+        return tuple(_canonical_social_stat_metric(metric) for metric in requested)
+    return SOCIAL_DEFAULT_STATS
+
+
+def _canonical_social_stat_metric(metric: str) -> str:
+    if metric == "heart_rate_bpm":
+        return "avg_hr_bpm"
+    return metric
+
+
+def _social_stats(
+    workout: WorkoutRecord,
+    intent: VisualizationIntent,
+    *,
+    language: SupportedLanguage,
+) -> tuple[SocialImageStat, ...]:
+    stats = []
+    for metric in dict.fromkeys(_social_metric_selection(intent)):
+        value = _social_stat_value(workout, metric, language=language)
+        if value:
+            stats.append(SocialImageStat(label=_social_stat_label(metric, language=language), value=value))
+    return tuple(stats)
+
+
+def _social_stat_label(metric: str, *, language: SupportedLanguage) -> str:
+    return _series_label(metric, language=language)
+
+
+def _social_stat_value(workout: WorkoutRecord, metric: str, *, language: SupportedLanguage) -> str:
+    del language
+    if metric == "distance_km":
+        return _format_number(workout.distance_km, suffix=" km", digits=1)
+    if metric == "duration_s":
+        return _format_route_duration(workout.duration_s)
+    if metric == "avg_hr_bpm":
+        return _format_number(workout.avg_hr_bpm, suffix=" bpm", digits=0)
+    if metric == "ascent_m":
+        return _format_number(workout.ascent_m, suffix=" m", digits=0)
+    if metric == "pace_s_per_km":
+        return _format_duration(workout.pace_s_per_km) + "/km" if workout.pace_s_per_km is not None else ""
+    if metric == "max_hr_bpm":
+        return _format_number(workout.max_hr_bpm, suffix=" bpm", digits=0)
+    if metric == "local_date":
+        return _format_route_datetime(workout.start_time_local or workout.start_time_utc or workout.local_date)
+    return ""
+
+
 def _route_label(workout: WorkoutRecord | None, fallback: str) -> str:
     if workout is None:
         return fallback
@@ -994,6 +1169,7 @@ def _metric_label(metric: str, *, language: SupportedLanguage = SupportedLanguag
             "avg_hr_bpm": "Keskisyke",
             "max_hr_bpm": "Maksimisyke",
             "point_count": "Pisteet",
+            "local_date": "Päivä",
         }
         return labels.get(metric, metric.replace("_", " ").title())
     labels = {
@@ -1014,6 +1190,7 @@ def _metric_label(metric: str, *, language: SupportedLanguage = SupportedLanguag
         "avg_hr_bpm": "Average HR",
         "max_hr_bpm": "Max HR",
         "point_count": "Point count",
+        "local_date": "Date",
     }
     return labels.get(metric, metric.replace("_", " ").title())
 

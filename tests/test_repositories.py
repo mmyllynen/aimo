@@ -251,6 +251,24 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(latest.workout_id, "workout-2")
         self.assertIsNone(workouts.get_for_user("user-2", "workout-1"))
 
+    def test_workout_rename_and_tags_are_owner_scoped(self) -> None:
+        self._seed_two_user_workouts()
+        workouts = WorkoutsRepository(self.connection)
+
+        with transaction(self.connection):
+            renamed = workouts.rename_for_user("user-1", "workout-1", "Sipoo Running")
+            wrong_owner_renamed = workouts.rename_for_user("user-2", "workout-1", "Wrong")
+            tagged = workouts.add_tag_for_user("user-1", "workout-1", "trail")
+            wrong_owner_tagged = workouts.add_tag_for_user("user-2", "workout-1", "hidden")
+
+        self.assertTrue(renamed)
+        self.assertFalse(wrong_owner_renamed)
+        self.assertTrue(tagged)
+        self.assertFalse(wrong_owner_tagged)
+        self.assertEqual(workouts.get_for_user("user-1", "workout-1").title, "Sipoo Running")
+        self.assertEqual(workouts.tags_for_workout("user-1", "workout-1"), ("trail",))
+        self.assertEqual(workouts.tags_for_workout("user-2", "workout-1"), ())
+
     def test_workouts_list_for_user_in_period_is_owner_scoped_and_filterable(self) -> None:
         self._seed_two_user_workouts()
         workouts = WorkoutsRepository(self.connection)

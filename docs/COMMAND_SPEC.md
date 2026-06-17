@@ -70,6 +70,9 @@ Subcommands:
 - `aktiivinen`
 - `aseta_aktiivinen` with optional `viite`
 - `poista` with optional `viite`
+- `nimea` with optional `viite` and required `nimi`
+- `tagaa` with optional `viite` and required `tagi`
+- `poista_tagi` with optional `viite` and required `tagi`
 - `sykerajat`
 - `aseta_sykerajat` with optional `zones`: max heart rate or five increasing BPM upper limits
 
@@ -80,6 +83,9 @@ Action rules:
 - `aktiivinen`: current active workout.
 - `aseta_aktiivinen`: set active workout by reference.
 - `poista`: first request creates a delete confirmation for one safely resolved user-owned workout; deletion happens only when the same user presses the confirm button within 60 seconds. The cancel button clears the pending delete.
+- `nimea`: rename one safely resolved user-owned workout and set it current.
+- `tagaa`: add a normalized tag to one safely resolved user-owned workout and set it current.
+- `poista_tagi`: remove a tag from one safely resolved user-owned workout and set it current.
 - `sykerajat`: show current HR zones.
 - `aseta_sykerajat`: update zones from one max-HR value or five increasing BPM upper limits.
 

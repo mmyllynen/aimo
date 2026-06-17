@@ -318,6 +318,21 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
             },
             reason="Supported GPX attachment present.",
         )
+    if event.attachments and _has_image_attachment(event) and _should_use_llm_routing(event, command_name, llm_gateway):
+        return classify_intent(
+            llm_gateway,
+            IntentClassificationInput(
+                event_kind=event.kind.value,
+                user_text=event.text,
+                has_attachments=True,
+                compact_channel_state={
+                    "guild_id_present": event.guild_id is not None,
+                    "source": event.source.value,
+                    "command_name": command_name,
+                    "has_image_attachment": True,
+                },
+            )
+        )
     if event.attachments:
         return RouteDecision(
             target=WorkflowTarget.GPX_INGEST,
@@ -479,6 +494,17 @@ def _has_gpx_attachment(event: CanonicalEvent) -> bool:
     return any(
         attachment.filename.lower().endswith(".gpx")
         or attachment.content_type.strip().lower() in {"application/gpx+xml", "application/xml", "text/xml"}
+        for attachment in event.attachments
+    )
+
+
+def _has_image_attachment(event: CanonicalEvent) -> bool:
+    return any(
+        (
+            attachment.filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+            or attachment.content_type.split(";", 1)[0].strip().lower() in {"image/jpeg", "image/png", "image/webp"}
+        )
+        and (bool(attachment.url) or isinstance(attachment.metadata.get("content"), bytes))
         for attachment in event.attachments
     )
 

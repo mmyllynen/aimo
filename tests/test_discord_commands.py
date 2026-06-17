@@ -30,10 +30,24 @@ class DiscordCommandSpecTests(unittest.IsolatedAsyncioTestCase):
         subcommands = {subcommand.name: subcommand for subcommand in specs["treenit"].subcommands}
         self.assertEqual(
             set(subcommands),
-            {"listaa", "nayta", "aktiivinen", "aseta_aktiivinen", "poista", "sykerajat", "aseta_sykerajat"},
+            {
+                "listaa",
+                "nayta",
+                "aktiivinen",
+                "aseta_aktiivinen",
+                "poista",
+                "nimea",
+                "tagaa",
+                "poista_tagi",
+                "sykerajat",
+                "aseta_sykerajat",
+            },
         )
         self.assertEqual(specs["treenit"].options, ())
         self.assertEqual({option.name for option in subcommands["poista"].options}, {"viite"})
+        self.assertEqual({option.name for option in subcommands["nimea"].options}, {"viite", "nimi"})
+        self.assertEqual({option.name for option in subcommands["tagaa"].options}, {"viite", "tagi"})
+        self.assertEqual({option.name for option in subcommands["poista_tagi"].options}, {"viite", "tagi"})
         self.assertEqual({option.name for option in subcommands["aseta_sykerajat"].options}, {"zones"})
 
     async def test_register_command_specs_adds_all_specs_and_syncs(self) -> None:

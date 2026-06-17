@@ -213,6 +213,7 @@ class LLMGatewayTests(unittest.TestCase):
                         "comparison_mode": "",
                         "layout_mode": "auto",
                         "chart_kind": "auto",
+                        "output_mode": "chart",
                         "context_update": {"set_current_workout": False},
                     }
                 }
@@ -242,6 +243,7 @@ class LLMGatewayTests(unittest.TestCase):
                         "comparison_mode": "",
                         "layout_mode": "auto",
                         "chart_kind": "map",
+                        "output_mode": "chart",
                         "context_update": {"set_current_workout": False},
                     }
                 }
@@ -257,6 +259,34 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertEqual(intent.y_metrics, ("route",))
         self.assertEqual(intent.chart_kind, "map")
 
+    def test_extract_visualization_intent_accepts_social_image_output_mode(self) -> None:
+        gateway = LLMGateway(
+            FakeLLMClient(
+                {
+                    LLMOperation.VISUALIZATION_INTENT: {
+                        "workout_selector": {"type": "latest"},
+                        "x_metric": "longitude",
+                        "requested_metrics": ["route", "distance_km", "duration_s"],
+                        "transform_hints": [],
+                        "date_range": {},
+                        "comparison_mode": "",
+                        "layout_mode": "auto",
+                        "chart_kind": "map",
+                        "output_mode": "social_image",
+                        "context_update": {"set_current_workout": False},
+                    }
+                }
+            )
+        )
+
+        intent = extract_visualization_intent(
+            gateway,
+            VisualizationIntentInput(user_text="piirrä somekuva viimeisestä treenistä"),
+        )
+
+        self.assertEqual(intent.output_mode, "social_image")
+        self.assertEqual(intent.y_metrics, ("route", "distance_km", "duration_s"))
+
     def test_revise_visualization_intent_uses_typed_operation(self) -> None:
         client = FakeLLMClient(
             {
@@ -269,6 +299,7 @@ class LLMGatewayTests(unittest.TestCase):
                     "comparison_mode": "",
                     "layout_mode": "auto",
                     "chart_kind": "auto",
+                    "output_mode": "chart",
                     "context_update": {"set_current_workout": False},
                 }
             }

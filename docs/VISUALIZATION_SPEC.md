@@ -96,6 +96,7 @@ Common language aliases are interpreted by the LLM and must be returned to Pytho
 - `matka`, `distance` -> `distance_km`
 - `kadenssi`, `cadence` -> `cadence_spm`
 - `reitti`, `route`, `kartta`, `map` -> `route` with `chart_kind=map`
+- `somekuva`, `social image`, `share image` -> `output_mode=social_image` with one workout and `route`
 
 Python does not infer metrics, transforms, chart types, or previous-chart references from natural-language substrings.
 
@@ -148,7 +149,12 @@ Supported chart kinds:
 - `line`
 - `bar`
 - `pie`
-- `map` (formal intent support; route-map renderer is planned)
+- `map`
+
+Supported output modes:
+
+- `chart`
+- `social_image`
 
 Supported transforms:
 
@@ -180,11 +186,12 @@ Before rendering:
 - mark supports the data shape
 - transforms are allowed for selected metric types
 - chart kind is one of the supported generic chart kinds
+- `social_image` targets exactly one workout
 - output size is within limits
 
 ## Rendering
 
-The deterministic application selects the concrete renderer from `[renderers]` config. Supported renderer names are `internal` and `pillow`; chart-specific settings for `line`, `multi_panel_line`, `bar`, `pie`, and `route` override `default` when set. The default renderer is `pillow`; set `internal` explicitly to use the dependency-free fallback. The LLM does not choose the renderer.
+The deterministic application selects the concrete renderer from `[renderers]` config. Supported renderer names are `internal` and `pillow`; chart-specific settings for `line`, `multi_panel_line`, `bar`, `pie`, `route`, and `social_image` override `default` when set. The default renderer is `pillow`; set `internal` explicitly to use the dependency-free fallback. The LLM does not choose the renderer.
 
 All chart types use the same renderer frame:
 
@@ -202,6 +209,8 @@ Legend content is driven by render metadata, not chart-specific text assembly. P
 Color is generic metadata. Datasets may expose optional `color_hint` values such as named palette entries or hex RGB values; renderers may use them for any categorical bar or pie chart. Python must not infer colors from natural-language user text or add metric-specific color branches. If no hint exists, the renderer uses the shared default palette.
 
 The `internal` dependency-free bitmap renderer is retained as a fallback. The `pillow` renderer may be used for all chart types and is preferred for route maps when high-quality tile stitching, crop, resize, and overlay antialiasing are needed. Title, subtitle, axes, ticks, labels, and sidebar entries must use stable layout constraints so new data does not resize or overlap the chart frame.
+
+`social_image` is a shareable single-workout output mode. It defaults to a square output, supports aspect overrides such as `+portrait` and `+landscape`, uses an attached raster image as a cover-cropped and slightly dimmed background when present, and otherwise uses the route map background. The route overlay is decorative when drawn over a user image; it is normalized into a visible overlay region rather than georeferenced to the photograph. If explicit stat metrics are present, only those stats are shown; otherwise the default stats are distance, duration, and average heart rate when available. Deterministic plus tags may force the output mode with `+social` or `+somekuva` and may select stats such as `+distance`, `+duration`/`+kesto`, `+hr`, `+maxhr`, `+ascent`/`+nousumetrit`, `+pace`, and `+date`.
 
 ## Output
 

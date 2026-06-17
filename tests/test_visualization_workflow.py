@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.dispatcher import DispatchContext, Dispatcher, route_event
 from core.config import MapsConfig, RenderersConfig
-from core.events import CanonicalEvent, EventKind, EventSource
+from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
 from core.i18n import SupportedLanguage, TranslationKey
 from core.routing import WorkflowTarget
 from core.workflows import OutgoingKind, WorkflowStatus
@@ -68,6 +68,13 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual((portrait.render_width, portrait.render_height), (1080, 1920))
         self.assertEqual((square.render_width, square.render_height), (1080, 1080))
 
+    def test_visualization_aspect_modifiers_support_landscape(self) -> None:
+        intent = _visualization_intent(("heart_rate_bpm",))
+
+        updated = _apply_visualization_modifiers(intent, "piirrä somekuva +landscape")
+
+        self.assertEqual((updated.render_width, updated.render_height), (1920, 1080))
+
     def test_visualization_modifier_sets_route_color_metric_for_map(self) -> None:
         intent = _visualization_intent(("route",), x_metric="longitude", chart_kind="map")
 
@@ -77,8 +84,25 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(updated.route_color_metric, "heart_rate_bpm")
         self.assertEqual(updated.route_color_ignored_metrics, ("pace_s_per_km",))
 
+    def test_visualization_modifier_maps_social_stat_aliases(self) -> None:
+        intent = _visualization_intent(("route",), x_metric="longitude", chart_kind="map", output_mode="social_image")
+
+        updated = _apply_visualization_modifiers(intent, "piirrä somekuva +kesto +duration +hr +nousumetrit +pace +date +maxhr")
+
+        self.assertEqual(updated.y_metrics, ("route", "duration_s", "avg_hr_bpm", "ascent_m", "pace_s_per_km", "local_date", "max_hr_bpm"))
+        self.assertEqual(updated.output_mode, "social_image")
+
+    def test_visualization_modifier_can_force_social_output_mode(self) -> None:
+        intent = _visualization_intent(("heart_rate_bpm",))
+
+        updated = _apply_visualization_modifiers(intent, "piirrä viimeisin treeni +somekuva +date")
+
+        self.assertEqual(updated.output_mode, "social_image")
+        self.assertEqual(updated.chart_kind, "map")
+        self.assertEqual(updated.y_metrics, ("heart_rate_bpm", "route", "local_date"))
+
     def test_latest_workout_visualization_returns_png_file(self) -> None:
-        self._seed_workout(with_heart_rate=True)
+        self._seed_workout(with_heart_rate=True, with_location=True)
         client = _visualization_client(_intent(("heart_rate_bpm",)))
 
         result = self.dispatcher.dispatch(
@@ -93,6 +117,94 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertGreater(len(result.messages[0].content), 1000)
         self.assertEqual(result.messages[0].localized_text.key, TranslationKey.VISUALIZATION_CREATED)
         self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_bpm",))
+
+    def test_latest_workout_social_image_defaults_to_square_map_background(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map", output_mode="social_image"))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä somekuva viimeisestä treenistä"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.FILE)
+        self.assertEqual(result.messages[0].content_type, "image/png")
+        self.assertTrue(result.messages[0].content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(result.messages[0].filename, "workout-1-social-image.png")
+        self.assertEqual(result.messages[0].metadata["chart_type"], "social_image")
+        self.assertEqual(result.messages[0].metadata["social_background"], "map")
+        self.assertEqual((result.messages[0].metadata["render_width"], result.messages[0].metadata["render_height"]), (1080, 1080))
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("distance_km", "duration_s", "avg_hr_bpm"))
+
+    def test_latest_workout_social_image_uses_attached_image_background_and_requested_stats(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        client = _visualization_client(
+            _intent(
+                ("route", "distance_km", "duration_s", "avg_hr_bpm", "ascent_m"),
+                x_metric="longitude",
+                chart_kind="map",
+                output_mode="social_image",
+            )
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention(
+                "event-1",
+                "piirrä somekuva viimeisestä treenistä +distance +duration +hr +ascent +portrait",
+                attachments=(
+                    AttachmentRef(
+                        attachment_id="photo-1",
+                        filename="photo.png",
+                        content_type="image/png",
+                        metadata={"content": _png(140, 90, bytearray((40, 80, 120) * 140 * 90))},
+                    ),
+                ),
+            ),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["social_background"], "attachment")
+        self.assertEqual(result.messages[0].metadata["social_layout_version"], "2")
+        self.assertEqual((result.messages[0].metadata["render_width"], result.messages[0].metadata["render_height"]), (1080, 1920))
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("distance_km", "duration_s", "avg_hr_bpm", "ascent_m"))
+
+    def test_latest_workout_social_image_invalid_attachment_falls_back_to_map(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map", output_mode="social_image"))
+
+        result = self.dispatcher.dispatch(
+            _mention(
+                "event-1",
+                "piirrä somekuva viimeisestä treenistä",
+                attachments=(
+                    AttachmentRef(
+                        attachment_id="photo-1",
+                        filename="photo.png",
+                        content_type="image/png",
+                        metadata={"content": b"not an image"},
+                    ),
+                ),
+            ),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["social_background"], "map")
+        self.assertEqual(result.messages[0].metadata["social_background_status"], "invalid_image_fallback_to_map")
+
+    def test_latest_workout_social_image_without_route_returns_specific_error(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=False)
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map", output_mode="social_image"))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "piirrä somekuva viimeisestä treenistä"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.ERROR_SOCIAL_IMAGE_REQUIRES_ROUTE)
 
     def test_latest_workout_visualization_writes_artifact_when_root_is_configured(self) -> None:
         self._seed_workout(with_heart_rate=True)
@@ -646,6 +758,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     "comparison_mode": "",
                     "layout_mode": "auto",
                     "chart_kind": "auto",
+                    "output_mode": "chart",
                     "context_update": {"set_current_workout": False},
                 },
                 LLMOperation.VISUALIZATION_INTENT_REVISION: {
@@ -657,6 +770,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     "comparison_mode": "",
                     "layout_mode": "auto",
                     "chart_kind": "auto",
+                    "output_mode": "chart",
                     "context_update": {"set_current_workout": False},
                 }
             }
@@ -696,6 +810,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     "comparison_mode": "",
                     "layout_mode": "auto",
                     "chart_kind": "auto",
+                    "output_mode": "chart",
                     "context_update": {"set_current_workout": False},
                 },
                 LLMOperation.VISUALIZATION_INTENT_REVISION: {
@@ -707,6 +822,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     "comparison_mode": "",
                     "layout_mode": "auto",
                     "chart_kind": "auto",
+                    "output_mode": "chart",
                     "context_update": {"set_current_workout": False},
                 },
             }
@@ -920,7 +1036,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
             )
 
 
-def _mention(event_id: str, text: str) -> CanonicalEvent:
+def _mention(event_id: str, text: str, *, attachments: tuple[AttachmentRef, ...] = ()) -> CanonicalEvent:
     return CanonicalEvent(
         event_id=event_id,
         source=EventSource.DISCORD_MESSAGE,
@@ -930,6 +1046,7 @@ def _mention(event_id: str, text: str) -> CanonicalEvent:
         user_id="user-1",
         user_name="runner",
         text=text,
+        attachments=attachments,
     )
 
 
@@ -954,6 +1071,7 @@ def _intent(
     workout_selector: dict[str, object] | None = None,
     context_update: dict[str, object] | None = None,
     date_range: dict[str, object] | None = None,
+    output_mode: str = "chart",
 ) -> dict[str, object]:
     return {
         "workout_selector": workout_selector or {"type": "latest"},
@@ -964,6 +1082,7 @@ def _intent(
         "comparison_mode": comparison_mode,
         "layout_mode": layout_mode,
         "chart_kind": chart_kind,
+        "output_mode": output_mode,
         "context_update": context_update or {"set_current_workout": False},
     }
 
@@ -979,6 +1098,7 @@ def _visualization_intent(
     workout_selector: dict[str, object] | None = None,
     context_update: dict[str, object] | None = None,
     date_range: dict[str, object] | None = None,
+    output_mode: str = "chart",
 ) -> VisualizationIntent:
     return VisualizationIntent(
         workout_selector=workout_selector or {"type": "latest"},
@@ -990,6 +1110,7 @@ def _visualization_intent(
         layout_mode=layout_mode,
         chart_kind=chart_kind,
         context_update=context_update or {"set_current_workout": False},
+        output_mode=output_mode,
     )
 
 
