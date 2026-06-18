@@ -563,8 +563,8 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     guild=SimpleNamespace(id="guild-1"),
                     channel=SimpleNamespace(id="channel-1"),
                     user=SimpleNamespace(id="user-1", name="runner", display_name="Runner"),
-                    command=SimpleNamespace(name="aimo"),
-                    namespace=SimpleNamespace(syote="", liite=attachment),
+                    command=SimpleNamespace(name="tallenna", parent=SimpleNamespace(name="gpx")),
+                    namespace=SimpleNamespace(liite=attachment, nimi=""),
                     created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
                     response=response,
                     followup=followup,
@@ -608,6 +608,35 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 context.close()
 
+    async def test_handle_interaction_help_privacy_returns_privacy_help(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            context = _context(tmpdir)
+            try:
+                response = FakeResponse()
+                followup = FakeFollowup()
+                interaction = SimpleNamespace(
+                    id="interaction-1",
+                    guild=SimpleNamespace(id="guild-1"),
+                    channel=SimpleNamespace(id="channel-1"),
+                    user=SimpleNamespace(id="user-1", name="runner", display_name="Runner"),
+                    command=SimpleNamespace(name="help"),
+                    namespace=SimpleNamespace(aihe="privacy"),
+                    created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
+                    response=response,
+                    followup=followup,
+                )
+
+                await handle_interaction(interaction, context, discord_module=FakeDiscordModule)
+
+                self.assertEqual(response.deferred, [{"thinking": True}])
+                self.assertEqual(response.sent, [])
+                self.assertEqual(len(followup.sent), 1)
+                self.assertTrue(followup.sent[0]["ephemeral"])
+                self.assertIn("Tietosuoja", followup.sent[0]["content"])
+                self.assertIn("raakaa GPX-dataa", followup.sent[0]["content"])
+            finally:
+                context.close()
+
     async def test_handle_interaction_defers_before_slash_text_followup(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             context = replace(
@@ -640,7 +669,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     channel=SimpleNamespace(id="channel-1"),
                     user=SimpleNamespace(id="user-1", name="runner", display_name="Runner"),
                     command=SimpleNamespace(name="aimo"),
-                    namespace=SimpleNamespace(syote="mitä osaat tehdä?", liite=None),
+                    namespace=SimpleNamespace(syote="mitä osaat tehdä?"),
                     created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
                     response=response,
                     followup=followup,
@@ -668,7 +697,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     channel=SimpleNamespace(id="channel-1"),
                     user=SimpleNamespace(id="user-1", name="runner", display_name="Runner"),
                     command=SimpleNamespace(name="aimo"),
-                    namespace=SimpleNamespace(syote="", liite=None),
+                    namespace=SimpleNamespace(syote=""),
                     created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
                     response=response,
                     followup=followup,
@@ -703,7 +732,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     channel=SimpleNamespace(id="channel-1"),
                     user=SimpleNamespace(id="user-1", name="runner", display_name="Runner"),
                     command=SimpleNamespace(name="aimo"),
-                    namespace=SimpleNamespace(syote="mitä osaat tehdä?", liite=None),
+                    namespace=SimpleNamespace(syote="mitä osaat tehdä?"),
                     created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
                     response=response,
                     followup=followup,
@@ -740,7 +769,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     channel=SimpleNamespace(id="channel-1"),
                     user=SimpleNamespace(id="user-1", name="runner", display_name="Runner"),
                     command=SimpleNamespace(name="aimo"),
-                    namespace=SimpleNamespace(syote="mitä osaat tehdä?", liite=None),
+                    namespace=SimpleNamespace(syote="mitä osaat tehdä?"),
                     created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
                     response=response,
                     followup=followup,
@@ -777,7 +806,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     guild=SimpleNamespace(id="guild-1"),
                     channel=SimpleNamespace(id="channel-1"),
                     user=SimpleNamespace(id="user-1", name="runner", display_name="Runner"),
-                    command=SimpleNamespace(name="aseta_sykerajat", parent=SimpleNamespace(name="treenit")),
+                    command=SimpleNamespace(name="sykerajat", parent=SimpleNamespace(name="asetukset")),
                     namespace=SimpleNamespace(zones="not-json"),
                     created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
                     response=response,
@@ -803,7 +832,7 @@ class DiscordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("on_message", runtime.client.events)
                 self.assertTrue(runtime.client.intents.message_content)
                 await runtime.sync_commands(guild="guild-1")
-                self.assertEqual(runtime.client.tree.added, ["aimo", "treenit", "debug"])
+                self.assertEqual(runtime.client.tree.added, ["aimo", "gpx", "help", "treenit", "asetukset", "debug"])
                 self.assertEqual(runtime.client.tree.synced, ["guild-1"])
                 await runtime.start()
                 self.assertEqual(runtime.client.started_with, "discord-token")

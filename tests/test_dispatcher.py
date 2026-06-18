@@ -321,13 +321,86 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(result.messages[0].localized_text.key, TranslationKey.HELP_INTRO)
         self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
 
-    def test_slash_aimo_attachment_routes_to_ingest_without_help_flag(self) -> None:
+    def test_slash_help_privacy_routes_to_ephemeral_privacy_help(self) -> None:
         slash = DiscordSlashSnapshot(
             interaction_id="interaction-1",
             guild_id="guild-1",
             channel_id="channel-1",
             user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
-            command_name="aimo",
+            command_name="help",
+            options={"aihe": "privacy"},
+        )
+        event = slash_to_event(slash)
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 1)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.HELP_PRIVACY)
+        self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
+
+    def test_slash_help_visualization_routes_to_ephemeral_visualization_help(self) -> None:
+        slash = DiscordSlashSnapshot(
+            interaction_id="interaction-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            command_name="help",
+            options={"aihe": "visualisointi"},
+        )
+        event = slash_to_event(slash)
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 1)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.HELP_VISUALIZATION)
+        self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
+
+    def test_slash_help_social_image_routes_to_ephemeral_social_image_help(self) -> None:
+        slash = DiscordSlashSnapshot(
+            interaction_id="interaction-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            command_name="help",
+            options={"aihe": "somekuva"},
+        )
+        event = slash_to_event(slash)
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 1)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.HELP_SOCIAL_IMAGE)
+        self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
+
+    def test_mention_privacy_routes_to_public_privacy_help(self) -> None:
+        message = DiscordMessageSnapshot(
+            message_id="event-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            author=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            content="<@bot-1> privacy",
+            mentioned_user_ids=("bot-1",),
+        )
+        event = message_to_event(message, bot_user_id="bot-1")
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 1)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.HELP_PRIVACY)
+        self.assertTrue(all(message.kind == OutgoingKind.TEXT for message in result.messages))
+
+    def test_slash_gpx_attachment_routes_to_ingest_without_help_flag(self) -> None:
+        slash = DiscordSlashSnapshot(
+            interaction_id="interaction-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            command_name="gpx",
+            subcommand="tallenna",
             options={"liite": "attachment-1"},
         )
         event = slash_to_event(slash)

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from app.policy import AdminPolicy
 from app.redaction import redact_payload
-from core.config import MapsConfig, RenderersConfig
+from core.config import MapsConfig
 from core.events import CanonicalEvent, EventKind
 from core.errors import AppError, ErrorCategory
 from core.i18n import DEFAULT_LANGUAGE, LocalizedText, SupportedLanguage, TranslationKey
@@ -24,6 +24,7 @@ from workflows.debug import DebugWorkflow
 from workflows.gpx_ingest import GpxIngestWorkflow
 from workflows.help import HelpWorkflow
 from workflows.noop import NoopWorkflow
+from workflows.settings import SettingsWorkflow
 from workflows.visualization import VisualizationWorkflow
 from workflows.workout_chat import WorkoutChatWorkflow
 from workflows.workout_management import WorkoutManagementWorkflow
@@ -39,7 +40,6 @@ class DispatchContext:
     raw_gpx_path: Path | None = None
     artifact_path: Path | None = None
     maps_config: MapsConfig = MapsConfig()
-    renderers_config: RenderersConfig = RenderersConfig()
     status_callback: Callable[[str], None] | None = None
     trace_keep_limit: int = 1000
 
@@ -56,6 +56,7 @@ class Dispatcher:
         visualization_workflow: VisualizationWorkflow | None = None,
         workout_chat_workflow: WorkoutChatWorkflow | None = None,
         workout_management_workflow: WorkoutManagementWorkflow | None = None,
+        settings_workflow: SettingsWorkflow | None = None,
     ) -> None:
         self.help_workflow = help_workflow or HelpWorkflow()
         self.debug_workflow = debug_workflow or DebugWorkflow()
@@ -65,6 +66,7 @@ class Dispatcher:
         self.visualization_workflow = visualization_workflow or VisualizationWorkflow()
         self.workout_chat_workflow = workout_chat_workflow or WorkoutChatWorkflow()
         self.workout_management_workflow = workout_management_workflow or WorkoutManagementWorkflow()
+        self.settings_workflow = settings_workflow or SettingsWorkflow()
 
     def dispatch(self, event: CanonicalEvent, context: DispatchContext) -> WorkflowResult:
         with context.unit_of_work as repositories:
@@ -174,6 +176,8 @@ class Dispatcher:
                 )
             elif route.target == WorkflowTarget.WORKOUT_MANAGEMENT:
                 result = self.workout_management_workflow.handle(event, route, workflow_repositories)
+            elif route.target == WorkflowTarget.SETTINGS:
+                result = self.settings_workflow.handle(event, route, workflow_repositories)
             elif route.target == WorkflowTarget.GPX_INGEST:
                 result = self.gpx_ingest_workflow.handle(
                     event,
@@ -181,6 +185,7 @@ class Dispatcher:
                     workflow_repositories,
                     max_attachment_size_bytes=context.max_attachment_size_bytes,
                     raw_storage_root=context.raw_gpx_path,
+                    gateway=llm_gateway,
                 )
             elif route.target == WorkflowTarget.VISUALIZATION:
                 if context.status_callback is not None:
@@ -193,7 +198,6 @@ class Dispatcher:
                     language=context.language,
                     artifact_root=context.artifact_path,
                     maps_config=context.maps_config,
-                    renderers_config=context.renderers_config,
                 )
             elif route.target == WorkflowTarget.WORKOUT_CHAT:
                 result = self.workout_chat_workflow.handle(
@@ -297,6 +301,17 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
             },
             reason="Explicit workout management command.",
         )
+    if command_name == "asetukset":
+        options = event.metadata.get("options", {})
+        return RouteDecision(
+            target=WorkflowTarget.SETTINGS,
+            confidence=RouteConfidence.HIGH,
+            slots={
+                "command": command_name,
+                "options": options if isinstance(options, dict) else {},
+            },
+            reason="Explicit settings command.",
+        )
     if _is_help_request(event):
         return RouteDecision(
             target=WorkflowTarget.HELP,
@@ -309,14 +324,23 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
             confidence=RouteConfidence.HIGH,
             reason="Explicit visualization command.",
         )
-    if event.attachments and _has_gpx_attachment(event):
+    if command_name == "gpx" and event.attachments and _has_gpx_attachment(event):
         return RouteDecision(
             target=WorkflowTarget.GPX_INGEST,
             confidence=RouteConfidence.HIGH,
             slots={
                 "attachment_ids": [attachment.attachment_id for attachment in event.attachments],
             },
-            reason="Supported GPX attachment present.",
+            reason="Explicit GPX ingest command.",
+        )
+    if event.kind == EventKind.MENTION and event.attachments and _has_gpx_attachment(event):
+        return RouteDecision(
+            target=WorkflowTarget.GPX_INGEST,
+            confidence=RouteConfidence.HIGH,
+            slots={
+                "attachment_ids": [attachment.attachment_id for attachment in event.attachments],
+            },
+            reason="Supported GPX attachment present in mention.",
         )
     if event.attachments and _has_image_attachment(event) and _should_use_llm_routing(event, command_name, llm_gateway):
         return classify_intent(
@@ -333,7 +357,17 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
                 },
             )
         )
-    if event.attachments:
+    if command_name == "gpx" and event.attachments:
+        return RouteDecision(
+            target=WorkflowTarget.GPX_INGEST,
+            confidence=RouteConfidence.HIGH,
+            slots={
+                "attachment_ids": [attachment.attachment_id for attachment in event.attachments],
+                "unsupported_attachment": True,
+            },
+            reason="Explicit GPX command attachment was not supported.",
+        )
+    if event.kind == EventKind.MENTION and event.attachments:
         return RouteDecision(
             target=WorkflowTarget.GPX_INGEST,
             confidence=RouteConfidence.HIGH,
@@ -467,7 +501,24 @@ def _is_help_request(event: CanonicalEvent) -> bool:
     text = event.text.strip().lower()
     if command_name == "aimo" and text in {"", "aimo", "/aimo"}:
         return not _has_useful_options(options)
-    return command_name in {"help"} or text in {"apua", "help", "/help", "/aimo"}
+    return command_name in {"help"} or text in {
+        "apua",
+        "help",
+        "/help",
+        "/aimo",
+        "komennot",
+        "commands",
+        "visualisointi",
+        "visualisoinnit",
+        "visualization",
+        "visualizations",
+        "kuvaajat",
+        "somekuva",
+        "social_image",
+        "share_image",
+        "privacy",
+        "tietosuoja",
+    }
 
 
 def _has_useful_options(options: object) -> bool:

@@ -674,6 +674,46 @@ class WorkoutsRepository:
         )
         return cursor.rowcount > 0
 
+    def update_derived_fields(self, record: WorkoutRecord) -> WorkoutRecord:
+        self.connection.execute(
+            """
+            UPDATE workouts
+            SET
+                kind = ?,
+                primary_kind = ?,
+                start_time_utc = ?,
+                start_time_local = ?,
+                local_date = ?,
+                distance_km = ?,
+                duration_s = ?,
+                pace_s_per_km = ?,
+                ascent_m = ?,
+                avg_hr_bpm = ?,
+                max_hr_bpm = ?,
+                point_count = ?,
+                metadata_json = ?
+            WHERE owner_user_id = ? AND workout_id = ?
+            """,
+            (
+                record.kind,
+                record.primary_kind,
+                record.start_time_utc,
+                record.start_time_local,
+                record.local_date,
+                record.distance_km,
+                record.duration_s,
+                record.pace_s_per_km,
+                record.ascent_m,
+                record.avg_hr_bpm,
+                record.max_hr_bpm,
+                record.point_count,
+                _to_json(record.metadata),
+                record.owner_user_id,
+                record.workout_id,
+            ),
+        )
+        return record
+
     def tags_for_workout(self, owner_user_id: str, workout_id: str) -> tuple[str, ...]:
         rows = self.connection.execute(
             """

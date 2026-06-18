@@ -21,12 +21,20 @@ class DiscordCommandSpecTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_specs_cover_required_surfaces(self) -> None:
         specs = command_specs_by_name()
 
-        self.assertEqual(set(specs), {"aimo", "treenit", "debug"})
+        self.assertEqual(set(specs), {"aimo", "gpx", "help", "treenit", "asetukset", "debug"})
         self.assertEqual(
             {option.name for option in specs["aimo"].options},
-            {"syote", "liite"},
+            {"syote"},
         )
-        self.assertEqual(specs["aimo"].options[1].option_type, DiscordCommandOptionType.ATTACHMENT)
+        gpx_subcommands = {subcommand.name: subcommand for subcommand in specs["gpx"].subcommands}
+        self.assertEqual(set(gpx_subcommands), {"tallenna"})
+        gpx_options = {option.name: option for option in gpx_subcommands["tallenna"].options}
+        self.assertEqual(set(gpx_options), {"liite", "nimi"})
+        self.assertEqual(gpx_options["liite"].option_type, DiscordCommandOptionType.ATTACHMENT)
+        self.assertTrue(gpx_options["liite"].required)
+        self.assertFalse(gpx_options["nimi"].required)
+        self.assertEqual({option.name for option in specs["help"].options}, {"aihe"})
+        self.assertEqual(specs["help"].options[0].choices, ("yleinen", "komennot", "visualisointi", "somekuva", "privacy"))
         subcommands = {subcommand.name: subcommand for subcommand in specs["treenit"].subcommands}
         self.assertEqual(
             set(subcommands),
@@ -39,8 +47,6 @@ class DiscordCommandSpecTests(unittest.IsolatedAsyncioTestCase):
                 "nimea",
                 "tagaa",
                 "poista_tagi",
-                "sykerajat",
-                "aseta_sykerajat",
             },
         )
         self.assertEqual(specs["treenit"].options, ())
@@ -48,7 +54,10 @@ class DiscordCommandSpecTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({option.name for option in subcommands["nimea"].options}, {"viite", "nimi"})
         self.assertEqual({option.name for option in subcommands["tagaa"].options}, {"viite", "tagi"})
         self.assertEqual({option.name for option in subcommands["poista_tagi"].options}, {"viite", "tagi"})
-        self.assertEqual({option.name for option in subcommands["aseta_sykerajat"].options}, {"zones"})
+        settings_subcommands = {subcommand.name: subcommand for subcommand in specs["asetukset"].subcommands}
+        self.assertEqual(set(settings_subcommands), {"nayta", "sykerajat"})
+        self.assertEqual({option.name for option in settings_subcommands["sykerajat"].options}, {"zones"})
+        self.assertTrue(settings_subcommands["sykerajat"].options[0].required)
 
     async def test_register_command_specs_adds_all_specs_and_syncs(self) -> None:
         tree = FakeCommandTree()

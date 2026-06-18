@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from core.config import MapsConfig, RenderersConfig
+from core.config import MapsConfig
 from core.i18n import SupportedLanguage
 from llm.operations import VisualizationIntent
 from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
 from visualization.datasets import dataset_request_from_metrics, resolve_datasets
 from visualization.render import (
-    FONT,
     DEFAULT_RENDER_HEIGHT,
     DEFAULT_RENDER_WIDTH,
     MARKER_POINT_LIMIT,
@@ -26,15 +26,15 @@ from visualization.render import (
     RenderSeries,
     RouteMap,
     RouteMapTile,
+    RouteElevationProfile,
+    RouteElevationSample,
     RoutePoint,
     RoutePolyline,
-    _background,
+    SocialImage,
+    SocialImageStyle,
     _best_route_safe_rect,
     _chart_frame,
-    _decode_png_rgb,
-    _downsample,
     _pie_radius,
-    _png,
     _show_markers,
     _axis,
     _fill_short_gaps,
@@ -43,13 +43,32 @@ from visualization.render import (
     _robust_axis,
     _scale_y,
     _time_axis,
-    render_pie_chart_png,
-    render_route_map_png,
     route_metric_color,
     route_map_viewport,
 )
-from visualization.pillow_renderer import PillowVisualizationRenderer, _font, _route_subtitle_lines, _visible_route_legend_count
-from visualization.renderer import renderer_name, resolve_renderer
+from visualization.pillow_renderer import (
+    ElevationMarkerSpec,
+    MapMarkerLabelSpec,
+    PillowVisualizationRenderer,
+    _boxes_overlap,
+    _draw_social_polyline,
+    _font,
+    _grade_color,
+    _elevation_point_at_distance,
+    _grade_scale_box,
+    _layout_elevation_marker_labels,
+    _distance_tick_step,
+    _map_marker_label_box,
+    _offset_points,
+    _place_map_marker_label,
+    _point_at_route_distance,
+    _route_km_markers,
+    _route_overlay_height,
+    _route_subtitle_lines,
+    _visible_route_legend_count,
+    _visible_waypoint_count,
+)
+from visualization.renderer import resolve_renderer
 from visualization.tiles import TileCoord
 from visualization.specs import (
     Encoding,
@@ -80,6 +99,8 @@ from visualization.service import (
     _route_legend_title,
     _route_label,
     _route_polylines,
+    _route_map_safe_rect,
+    _route_waypoints,
     _should_render_metric_aggregate_bars,
     _tile_provider_configs,
     _transformed_rows,
@@ -87,27 +108,14 @@ from visualization.service import (
 )
 from visualization.service import _apply_normalization, _chart_title, _y_axis_label
 from visualization.tiles import TileFetchConfig
+from workflows.visualization import _apply_visualization_modifiers
 
 
 class VisualizationSpecTests(unittest.TestCase):
-    def test_bitmap_font_contains_hash_glyph_for_duplicate_date_labels(self) -> None:
-        self.assertIn("#", FONT)
-        self.assertNotEqual(FONT["#"], FONT["?"])
-
-    def test_bitmap_font_contains_copyright_glyph_for_osm_attribution(self) -> None:
-        self.assertIn("©", FONT)
-        self.assertNotEqual(FONT["©"], FONT["?"])
-
-    def test_background_uses_subtle_vertical_gradient(self) -> None:
-        pixels = _background(1, 3)
-
-        self.assertNotEqual(bytes(pixels[0:3]), bytes(pixels[-3:]))
-        self.assertGreaterEqual(min(pixels), 232)
-
     def test_route_map_can_render_png_tile_background(self) -> None:
         tile_content = _solid_png(256, 256, (171, 205, 239))
 
-        rendered = render_route_map_png(
+        rendered = PillowVisualizationRenderer().render_route_map_png(
             RouteMap(
                 title="Route",
                 routes=(
@@ -125,18 +133,11 @@ class VisualizationSpecTests(unittest.TestCase):
             )
         )
 
-        decoded = _decode_png_rgb(rendered)
-        self.assertIsNotNone(decoded)
-        _, _, pixels = decoded
-        sample = (120 * DEFAULT_RENDER_WIDTH + 160) * 3
-        self.assertEqual(tuple(pixels[sample : sample + 3]), (171, 205, 239))
+        with Image.open(BytesIO(rendered)) as image:
+            self.assertEqual(image.convert("RGB").getpixel((160, 120)), (171, 205, 239))
 
-    def test_renderer_config_resolves_chart_specific_override(self) -> None:
-        config = RenderersConfig(default="internal", route="pillow")
-
-        self.assertEqual(renderer_name(config, "pie"), "internal")
-        self.assertEqual(renderer_name(config, "route"), "pillow")
-        self.assertEqual(resolve_renderer(config, "route").name, "pillow")
+    def test_renderer_resolves_to_pillow(self) -> None:
+        self.assertEqual(resolve_renderer("route").name, "pillow")
 
     def test_pillow_renderer_renders_all_chart_types_as_png(self) -> None:
         renderer = PillowVisualizationRenderer()
@@ -187,9 +188,9 @@ class VisualizationSpecTests(unittest.TestCase):
             (pie, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
             (route, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
         ):
-            decoded = _decode_png_rgb(content)
-            self.assertIsNotNone(decoded)
-            self.assertEqual(decoded[0:2], expected_size)
+            with Image.open(BytesIO(content)) as decoded:
+                self.assertEqual(decoded.format, "PNG")
+                self.assertEqual(decoded.size, expected_size)
 
     def test_pillow_route_overlay_uses_dark_translucent_panel(self) -> None:
         content = PillowVisualizationRenderer().render_route_map_png(
@@ -208,13 +209,194 @@ class VisualizationSpecTests(unittest.TestCase):
             )
         )
 
-        decoded = _decode_png_rgb(content)
-        self.assertIsNotNone(decoded)
-        width, _, pixels = decoded
-        sample = (96 * width + 700) * 3
-        red, green, blue = pixels[sample : sample + 3]
+        with Image.open(BytesIO(content)) as decoded:
+            self.assertEqual(decoded.format, "PNG")
+            red, green, blue = decoded.convert("RGB").getpixel((700, 96))
         self.assertLess(max(red, green, blue), 170)
         self.assertGreater(min(red, green, blue), 60)
+
+    def test_social_style_block_updates_visualization_intent(self) -> None:
+        intent = VisualizationIntent(
+            workout_selector={"type": "latest"},
+            x_metric="elapsed_s",
+            y_metrics=("route",),
+            transforms=(),
+            date_range={},
+            comparison_mode="",
+            chart_kind="map",
+            output_mode="social_image",
+        )
+
+        styled = _apply_visualization_modifiers(
+            intent,
+            "piirrä somekuva viimeisestä treenistä +poster\ntyyli: crop=top dim=35 filter=warm route=white route_size=large title=bottom stats=right panel=none",
+        )
+
+        self.assertEqual(styled.social_style["preset"], "poster")
+        self.assertEqual(styled.social_style["crop"], "top")
+        self.assertEqual(styled.social_style["dim"], 35)
+        self.assertEqual(styled.social_style["filter"], "warm")
+        self.assertEqual(styled.social_style["route"], "white")
+        self.assertEqual(styled.social_style["route_size"], "large")
+        self.assertEqual(styled.social_style["title"], "bottom")
+        self.assertEqual(styled.social_style["stats"], "right")
+        self.assertEqual(styled.social_style["panel"], "none")
+
+    def test_social_inline_style_tokens_update_visualization_intent(self) -> None:
+        intent = VisualizationIntent(
+            workout_selector={"type": "latest"},
+            x_metric="elapsed_s",
+            y_metrics=("route",),
+            transforms=(),
+            date_range={},
+            comparison_mode="",
+            chart_kind="map",
+            output_mode="social_image",
+        )
+
+        styled = _apply_visualization_modifiers(
+            intent,
+            "piirrä somekuva viimeisestä treenistä route=yellow dim=50 title=bottom",
+        )
+
+        self.assertEqual(styled.social_style["route"], "yellow")
+        self.assertEqual(styled.social_style["dim"], 50)
+        self.assertEqual(styled.social_style["title"], "bottom")
+
+    def test_social_plus_metric_sets_route_color_metric(self) -> None:
+        intent = VisualizationIntent(
+            workout_selector={"type": "latest"},
+            x_metric="elapsed_s",
+            y_metrics=("route",),
+            transforms=(),
+            date_range={},
+            comparison_mode="",
+            chart_kind="map",
+            output_mode="social_image",
+        )
+
+        styled = _apply_visualization_modifiers(
+            intent,
+            "piirrä somekuva viimeisestä treenistä +hr route=yellow",
+        )
+
+        self.assertEqual(styled.route_color_metric, "heart_rate_bpm")
+        self.assertEqual(styled.social_style["route"], "yellow")
+
+    def test_social_route_shadow_offset_helper_moves_colored_layer(self) -> None:
+        self.assertEqual(_offset_points([(1.0, 2.0), (3.5, 4.5)], 3, 3), [(4.0, 5.0), (6.5, 7.5)])
+
+    def test_social_polyline_draws_segments_and_round_joints(self) -> None:
+        image = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image, "RGBA")
+
+        _draw_social_polyline(draw, [(5, 5), (20, 5), (20, 20)], (255, 200, 0, 255), width=6)
+
+        self.assertEqual(image.getpixel((12, 5))[3], 255)
+        self.assertEqual(image.getpixel((20, 5))[3], 255)
+        self.assertEqual(image.getpixel((20, 14))[3], 255)
+
+    def test_pillow_social_image_accepts_custom_style(self) -> None:
+        content = PillowVisualizationRenderer().render_social_image_png(
+            SocialImage(
+                title="Styled run",
+                routes=(
+                    RoutePolyline(
+                        label="route",
+                        points=(
+                            RoutePoint(latitude=60.1, longitude=24.9),
+                            RoutePoint(latitude=60.11, longitude=24.91),
+                            RoutePoint(latitude=60.12, longitude=24.92),
+                        ),
+                    ),
+                ),
+                stats=(),
+                background_image=_solid_png(20, 30, (180, 210, 240)),
+                style=SocialImageStyle(
+                    background_crop="top",
+                    background_dim=35,
+                    background_filter="warm",
+                    route_color="white",
+                    route_size="large",
+                    route_shadow=False,
+                    route_markers=False,
+                    title_position="bottom",
+                    panel_style="none",
+                    font="mono",
+                ),
+                width=320,
+                height=320,
+            )
+        )
+
+        with Image.open(BytesIO(content)) as image:
+            self.assertEqual(image.size, (320, 320))
+
+    def test_pillow_social_image_dims_map_background(self) -> None:
+        renderer = PillowVisualizationRenderer()
+        route = RoutePolyline(
+            label="route",
+            points=(
+                RoutePoint(latitude=60.1, longitude=24.9),
+                RoutePoint(latitude=60.11, longitude=24.91),
+            ),
+        )
+        base = renderer.render_social_image_png(
+            SocialImage(
+                title="Map",
+                routes=(route,),
+                stats=(),
+                map_background=RouteMap(title="Map", routes=(route,), width=320, height=320),
+                style=SocialImageStyle(background_dim=0, title_position="hide", route_markers=False),
+                width=320,
+                height=320,
+            )
+        )
+        dimmed = renderer.render_social_image_png(
+            SocialImage(
+                title="Map",
+                routes=(route,),
+                stats=(),
+                map_background=RouteMap(title="Map", routes=(route,), width=320, height=320),
+                style=SocialImageStyle(background_dim=50, title_position="hide", route_markers=False),
+                width=320,
+                height=320,
+            )
+        )
+
+        base_pixels = Image.open(BytesIO(base)).convert("RGB")
+        dimmed_pixels = Image.open(BytesIO(dimmed)).convert("RGB")
+        base_avg = sum(sum(base_pixels.getpixel((x, y))) for y in range(base_pixels.height) for x in range(base_pixels.width)) / (base_pixels.width * base_pixels.height)
+        dimmed_avg = sum(sum(dimmed_pixels.getpixel((x, y))) for y in range(dimmed_pixels.height) for x in range(dimmed_pixels.width)) / (
+            dimmed_pixels.width * dimmed_pixels.height
+        )
+        self.assertLess(dimmed_avg, base_avg)
+
+    def test_social_image_can_color_route_by_heart_rate_without_legend(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(workout_id="w", title="Run", duration_s=120, distance_km=1.0),
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, latitude=60.17, longitude=24.94, heart_rate_bpm=120),
+                WorkoutPointRecord(workout_id="w", point_index=1, latitude=60.18, longitude=24.95, heart_rate_bpm=140),
+                WorkoutPointRecord(workout_id="w", point_index=2, latitude=60.19, longitude=24.96, heart_rate_bpm=160),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route", "avg_hr_bpm"),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+                output_mode="social_image",
+                route_color_metric="heart_rate_bpm",
+                social_style={"route": "yellow"},
+            ),
+        )
+
+        self.assertEqual(artifact.metadata["social_route_color_metric"], "heart_rate_bpm")
+        self.assertEqual(artifact.metadata["social_route_color_status"], "ok")
+        self.assertEqual(artifact.rendered_metrics, ("avg_hr_bpm",))
 
     def test_route_map_title_subtitle_and_legend_label_are_user_friendly(self) -> None:
         workout = _workout(
@@ -243,6 +425,15 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(_route_chart_subtitle(utc_workout, language=SupportedLanguage.FI), "16/6/2026 6:27 - 5.4 km - 33min 36s - Keskisyke 124")
         self.assertEqual(_route_label(utc_workout, "fallback"), "16/6/2026 6:27 5.4 km")
 
+        route_with_ascent = _workout(
+            workout_id="workout-route",
+            title="Juhannusreitti",
+            distance_km=23.9,
+            ascent_m=276,
+        )
+
+        self.assertEqual(_route_chart_subtitle(route_with_ascent, language=SupportedLanguage.FI), "23.9 km - nousua 276 m")
+
     def test_route_map_can_color_single_route_by_heart_rate(self) -> None:
         artifact = render_workout_visualization(
             _workout(workout_id="w", title="Run", duration_s=120, distance_km=1.0),
@@ -261,13 +452,277 @@ class VisualizationSpecTests(unittest.TestCase):
                 chart_kind="map",
                 route_color_metric="heart_rate_bpm",
             ),
-            renderers_config=RenderersConfig(default="pillow", route="pillow"),
         )
 
         self.assertTrue(artifact.content.startswith(b"\x89PNG"))
         self.assertEqual(artifact.rendered_metrics, ("route", "heart_rate_bpm"))
         self.assertEqual(artifact.metadata["route_color_metric"], "heart_rate_bpm")
         self.assertEqual(artifact.metadata["route_color_status"], "ok")
+
+    def test_route_map_renders_gpx_waypoints_by_default_and_can_hide_them(self) -> None:
+        workout = _workout(
+            workout_id="w",
+            title="Route",
+            metadata={
+                "waypoints": [
+                    {"latitude": 60.175, "longitude": 24.945, "name": "Info", "comment": "Aid station", "type": "INFO"},
+                    {"latitude": "bad", "longitude": 24.950, "name": "Ignored"},
+                ]
+            },
+        )
+        points = (
+            WorkoutPointRecord(workout_id="w", point_index=0, latitude=60.17, longitude=24.94),
+            WorkoutPointRecord(workout_id="w", point_index=1, latitude=60.18, longitude=24.95),
+        )
+        base_intent = VisualizationIntent(
+            workout_selector={"type": "latest"},
+            x_metric="longitude",
+            y_metrics=("route",),
+            transforms=(),
+            date_range={},
+            comparison_mode="",
+            chart_kind="map",
+        )
+
+        shown = render_workout_visualization(workout, points, base_intent)
+        hidden = render_workout_visualization(
+            workout,
+            points,
+            VisualizationIntent(
+                workout_selector=base_intent.workout_selector,
+                x_metric=base_intent.x_metric,
+                y_metrics=base_intent.y_metrics,
+                transforms=base_intent.transforms,
+                date_range=base_intent.date_range,
+                comparison_mode=base_intent.comparison_mode,
+                chart_kind=base_intent.chart_kind,
+                social_style={"waypoints": False},
+            ),
+        )
+
+        self.assertEqual(shown.metadata["waypoint_count"], 1)
+        self.assertEqual(shown.metadata["waypoints_rendered"], 1)
+        self.assertEqual(shown.metadata["waypoint_status"], "rendered")
+        self.assertEqual(hidden.metadata["waypoint_count"], 1)
+        self.assertEqual(hidden.metadata["waypoints_rendered"], 0)
+        self.assertEqual(hidden.metadata["waypoint_status"], "hidden_by_modifier")
+
+    def test_route_map_hides_waypoints_for_multiple_routes(self) -> None:
+        workout = _workout(
+            workout_id="w",
+            title="Routes",
+            metadata={"waypoints": [{"latitude": 60.175, "longitude": 24.945, "comment": "Aid station", "type": "INFO"}]},
+        )
+        artifact = render_workout_visualization(
+            workout,
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, latitude=60.17, longitude=24.94),
+                WorkoutPointRecord(workout_id="w", point_index=1, latitude=60.18, longitude=24.95),
+                WorkoutPointRecord(workout_id="other", point_index=0, latitude=60.19, longitude=24.96),
+                WorkoutPointRecord(workout_id="other", point_index=1, latitude=60.20, longitude=24.97),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route",),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+            ),
+            comparison_workouts=(_workout(workout_id="other", title="Other"),),
+        )
+
+        self.assertEqual(artifact.metadata["waypoint_count"], 1)
+        self.assertEqual(artifact.metadata["waypoints_rendered"], 0)
+        self.assertEqual(artifact.metadata["waypoint_status"], "multi_route_hidden")
+
+    def test_route_waypoints_use_comment_label_type_and_distance_from_start(self) -> None:
+        workout = _workout(
+            workout_id="w",
+            metadata={
+                "waypoints": [
+                    {"latitude": 60.010, "longitude": 24.0, "name": "Checkpoint", "comment": "Maalialue", "type": "CHECKPOINT"},
+                    {"latitude": 60.005, "longitude": 24.0, "name": "Info", "comment": "Risteys", "type": "INFO"},
+                ]
+            },
+        )
+        routes = (
+            RoutePolyline(
+                label="route",
+                points=(
+                    RoutePoint(latitude=60.0, longitude=24.0),
+                    RoutePoint(latitude=60.01, longitude=24.0),
+                ),
+            ),
+        )
+
+        waypoints = _route_waypoints(workout, routes)
+
+        self.assertEqual(len(waypoints), 2)
+        self.assertEqual(waypoints[0].label, "Risteys")
+        self.assertEqual(waypoints[0].waypoint_type, "INFO")
+        self.assertAlmostEqual(waypoints[0].distance_km or 0.0, 0.6, places=1)
+        self.assertEqual(waypoints[1].label, "Maalialue")
+        self.assertGreater(waypoints[1].distance_km or 0.0, waypoints[0].distance_km or 0.0)
+
+    def test_route_map_elevation_overlay_metadata_for_single_route(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(workout_id="w", title="Route"),
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, distance_km=0.0, latitude=60.0, longitude=24.0, elevation_m=10),
+                WorkoutPointRecord(workout_id="w", point_index=1, distance_km=1.0, latitude=60.01, longitude=24.0, elevation_m=30),
+                WorkoutPointRecord(workout_id="w", point_index=2, distance_km=2.0, latitude=60.02, longitude=24.0, elevation_m=20),
+                WorkoutPointRecord(workout_id="w", point_index=3, distance_km=3.0, latitude=60.03, longitude=24.0, elevation_m=50),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route",),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+            ),
+        )
+
+        self.assertEqual(artifact.metadata["elevation_overlay_status"], "rendered")
+        self.assertEqual(artifact.metadata["elevation_overlay_min_m"], 10)
+        self.assertEqual(artifact.metadata["elevation_overlay_max_m"], 50)
+
+    def test_route_map_elevation_overlay_can_be_hidden_and_is_hidden_for_multi_route(self) -> None:
+        points = (
+            WorkoutPointRecord(workout_id="w", point_index=0, distance_km=0.0, latitude=60.0, longitude=24.0, elevation_m=10),
+            WorkoutPointRecord(workout_id="w", point_index=1, distance_km=1.0, latitude=60.01, longitude=24.0, elevation_m=30),
+            WorkoutPointRecord(workout_id="w", point_index=2, distance_km=2.0, latitude=60.02, longitude=24.0, elevation_m=20),
+            WorkoutPointRecord(workout_id="other", point_index=0, distance_km=0.0, latitude=60.1, longitude=24.1, elevation_m=15),
+            WorkoutPointRecord(workout_id="other", point_index=1, distance_km=1.0, latitude=60.11, longitude=24.1, elevation_m=35),
+            WorkoutPointRecord(workout_id="other", point_index=2, distance_km=2.0, latitude=60.12, longitude=24.1, elevation_m=25),
+        )
+        hidden = render_workout_visualization(
+            _workout(workout_id="w", title="Route"),
+            points[:3],
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route",),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+                social_style={"elevation_overlay": False},
+            ),
+        )
+        multi = render_workout_visualization(
+            _workout(workout_id="w", title="Routes"),
+            points,
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route",),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+            ),
+            comparison_workouts=(_workout(workout_id="other", title="Other"),),
+        )
+
+        self.assertEqual(hidden.metadata["elevation_overlay_status"], "hidden_by_modifier")
+        self.assertEqual(multi.metadata["elevation_overlay_status"], "multi_route_hidden")
+
+    def test_grade_color_scale_marks_easy_descents_and_hard_climbs(self) -> None:
+        self.assertEqual(_grade_color(-0.12), (126, 34, 206))
+        self.assertEqual(_grade_color(-0.06), (37, 99, 235))
+        self.assertEqual(_grade_color(-0.01), (22, 163, 74))
+        self.assertEqual(_grade_color(0.02), (203, 213, 225))
+        self.assertEqual(_grade_color(0.06), (250, 204, 21))
+        self.assertEqual(_grade_color(0.10), (249, 115, 22))
+        self.assertEqual(_grade_color(0.15), (220, 38, 38))
+        self.assertNotEqual(_grade_color(-0.08), _grade_color(-0.06))
+        self.assertNotEqual(_grade_color(0.08), _grade_color(0.10))
+
+    def test_elevation_marker_helpers_interpolate_waypoint_height_and_safe_area(self) -> None:
+        profile = RouteElevationProfile(
+            samples=(
+                RouteElevationSample(distance_km=0.0, elevation_m=10),
+                RouteElevationSample(distance_km=1.0, elevation_m=30),
+                RouteElevationSample(distance_km=2.0, elevation_m=20),
+            ),
+            min_index=0,
+            max_index=1,
+        )
+
+        marker = _elevation_point_at_distance(profile, 0.5, [(0.0, 100.0), (100.0, 50.0), (200.0, 75.0)])
+        safe_rect = _route_map_safe_rect(1920, 1080, profile)
+
+        self.assertEqual(marker, (50.0, 75.0, 20.0))
+        self.assertEqual(safe_rect, (48, 156, 1872, 822))
+        self.assertIsNone(_route_map_safe_rect(1920, 1080, None))
+
+    def test_elevation_label_layout_avoids_grade_scale_and_nearby_labels(self) -> None:
+        image = Image.new("RGBA", (900, 200), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image, "RGBA")
+        grade_scale = _grade_scale_box(600, 20, scale=1)
+        label_top = grade_scale[3] + 8
+        labels = _layout_elevation_marker_labels(
+            draw,
+            (
+                ElevationMarkerSpec("Lähtö", 71, 575, 0, 0.0, "right"),
+                ElevationMarkerSpec("Maali", 70, 875, 1, 24.0, "left"),
+                ElevationMarkerSpec("Risteys", 40, 360, 2, 9.7, "right"),
+                ElevationMarkerSpec("Korkein kohta", 102, 365, 3, 10.0, "right"),
+            ),
+            label_bounds=(10, label_top, 890, label_top + 84),
+            scale=1,
+        )
+
+        boxes = [label.box for label in labels]
+        by_text = {label.text: label for label in labels}
+        self.assertGreaterEqual(len(labels), 3)
+        self.assertIn("Maali 70 m", by_text)
+        self.assertEqual(by_text["Maali 70 m"].box[2], by_text["Maali 70 m"].spec.x)
+        self.assertIn("Risteys 40 m", by_text)
+        self.assertEqual(by_text["Risteys 40 m"].box[0], by_text["Risteys 40 m"].spec.x)
+        for index, box in enumerate(boxes):
+            self.assertFalse(_boxes_overlap(box, grade_scale, padding=0))
+            for other in boxes[index + 1 :]:
+                self.assertFalse(_boxes_overlap(box, other, padding=0))
+
+    def test_route_km_marker_helpers_use_distance_ticks_and_interpolation(self) -> None:
+        self.assertEqual(_distance_tick_step(4.9), 1.0)
+        self.assertEqual(_distance_tick_step(12.0), 2.0)
+        self.assertEqual(_distance_tick_step(24.0), 5.0)
+        self.assertEqual(_distance_tick_step(80.0), 10.0)
+        self.assertEqual(_distance_tick_step(120.0), 20.0)
+
+        point = _point_at_route_distance(5.0, (0.0, 10.0), [(0.0, 0.0), (100.0, 0.0)])
+        route = RoutePolyline(
+            label="route",
+            points=(
+                RoutePoint(latitude=60.0, longitude=24.0),
+                RoutePoint(latitude=60.09, longitude=24.0),
+                RoutePoint(latitude=60.18, longitude=24.0),
+            ),
+        )
+        markers = _route_km_markers(route, [(0.0, 0.0), (100.0, 0.0), (200.0, 0.0)])
+
+        self.assertEqual(point, (50.0, 0.0))
+        self.assertGreaterEqual(len(markers), 1)
+        self.assertLess(markers[0][0], 20.0)
+
+    def test_map_marker_label_layout_tries_fallback_positions(self) -> None:
+        image = Image.new("RGBA", (300, 160), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image, "RGBA")
+        waypoint = MapMarkerLabelSpec("Waypoint", (100.0, 80.0), (124, 58, 237))
+        km = MapMarkerLabelSpec("5 km", (104.0, 82.0), (59, 130, 246), required=False)
+        waypoint_box = _map_marker_label_box(draw, waypoint, "right_up", bounds=(0, 0, 300, 160), scale=1)
+
+        placed = _place_map_marker_label(draw, km, bounds=(0, 0, 300, 160), occupied=[waypoint_box], scale=1)
+
+        self.assertIsNotNone(waypoint_box)
+        self.assertIsNotNone(placed)
+        self.assertFalse(_boxes_overlap(placed, waypoint_box, padding=3))
 
     def test_render_workout_visualization_accepts_square_output_size_for_line_chart(self) -> None:
         artifact = render_workout_visualization(
@@ -288,10 +743,10 @@ class VisualizationSpecTests(unittest.TestCase):
                 render_width=1080,
                 render_height=1080,
             ),
-            renderers_config=RenderersConfig(default="pillow"),
         )
 
-        self.assertEqual(_decode_png_rgb(artifact.content)[:2], (1080, 1080))
+        with Image.open(BytesIO(artifact.content)) as image:
+            self.assertEqual(image.size, (1080, 1080))
         self.assertEqual(artifact.metadata["render_width"], 1080)
         self.assertEqual(artifact.metadata["render_height"], 1080)
 
@@ -327,6 +782,9 @@ class VisualizationSpecTests(unittest.TestCase):
     def test_pillow_route_legend_shows_up_to_twenty_rows_when_space_allows(self) -> None:
         self.assertEqual(_visible_route_legend_count(9, DEFAULT_RENDER_HEIGHT * 2, scale=2), 9)
         self.assertEqual(_visible_route_legend_count(25, DEFAULT_RENDER_HEIGHT * 2, scale=2), 20)
+        self.assertEqual(_visible_route_legend_count(1, DEFAULT_RENDER_HEIGHT * 2, scale=2), 0)
+        self.assertGreater(_visible_waypoint_count(2, DEFAULT_RENDER_HEIGHT * 2, 0, scale=2), 0)
+        self.assertEqual(_route_overlay_height(color_scale_only=False, visible_route_count=0, visible_waypoint_count=0, scale=2), 0)
 
     def test_pillow_route_subtitle_wraps_structured_summary_only_when_needed(self) -> None:
         draw = ImageDraw.Draw(Image.new("RGBA", (900, 300)))
@@ -485,26 +943,6 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(frame.sidebar_right, 899)
         self.assertEqual(frame.sidebar_bottom, 519)
 
-    def test_downsample_averages_supersampled_pixels(self) -> None:
-        pixels = bytearray(
-            (
-                0,
-                0,
-                0,
-                100,
-                0,
-                0,
-                0,
-                100,
-                0,
-                0,
-                0,
-                100,
-            )
-        )
-
-        self.assertEqual(tuple(_downsample(pixels, 1, 1, scale=2)), (25, 25, 25))
-
     def test_pie_radius_uses_available_plot_area(self) -> None:
         frame = _chart_frame(900, 520)
         center_x = (frame.plot_left + frame.plot_right) // 2
@@ -549,7 +987,7 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertTrue(series.smoothed)
         self.assertNotEqual(series.values, values)
 
-    def test_short_internal_gaps_are_filled_for_smoothed_rendering(self) -> None:
+    def test_short_gaps_are_filled_for_smoothed_rendering(self) -> None:
         filled = _fill_short_gaps((1.0, None, None, 4.0), max_gap=2)
 
         self.assertEqual(filled, (1.0, 2.0, 3.0, 4.0))
@@ -1131,7 +1569,7 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(tuple(row["zone_label"] for row in dataset.rows), ("pk1", "pk2", "vk1"))
 
     def test_pie_chart_renderer_outputs_png_for_generic_slices(self) -> None:
-        content = render_pie_chart_png(
+        content = PillowVisualizationRenderer().render_pie_chart_png(
             PieChart(
                 title="Generic distribution",
                 slices=(
@@ -1147,7 +1585,7 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertGreater(len(content), 1000)
 
     def test_pie_chart_renderer_accepts_zero_value_legend_items(self) -> None:
-        content = render_pie_chart_png(
+        content = PillowVisualizationRenderer().render_pie_chart_png(
             PieChart(
                 title="Generic distribution",
                 slices=(
@@ -1365,7 +1803,10 @@ def _workout(**overrides) -> WorkoutRecord:
 
 
 def _solid_png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
-    return _png(width, height, bytearray(color * width * height))
+    image = Image.new("RGB", (width, height), color)
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 if __name__ == "__main__":

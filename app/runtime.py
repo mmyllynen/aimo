@@ -33,7 +33,6 @@ class ApplicationContext:
             raw_gpx_path=self.runtime.config.storage.raw_gpx_path,
             artifact_path=self.runtime.config.storage.artifact_path,
             maps_config=self.runtime.config.maps,
-            renderers_config=self.runtime.config.renderers,
         )
 
     def dispatch_event(self, event: CanonicalEvent):
@@ -53,7 +52,6 @@ class ApplicationContext:
                     raw_gpx_path=self.runtime.config.storage.raw_gpx_path,
                     artifact_path=self.runtime.config.storage.artifact_path,
                     maps_config=self.runtime.config.maps,
-                    renderers_config=self.runtime.config.renderers,
                     status_callback=status_callback,
                 ),
             )

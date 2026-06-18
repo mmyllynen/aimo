@@ -84,10 +84,19 @@ class DiscordRealCommandRegistrationTests(unittest.TestCase):
                 _register_real_app_commands(tree, context, discord_module=FakeDiscordModule)
 
                 self.assertIn(("aimo", None), tree.added)
+                self.assertIn(("gpx", None), tree.added)
+                self.assertIn(("help", None), tree.added)
                 self.assertIn(("treenit", None), tree.added)
+                self.assertIn(("asetukset", None), tree.added)
                 self.assertIn(("debug", None), tree.added)
                 self.assertIn(("aimo", "111"), tree.added)
+                self.assertIn(("gpx", "111"), tree.added)
+                self.assertIn(("help", "111"), tree.added)
+                self.assertIn(("asetukset", "111"), tree.added)
                 self.assertIn(("aimo", "222"), tree.added)
+                self.assertIn(("gpx", "222"), tree.added)
+                self.assertIn(("help", "222"), tree.added)
+                self.assertIn(("asetukset", "222"), tree.added)
             finally:
                 context.close()
 

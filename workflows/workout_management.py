@@ -9,8 +9,7 @@ from core.events import CanonicalEvent, EventKind
 from core.i18n import TranslationKey
 from core.routing import RouteDecision
 from core.workflows import OutgoingComponent, OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
-from storage.repositories import PendingWorkoutDeleteRecord
-from storage.repositories import HeartRateZoneRecord, WorkoutRecord
+from storage.repositories import HeartRateZoneRecord, PendingWorkoutDeleteRecord, WorkoutRecord
 from storage.unit_of_work import RepositoryBundle
 from workout.references import WorkoutReferenceResolution, WorkoutReferenceStatus, resolve_workout_reference
 
@@ -24,8 +23,6 @@ SUPPORTED_ACTIONS = {
     "nimea",
     "tagaa",
     "poista_tagi",
-    "sykerajat",
-    "aseta_sykerajat",
 }
 DELETE_CONFIRM_COMPONENT = "workout_delete_confirm"
 DELETE_CANCEL_COMPONENT = "workout_delete_cancel"
@@ -72,10 +69,6 @@ class WorkoutManagementWorkflow:
             return self._add_tag(event, repositories, str(options.get("viite", "")).strip(), str(options.get("tagi", "")).strip())
         if action == "poista_tagi":
             return self._remove_tag(event, repositories, str(options.get("viite", "")).strip(), str(options.get("tagi", "")).strip())
-        if action == "sykerajat":
-            return self._list_hr_zones(event, repositories)
-        if action == "aseta_sykerajat":
-            return self._set_hr_zones(event, repositories, options.get("zones"))
         return _user_error(TranslationKey.ERROR_UNEXPECTED, ErrorCategory.UNEXPECTED)
 
     def _list(self, event: CanonicalEvent, repositories: RepositoryBundle) -> WorkflowResult:
@@ -187,30 +180,6 @@ class WorkoutManagementWorkflow:
         repositories.pending_workout_deletes.clear_for_user(event.user_id)
         return _message(TranslationKey.WORKOUT_DELETE_CANCELLED)
 
-    def _list_hr_zones(self, event: CanonicalEvent, repositories: RepositoryBundle) -> WorkflowResult:
-        zones = repositories.heart_rate_zones.list_for_user(event.user_id)
-        if not zones:
-            return _message(TranslationKey.HR_ZONES_EMPTY)
-        return _message(
-            TranslationKey.HR_ZONES_SUMMARY,
-            zones="\n".join(_zone_line(zone) for zone in zones),
-        )
-
-    def _set_hr_zones(
-        self,
-        event: CanonicalEvent,
-        repositories: RepositoryBundle,
-        zones_payload: Any,
-    ) -> WorkflowResult:
-        upper_limits = _parse_zone_upper_limits(zones_payload)
-        if upper_limits is None:
-            return _user_error(TranslationKey.HR_ZONES_INVALID, ErrorCategory.UNEXPECTED)
-        if not upper_limits:
-            return _message(TranslationKey.HR_ZONES_EMPTY)
-        zones = _zones_from_upper_limits(event.user_id, upper_limits)
-        repositories.heart_rate_zones.replace_for_user(event.user_id, zones)
-        return _message(TranslationKey.HR_ZONES_UPDATED)
-
     def _rename(
         self,
         event: CanonicalEvent,
@@ -291,7 +260,7 @@ def _delete_component_id(action: str, pending_id: str) -> str:
     return f"treenit:{action}:{pending_id}"
 
 
-def _parse_zone_upper_limits(payload: Any) -> tuple[int, ...] | None:
+def parse_zone_upper_limits(payload: Any) -> tuple[int, ...] | None:
     if payload is None:
         return ()
     if isinstance(payload, str) and not payload.strip():
@@ -474,13 +443,13 @@ def _format_kind(value: str) -> str:
     return labels.get(normalized, value or "Treeni")
 
 
-def _zone_line(zone: HeartRateZoneRecord) -> str:
+def zone_line(zone: HeartRateZoneRecord) -> str:
     lower = "" if zone.lower_bpm is None else str(zone.lower_bpm)
     upper = "" if zone.upper_bpm is None else str(zone.upper_bpm)
     return f"- {zone.label}: {lower}-{upper} bpm"
 
 
-def _zones_from_upper_limits(user_id: str, upper_limits: tuple[int, ...]) -> tuple[HeartRateZoneRecord, ...]:
+def zones_from_upper_limits(user_id: str, upper_limits: tuple[int, ...]) -> tuple[HeartRateZoneRecord, ...]:
     zones = []
     lower_bpm: int | None = None
     for index, upper_bpm in enumerate(upper_limits):

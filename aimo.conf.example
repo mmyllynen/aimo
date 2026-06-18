@@ -45,13 +45,3 @@ provider = osm
 maptiler_api_key =
 maptiler_map_id = streets-v4
 timeout_s = 10
-
-[renderers]
-# Supported values: internal, pillow. Empty chart-specific values use default.
-default = pillow
-line = pillow
-multi_panel_line = pillow
-bar = pillow
-pie = pillow
-route = pillow
-social_image = pillow

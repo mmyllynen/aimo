@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
+from importlib import resources
 from dataclasses import dataclass
 from io import BytesIO
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from visualization.render import (
     COLORS,
@@ -40,10 +42,48 @@ from visualization.render import (
     _show_markers,
     _time_axis,
     route_metric_color,
+    route_map_viewport,
 )
 
 
 RENDER_SCALE = 2
+ROUTE_OVERLAY_ROW_HEIGHT = 40
+ROUTE_OVERLAY_SECTION_GAP = 14
+ROUTE_OVERLAY_HEADING_HEIGHT = 40
+ROUTE_OVERLAY_TOP_PADDING = 14
+ROUTE_OVERLAY_BOTTOM_PADDING = 14
+ELEVATION_OVERLAY_HEIGHT = 220
+ELEVATION_OVERLAY_BOTTOM_MARGIN = 14
+ELEVATION_LABEL_ROWS = 3
+ROUTE_MARKER_RADIUS = 8
+
+
+@dataclass(frozen=True)
+class MapMarkerLabelSpec:
+    text: str
+    point: tuple[float, float]
+    border_color: tuple[int, int, int]
+    fill_color: tuple[int, int, int, int] = (255, 255, 255, 232)
+    text_color: tuple[int, int, int] = TEXT
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class ElevationMarkerSpec:
+    label: str
+    elevation_m: float
+    x: float
+    priority: int
+    distance_km: float
+    preferred_side: str = "right"
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class ElevationMarkerLabel:
+    spec: ElevationMarkerSpec
+    text: str
+    box: tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -242,11 +282,12 @@ class PillowVisualizationRenderer:
         else:
             from visualization.render import route_map_viewport
 
-            viewport = route_map_viewport(chart.routes, width=width, height=height)
+            viewport = route_map_viewport(chart.routes, waypoints=chart.waypoints, width=width, height=height)
             x_domain, y_domain = viewport.x_domain, viewport.y_domain
         background = _route_background(chart, x_domain, y_domain, width * scale, height * scale)
         image = background.convert("RGBA")
         draw = ImageDraw.Draw(image, "RGBA")
+        route_pixel_points: list[tuple[RoutePolyline, list[tuple[float, float]]]] = []
         for index, (route, points) in enumerate(projected_routes):
             color = COLORS[index % len(COLORS)]
             pixel_points = [
@@ -256,6 +297,7 @@ class PillowVisualizationRenderer:
                 )
                 for x_value, y_value in points
             ]
+            route_pixel_points.append((route, pixel_points))
             if len(pixel_points) >= 2:
                 if chart.color_domain is not None and route.color_metric:
                     draw.line(pixel_points, fill=(255, 255, 255, 190), width=8 * scale, joint="curve")
@@ -274,8 +316,23 @@ class PillowVisualizationRenderer:
                     draw.line(pixel_points, fill=color + (255,), width=3 * scale, joint="curve")
             _draw_marker(draw, pixel_points[0], (22, 163, 74), scale=scale)
             _draw_marker(draw, pixel_points[-1], (220, 38, 38), scale=scale)
+        km_label_specs: tuple[MapMarkerLabelSpec, ...] = ()
+        if len(route_pixel_points) == 1:
+            route, pixel_points = route_pixel_points[0]
+            km_markers = _route_km_markers(route, pixel_points)
+            _draw_km_markers(draw, km_markers, scale=scale)
+            km_label_specs = _km_marker_label_specs(km_markers, scale=scale)
+        waypoint_label_specs = _draw_waypoints(draw, chart, x_domain, y_domain, width * scale, height * scale, scale=scale)
+        _draw_map_marker_labels(
+            draw,
+            waypoint_label_specs,
+            km_label_specs,
+            bounds=(4 * scale, 4 * scale, width * scale - 4 * scale, height * scale - 4 * scale),
+            scale=scale,
+        )
         _draw_image_frame(draw, image.width, image.height, scale=scale)
         _draw_route_overlays(image, image.width, image.height, chart, scale=scale)
+        _draw_elevation_overlay(image, chart, scale=scale)
         if chart.attribution:
             _draw_attribution(draw, image.width, image.height, chart.attribution, scale=scale)
         return _png_bytes(_downsample(image, width, height))
@@ -325,6 +382,219 @@ def _draw_route_joint(draw: ImageDraw.ImageDraw, point: tuple[float, float], rad
     draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color + (255,))
 
 
+def _draw_waypoints(
+    draw: ImageDraw.ImageDraw,
+    chart: RouteMap,
+    x_domain: tuple[float, float],
+    y_domain: tuple[float, float],
+    width: int,
+    height: int,
+    *,
+    scale: int,
+) -> tuple[MapMarkerLabelSpec, ...]:
+    color = (124, 58, 237)
+    label_specs: list[MapMarkerLabelSpec] = []
+    for waypoint in chart.waypoints:
+        waypoint_x, waypoint_y = _mercator_xy(waypoint.latitude, waypoint.longitude)
+        point = (
+            _scale_float(waypoint_x, x_domain, 0, width - 1),
+            _scale_float(waypoint_y, y_domain, 0, height - 1),
+        )
+        _draw_waypoint_marker(draw, point, waypoint.waypoint_type, color, scale=scale)
+        label = _ellipsize(waypoint.label.strip(), 32)
+        if not label:
+            continue
+        label_specs.append(
+            MapMarkerLabelSpec(
+                text=label,
+                point=point,
+                border_color=color,
+                required=True,
+            )
+        )
+    return tuple(label_specs)
+
+
+def _route_km_markers(
+    route: RoutePolyline,
+    pixel_points: list[tuple[float, float]],
+) -> tuple[tuple[float, tuple[float, float]], ...]:
+    distances = _route_distances_for_pixels(route)
+    if len(distances) != len(pixel_points) or len(distances) < 2:
+        return ()
+    distance_max = distances[-1]
+    if distance_max <= 0:
+        return ()
+    step = _distance_tick_step(distance_max)
+    markers: list[tuple[float, tuple[float, float]]] = []
+    value = step
+    while value < distance_max - 0.001:
+        point = _point_at_route_distance(value, distances, pixel_points)
+        if point is not None:
+            markers.append((value, point))
+        value += step
+    return tuple(markers)
+
+
+def _route_distances_for_pixels(route: RoutePolyline) -> tuple[float, ...]:
+    if len(route.points) < 2:
+        return ()
+    distances = [0.0]
+    for current, following in zip(route.points, route.points[1:], strict=False):
+        distances.append(distances[-1] + _haversine_km(current.latitude, current.longitude, following.latitude, following.longitude))
+    return tuple(distances)
+
+
+def _point_at_route_distance(
+    distance_km: float,
+    distances: tuple[float, ...],
+    pixel_points: list[tuple[float, float]],
+) -> tuple[float, float] | None:
+    if distance_km <= distances[0]:
+        return pixel_points[0]
+    if distance_km >= distances[-1]:
+        return pixel_points[-1]
+    for index, (left_distance, right_distance) in enumerate(zip(distances, distances[1:], strict=False)):
+        if left_distance <= distance_km <= right_distance:
+            span = max(right_distance - left_distance, 0.000001)
+            ratio = (distance_km - left_distance) / span
+            left_point = pixel_points[index]
+            right_point = pixel_points[index + 1]
+            return (
+                left_point[0] + (right_point[0] - left_point[0]) * ratio,
+                left_point[1] + (right_point[1] - left_point[1]) * ratio,
+            )
+    return None
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_km = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return 2 * radius_km * math.asin(math.sqrt(a))
+
+
+def _draw_km_markers(
+    draw: ImageDraw.ImageDraw,
+    markers: tuple[tuple[float, tuple[float, float]], ...],
+    *,
+    scale: int,
+) -> None:
+    for _, point in markers:
+        _draw_marker(draw, point, (59, 130, 246), scale=scale)
+
+
+def _km_marker_label_specs(
+    markers: tuple[tuple[float, tuple[float, float]], ...],
+    *,
+    scale: int,
+) -> tuple[MapMarkerLabelSpec, ...]:
+    del scale
+    return tuple(
+        MapMarkerLabelSpec(
+            text=f"{distance_km:.0f} km",
+            point=point,
+            border_color=(59, 130, 246),
+            fill_color=(37, 99, 235, 232),
+            text_color=(255, 255, 255),
+            required=False,
+        )
+        for distance_km, point in markers
+    )
+
+
+def _draw_map_marker_labels(
+    draw: ImageDraw.ImageDraw,
+    waypoint_specs: tuple[MapMarkerLabelSpec, ...],
+    km_specs: tuple[MapMarkerLabelSpec, ...],
+    *,
+    bounds: tuple[float, float, float, float],
+    scale: int,
+) -> None:
+    occupied: list[tuple[float, float, float, float]] = []
+    for spec in waypoint_specs:
+        box = _place_map_marker_label(draw, spec, bounds=bounds, occupied=occupied, scale=scale)
+        if box is None:
+            continue
+        occupied.append(box)
+        _draw_map_label_box(
+            draw,
+            box[0],
+            box[1],
+            spec.text,
+            scale=scale,
+            border_color=spec.border_color,
+            fill_color=spec.fill_color,
+            text_color=spec.text_color,
+        )
+    for spec in km_specs:
+        box = _place_map_marker_label(draw, spec, bounds=bounds, occupied=occupied, scale=scale)
+        if box is None:
+            continue
+        occupied.append(box)
+        _draw_map_label_box(
+            draw,
+            box[0],
+            box[1],
+            spec.text,
+            scale=scale,
+            border_color=spec.border_color,
+            fill_color=spec.fill_color,
+            text_color=spec.text_color,
+        )
+
+
+def _place_map_marker_label(
+    draw: ImageDraw.ImageDraw,
+    spec: MapMarkerLabelSpec,
+    *,
+    bounds: tuple[float, float, float, float],
+    occupied: list[tuple[float, float, float, float]],
+    scale: int,
+) -> tuple[float, float, float, float] | None:
+    for placement in ("right_up", "right_down", "left_up", "left_down"):
+        box = _map_marker_label_box(draw, spec, placement, bounds=bounds, scale=scale)
+        if box is None:
+            continue
+        if any(_boxes_overlap(box, existing, padding=3 * scale) for existing in occupied):
+            continue
+        return box
+    if not spec.required:
+        return None
+    return _map_marker_label_box(draw, spec, "right_up", bounds=bounds, scale=scale, clamp=True)
+
+
+def _map_marker_label_box(
+    draw: ImageDraw.ImageDraw,
+    spec: MapMarkerLabelSpec,
+    placement: str,
+    *,
+    bounds: tuple[float, float, float, float],
+    scale: int,
+    clamp: bool = False,
+) -> tuple[float, float, float, float] | None:
+    font = _font(10 * scale, bold=True)
+    box_width, box_height = _map_label_size(draw, spec.text, font=font, scale=scale)
+    gap = 7 * scale
+    anchor_x, anchor_y = spec.point
+    if placement.startswith("left"):
+        x = anchor_x - gap - box_width
+    else:
+        x = anchor_x + gap
+    if placement.endswith("down"):
+        y = anchor_y + gap
+    else:
+        y = anchor_y - gap - box_height
+    min_x, min_y, max_x, max_y = bounds
+    if clamp:
+        x = min(max(x, min_x), max_x - box_width)
+        y = min(max(y, min_y), max_y - box_height)
+    elif x < min_x or x + box_width > max_x or y < min_y or y + box_height > max_y:
+        return None
+    return (x, y, x + box_width, y + box_height)
+
+
 def _route_background(chart: RouteMap, x_domain: tuple[float, float], y_domain: tuple[float, float], width: int, height: int) -> Image.Image:
     if chart.tile_zoom is None or not chart.tiles:
         image = _background_image(width, height).convert("RGB")
@@ -370,10 +640,8 @@ def _social_background(chart: SocialImage, width: int, height: int) -> Image.Ima
     if chart.background_image:
         try:
             with Image.open(BytesIO(chart.background_image)) as source:
-                image = _cover_resize(source.convert("RGB"), width, height).convert("RGBA")
-                dim = Image.new("RGBA", image.size, (0, 0, 0, 76))
-                image.alpha_composite(dim)
-                return image
+                image = _cover_resize(source.convert("RGB"), width, height, crop=chart.style.background_crop)
+                return _apply_social_background_style(image, chart)
         except OSError:
             pass
     if chart.map_background is not None:
@@ -383,23 +651,94 @@ def _social_background(chart: SocialImage, width: int, height: int) -> Image.Ima
         else:
             viewport = route_map_viewport(route_map.routes, width=chart.width, height=chart.height)
             x_domain, y_domain = viewport.x_domain, viewport.y_domain
-        return _route_background(route_map, x_domain, y_domain, width, height).convert("RGBA")
-    return _background_image(width, height)
+        return _apply_social_background_style(_route_background(route_map, x_domain, y_domain, width, height), chart)
+    return _apply_social_background_style(_background_image(width, height), chart)
 
 
-def _cover_resize(source: Image.Image, width: int, height: int) -> Image.Image:
+def _apply_social_background_style(image: Image.Image, chart: SocialImage) -> Image.Image:
+    styled = _apply_social_filter(image.convert("RGB"), chart.style.background_filter)
+    if chart.style.background_blur > 0:
+        styled = styled.filter(ImageFilter.GaussianBlur(radius=chart.style.background_blur))
+    output = styled.convert("RGBA")
+    dim_alpha = round(max(0, min(70, chart.style.background_dim)) / 100 * 255)
+    if dim_alpha:
+        dim = Image.new("RGBA", output.size, (0, 0, 0, dim_alpha))
+        output.alpha_composite(dim)
+    return output
+
+
+def _cover_resize(source: Image.Image, width: int, height: int, *, crop: str = "center") -> Image.Image:
     source_width, source_height = source.size
     target_ratio = width / max(height, 1)
     source_ratio = source_width / max(source_height, 1)
     if source_ratio > target_ratio:
         crop_width = round(source_height * target_ratio)
-        left = max(0, (source_width - crop_width) // 2)
+        left = _crop_left(source_width, crop_width, crop)
         box = (left, 0, left + crop_width, source_height)
     else:
         crop_height = round(source_width / target_ratio)
-        top = max(0, (source_height - crop_height) // 2)
+        top = _crop_top(source_height, crop_height, crop)
         box = (0, top, source_width, top + crop_height)
     return source.crop(box).resize((width, height), Image.Resampling.LANCZOS)
+
+
+def _crop_left(source_width: int, crop_width: int, crop: str) -> int:
+    crop = crop.strip().lower()
+    if crop == "left":
+        return 0
+    if crop == "right":
+        return max(0, source_width - crop_width)
+    point = _crop_point(crop)
+    if point is not None:
+        return max(0, min(source_width - crop_width, round(source_width * point[0] - crop_width / 2)))
+    return max(0, (source_width - crop_width) // 2)
+
+
+def _crop_top(source_height: int, crop_height: int, crop: str) -> int:
+    crop = crop.strip().lower()
+    if crop == "top":
+        return 0
+    if crop == "bottom":
+        return max(0, source_height - crop_height)
+    point = _crop_point(crop)
+    if point is not None:
+        return max(0, min(source_height - crop_height, round(source_height * point[1] - crop_height / 2)))
+    return max(0, (source_height - crop_height) // 2)
+
+
+def _crop_point(crop: str) -> tuple[float, float] | None:
+    parts = crop.split(",", 1)
+    if len(parts) != 2:
+        return None
+    try:
+        x_value = max(0, min(100, int(parts[0]))) / 100
+        y_value = max(0, min(100, int(parts[1]))) / 100
+    except ValueError:
+        return None
+    return x_value, y_value
+
+
+def _apply_social_filter(image: Image.Image, value: str) -> Image.Image:
+    mode = value.strip().lower()
+    if mode in {"", "none"}:
+        return image
+    if mode == "bw":
+        return image.convert("L").convert("RGB")
+    pixels = image.convert("RGB")
+    overlay_color = {
+        "warm": (255, 170, 80),
+        "cool": (70, 125, 255),
+        "vivid": (255, 255, 255),
+        "matte": (180, 170, 150),
+    }.get(mode)
+    if overlay_color is None:
+        return image
+    overlay = Image.new("RGB", pixels.size, overlay_color)
+    alpha = {"warm": 0.12, "cool": 0.12, "vivid": 0.08, "matte": 0.16}[mode]
+    blended = Image.blend(pixels, overlay, alpha)
+    if mode == "vivid":
+        return Image.blend(blended, pixels.point(lambda p: min(255, round(p * 1.08))), 0.55)
+    return blended
 
 
 def _draw_social_routes(draw: ImageDraw.ImageDraw, chart: SocialImage, width: int, height: int, *, scale: int) -> None:
@@ -407,15 +746,81 @@ def _draw_social_routes(draw: ImageDraw.ImageDraw, chart: SocialImage, width: in
         points = _social_route_points(chart, route, width, height, scale=scale)
         if len(points) < 2:
             continue
-        shadow_width = max(18 * scale, round(min(width, height) * 0.022))
-        glow_width = max(11 * scale, round(min(width, height) * 0.014))
-        line_width = max(7 * scale, round(min(width, height) * 0.009))
-        draw.line(points, fill=(2, 6, 23, 150), width=shadow_width, joint="curve")
-        draw.line(points, fill=(255, 255, 255, 210), width=glow_width, joint="curve")
-        draw.line(points, fill=(37, 99, 235, 255), width=line_width, joint="curve")
-        draw.line(points, fill=(125, 211, 252, 235), width=max(2 * scale, line_width // 3), joint="curve")
-        _draw_marker(draw, points[0], (22, 163, 74), scale=scale)
-        _draw_marker(draw, points[-1], (220, 38, 38), scale=scale)
+        size_factor = _social_route_size_factor(chart.style.route_size)
+        line_width = max(5 * scale, round(min(width, height) * 0.009 * size_factor))
+        route_color = _social_color(chart.style.route_color, default=(37, 99, 235))
+        if chart.style.route_shadow:
+            _draw_social_polyline(draw, points, (0, 0, 0, 179), width=line_width)
+        offset_points = _offset_points(points, 3 * scale, 3 * scale)
+        if chart.color_domain is not None and route.color_metric:
+            _draw_social_colored_polyline(
+                draw,
+                route,
+                offset_points,
+                chart.color_domain,
+                fallback=route_color,
+                direction=chart.color_direction,
+                width=line_width,
+            )
+        else:
+            _draw_social_polyline(draw, offset_points, route_color + (255,), width=line_width)
+        if chart.style.route_markers:
+            _draw_marker(draw, points[0], (22, 163, 74), scale=scale)
+            _draw_marker(draw, points[-1], (220, 38, 38), scale=scale)
+
+
+def _draw_social_polyline(
+    draw: ImageDraw.ImageDraw,
+    points: list[tuple[float, float]],
+    color: tuple[int, int, int, int],
+    *,
+    width: int,
+) -> None:
+    radius = width / 2.0
+    for current, following in zip(points, points[1:], strict=False):
+        draw.line((current, following), fill=color, width=width)
+        _draw_route_joint_rgba(draw, current, radius, color)
+        _draw_route_joint_rgba(draw, following, radius, color)
+
+
+def _draw_social_colored_polyline(
+    draw: ImageDraw.ImageDraw,
+    route: RoutePolyline,
+    points: list[tuple[float, float]],
+    color_domain: tuple[float, float],
+    *,
+    fallback: tuple[int, int, int],
+    direction: str,
+    width: int,
+) -> None:
+    radius = width / 2.0
+    for index, (current, following) in enumerate(zip(points, points[1:], strict=False)):
+        first = route.points[index].color_value
+        second = route.points[index + 1].color_value
+        if first is not None:
+            color = route_metric_color(first, color_domain, direction=direction)
+        elif second is not None:
+            color = route_metric_color(second, color_domain, direction=direction)
+        else:
+            color = fallback
+        rgba = color + (255,)
+        draw.line((current, following), fill=rgba, width=width)
+        _draw_route_joint_rgba(draw, current, radius, rgba)
+        _draw_route_joint_rgba(draw, following, radius, rgba)
+
+
+def _draw_route_joint_rgba(
+    draw: ImageDraw.ImageDraw,
+    point: tuple[float, float],
+    radius: float,
+    color: tuple[int, int, int, int],
+) -> None:
+    x, y = point
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+
+
+def _offset_points(points: list[tuple[float, float]], dx: float, dy: float) -> list[tuple[float, float]]:
+    return [(x + dx, y + dy) for x, y in points]
 
 
 def _social_route_points(
@@ -430,7 +835,7 @@ def _social_route_points(
     if not projected:
         return []
     if chart.background_image or chart.map_background is None:
-        return _decorative_route_points(projected, width, height, scale=scale)
+        return _decorative_route_points(projected, width, height, scale=scale, position=chart.style.route_position)
     route_map = chart.map_background
     if route_map.x_domain is not None and route_map.y_domain is not None:
         x_domain, y_domain = route_map.x_domain, route_map.y_domain
@@ -446,7 +851,14 @@ def _social_route_points(
     ]
 
 
-def _decorative_route_points(points: tuple[tuple[float, float], ...], width: int, height: int, *, scale: int) -> list[tuple[float, float]]:
+def _decorative_route_points(
+    points: tuple[tuple[float, float], ...],
+    width: int,
+    height: int,
+    *,
+    scale: int,
+    position: str = "center",
+) -> list[tuple[float, float]]:
     x_values = tuple(point[0] for point in points)
     y_values = tuple(point[1] for point in points)
     x_domain = (min(x_values), max(x_values))
@@ -464,6 +876,15 @@ def _decorative_route_points(points: tuple[tuple[float, float], ...], width: int
     route_height = max(height * 0.34, min(route_height, height * 0.70))
     left = (width - route_width) / 2.0
     top = (height - route_height) / 2.0 + height * 0.05
+    position = position.strip().lower()
+    if position == "top":
+        top = height * 0.18
+    elif position == "bottom":
+        top = height - route_height - height * 0.12
+    elif position == "left":
+        left = width * 0.08
+    elif position == "right":
+        left = width - route_width - width * 0.08
     right = left + route_width
     bottom = top + route_height
     return [
@@ -476,39 +897,67 @@ def _decorative_route_points(points: tuple[tuple[float, float], ...], width: int
 
 
 def _draw_social_overlays(image: Image.Image, chart: SocialImage, *, scale: int) -> None:
+    if chart.style.title_position == "hide" and chart.style.stats_position == "hide":
+        return
     panel_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     panel_draw = ImageDraw.Draw(panel_layer, "RGBA")
     overlay_scale = 2 * scale
     padding = 20 * scale
     title_left = 22 * scale
-    title_top = 22 * scale
     title_width = image.width - 44 * scale
-    title_font = _font(24 * overlay_scale, bold=True)
+    title_font = _social_font(24 * overlay_scale, chart.style.font, bold=True)
     title_text_width = title_width - 2 * padding
     title_lines = _wrap_text(panel_draw, chart.title, title_text_width, title_font, max_lines=2)
     title_height = padding * 2 + len(title_lines) * 48 * scale
-    _dark_panel(panel_draw, (title_left, title_top, title_left + title_width, title_top + title_height))
-    stats_box = _social_stats_box(image.width, image.height, chart.stats, scale=scale)
+    title_top = 22 * scale if chart.style.title_position != "bottom" else image.height - title_height - 22 * scale
+    if chart.style.title_position != "hide":
+        _social_panel(panel_draw, (title_left, title_top, title_left + title_width, title_top + title_height), chart.style.panel_style)
+    stats_box = _social_stats_box(
+        image.width,
+        image.height,
+        chart.stats,
+        scale=scale,
+        position=chart.style.stats_position,
+        stats_style=chart.style.stats_style,
+    )
     if stats_box is not None:
-        _dark_panel(panel_draw, stats_box)
+        _social_panel(panel_draw, stats_box, chart.style.panel_style)
     image.alpha_composite(panel_layer)
     draw = ImageDraw.Draw(image, "RGBA")
-    text = (255, 255, 255)
-    muted = (226, 232, 240)
-    for index, line in enumerate(title_lines):
-        _draw_text_center(draw, image.width // 2, title_top + padding + index * 48 * scale, line, text, title_font)
+    text = _social_text_color(chart.style.text_color)
+    muted = _social_muted_color(text)
+    if chart.style.title_position != "hide":
+        for index, line in enumerate(title_lines):
+            y = title_top + padding + index * 48 * scale
+            if chart.style.title_align == "left":
+                _draw_text(draw, title_left + padding, y, line, text, title_font)
+            else:
+                _draw_text_center(draw, image.width // 2, y, line, text, title_font)
     if stats_box is not None:
-        _draw_social_stats(draw, stats_box, chart.stats, text, muted, scale=scale)
+        _draw_social_stats(draw, stats_box, chart.stats, text, muted, chart.style.font, chart.style.stats_style, scale=scale)
 
 
-def _social_stats_box(width: int, height: int, stats: tuple[SocialImageStat, ...], *, scale: int) -> tuple[int, int, int, int] | None:
-    if not stats:
+def _social_stats_box(
+    width: int,
+    height: int,
+    stats: tuple[SocialImageStat, ...],
+    *,
+    scale: int,
+    position: str = "left",
+    stats_style: str = "compact",
+) -> tuple[int, int, int, int] | None:
+    if not stats or position == "hide":
         return None
     padding = 18 * scale
-    box_width = min(460 * scale, width - 44 * scale)
-    row_height = 48 * scale
+    box_width = min(520 * scale if position == "bottom" else 460 * scale, width - 44 * scale)
+    row_height = (64 if stats_style in {"large", "stacked"} else 48) * scale
     box_height = padding * 2 + row_height * min(len(stats), 4)
-    left = 22 * scale
+    if position == "right":
+        left = width - box_width - 22 * scale
+    elif position == "bottom":
+        left = (width - box_width) // 2
+    else:
+        left = 22 * scale
     bottom = height - 22 * scale
     return (left, bottom - box_height, left + box_width, bottom)
 
@@ -519,24 +968,111 @@ def _draw_social_stats(
     stats: tuple[SocialImageStat, ...],
     text: tuple[int, int, int],
     muted: tuple[int, int, int],
+    font_family: str,
+    stats_style: str,
     *,
     scale: int,
 ) -> None:
     overlay_scale = 2 * scale
     padding = 18 * scale
-    row_height = 48 * scale
+    row_height = 58 * scale if stats_style == "large" else 48 * scale
     x = box[0] + padding
     y = box[1] + padding
     value_x = box[2] - padding
-    label_font = _font(10 * overlay_scale, bold=True)
-    value_font = _font(16 * overlay_scale, bold=True)
+    label_font = _social_font(10 * overlay_scale, font_family, bold=True)
+    value_font = _social_font((20 if stats_style == "large" else 16) * overlay_scale, font_family, bold=True)
     for stat in stats[:4]:
         label_height = _text_size(draw, stat.label, label_font)[1]
         value_height = _text_size(draw, stat.value, value_font)[1]
         row_center = y + row_height / 2.0
-        _draw_text(draw, x, round(row_center - label_height / 2.0), stat.label, muted, label_font)
-        _draw_text_right(draw, value_x, round(row_center - value_height / 2.0), stat.value, text, value_font)
+        if stats_style == "stacked":
+            _draw_text(draw, x, round(y), stat.label, muted, label_font)
+            _draw_text(draw, x, round(y + label_height + 4 * scale), stat.value, text, value_font)
+        else:
+            _draw_text(draw, x, round(row_center - label_height / 2.0), stat.label, muted, label_font)
+            _draw_text_right(draw, value_x, round(row_center - value_height / 2.0), stat.value, text, value_font)
         y += row_height
+
+
+def _social_route_size_factor(value: str) -> float:
+    return {
+        "small": 0.72,
+        "normal": 1.0,
+        "large": 1.35,
+        "huge": 1.75,
+    }.get(value.strip().lower(), 1.0)
+
+
+def _social_panel(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], style: str) -> None:
+    mode = style.strip().lower()
+    if mode == "none":
+        return
+    if mode == "light":
+        draw.rounded_rectangle(box, radius=0, fill=(248, 250, 252, 205), outline=(226, 232, 240, 120), width=1)
+        return
+    _dark_panel(draw, box)
+
+
+def _social_color(value: str, *, default: tuple[int, int, int]) -> tuple[int, int, int]:
+    text = value.strip().lower()
+    if text in {"", "default", "auto"}:
+        return default
+    named = {
+        "blue": (37, 99, 235),
+        "white": (255, 255, 255),
+        "black": (15, 23, 42),
+        "red": (220, 38, 38),
+        "green": (22, 163, 74),
+        "yellow": (250, 204, 21),
+    }.get(text)
+    if named is not None:
+        return named
+    if len(text) == 7 and text.startswith("#"):
+        try:
+            return int(text[1:3], 16), int(text[3:5], 16), int(text[5:7], 16)
+        except ValueError:
+            return default
+    return default
+
+
+def _social_text_color(value: str) -> tuple[int, int, int]:
+    text = value.strip().lower()
+    if text == "black":
+        return (15, 23, 42)
+    if len(text) == 7 and text.startswith("#"):
+        return _social_color(text, default=(255, 255, 255))
+    return (255, 255, 255)
+
+
+def _social_muted_color(text: tuple[int, int, int]) -> tuple[int, int, int]:
+    if sum(text) < 200:
+        return (71, 85, 105)
+    return (226, 232, 240)
+
+
+def _social_font(size: int, family: str, *, bold: bool = False) -> ImageFont.ImageFont:
+    normalized = family.strip().lower()
+    if normalized == "mono":
+        candidates = (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+        )
+        for path in candidates:
+            try:
+                return ImageFont.truetype(path, size=max(8, size))
+            except OSError:
+                continue
+    if normalized == "serif":
+        candidates = (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSerif.ttf",
+        )
+        for path in candidates:
+            try:
+                return ImageFont.truetype(path, size=max(8, size))
+            except OSError:
+                continue
+    return _font(size, bold=bold or normalized == "bold")
 
 
 def _background_image(width: int, height: int) -> Image.Image:
@@ -889,13 +1425,17 @@ def _draw_route_overlays(image: Image.Image, width: int, height: int, chart: Rou
         overlay_width = 392 * scale
         color_scale_only = chart.color_metric_label and chart.color_domain is not None
         visible_route_count = 0 if color_scale_only else _visible_route_legend_count(len(chart.routes), height, scale=scale)
-        overlay_height = min(
-            (86 * scale if color_scale_only else 84 * scale + visible_route_count * 44 * scale),
-            height - 24 * scale,
+        visible_waypoint_count = _visible_waypoint_count(len(chart.waypoints), height, visible_route_count, scale=scale)
+        overlay_height = _route_overlay_height(
+            color_scale_only=color_scale_only,
+            visible_route_count=visible_route_count,
+            visible_waypoint_count=visible_waypoint_count,
+            scale=scale,
         )
         left = width - overlay_width - 14 * scale
         top = 12 * scale
-        _dark_panel(panel_draw, (left, top, width - 14 * scale, top + overlay_height))
+        if overlay_height > 0:
+            _dark_panel(panel_draw, (left, top, width - 14 * scale, top + min(overlay_height, height - 24 * scale)))
     image.alpha_composite(panel_layer)
 
     draw = ImageDraw.Draw(image, "RGBA")
@@ -921,32 +1461,154 @@ def _draw_route_overlays(image: Image.Image, width: int, height: int, chart: Rou
     overlay_width = 392 * scale
     color_scale_only = chart.color_metric_label and chart.color_domain is not None
     visible_route_count = 0 if color_scale_only else _visible_route_legend_count(len(chart.routes), height, scale=scale)
-    overlay_height = min(
-        (86 * scale if color_scale_only else 84 * scale + visible_route_count * 44 * scale),
-        height - 24 * scale,
-    )
+    visible_waypoint_count = _visible_waypoint_count(len(chart.waypoints), height, visible_route_count, scale=scale)
     left = width - overlay_width - 14 * scale
     top = 12 * scale
     if color_scale_only:
         _draw_route_color_scale(draw, left + padding, top + 10 * scale, chart, route_text, route_muted_text, scale=scale)
         return
-    _draw_text(draw, left + padding, top + 10 * scale, chart.legend_title, route_text, _font(12 * overlay_scale, bold=True))
-    y = top + 66 * scale
+    y = top + ROUTE_OVERLAY_TOP_PADDING * scale
+    if visible_route_count:
+        _draw_route_overlay_heading(draw, left + padding, y, chart.legend_title, route_text, scale=scale)
+        y += ROUTE_OVERLAY_HEADING_HEIGHT * scale
     for index, route in enumerate(chart.routes[:visible_route_count]):
         color = route.color or COLORS[index % len(COLORS)]
-        draw.line((left + padding, y + 12 * scale, left + padding + 36 * scale, y + 12 * scale), fill=color, width=max(12, 6 * scale))
-        _draw_text(draw, left + padding + 52 * scale, y - 2 * scale, _ellipsize(route.label, 28), route_text, _font(11 * overlay_scale))
-        y += 44 * scale
-    if len(chart.routes) > visible_route_count:
-        _draw_text(draw, left + padding + 52 * scale, y - 2 * scale, "...", route_muted_text, _font(11 * overlay_scale))
-        y += 44 * scale
+        draw.line((left + padding, y + 13 * scale, left + padding + 36 * scale, y + 13 * scale), fill=color, width=max(12, 6 * scale))
+        _draw_text(draw, left + padding + 52 * scale, y - 1 * scale, _ellipsize(route.label, 28), route_text, _font(10 * overlay_scale))
+        y += ROUTE_OVERLAY_ROW_HEIGHT * scale
+    if visible_route_count and len(chart.routes) > visible_route_count:
+        _draw_text(draw, left + padding + 52 * scale, y - 1 * scale, "...", route_muted_text, _font(10 * overlay_scale))
+        y += ROUTE_OVERLAY_ROW_HEIGHT * scale
+    if visible_route_count and visible_waypoint_count:
+        y += ROUTE_OVERLAY_SECTION_GAP * scale
+    _draw_waypoint_overlay_list(
+        draw,
+        chart.waypoints[:visible_waypoint_count],
+        hidden_count=max(0, len(chart.waypoints) - visible_waypoint_count),
+        left=left + padding,
+        top=y,
+        width=overlay_width - 2 * padding,
+        text=route_text,
+        muted=route_muted_text,
+        scale=scale,
+    )
 
 
 def _visible_route_legend_count(route_count: int, height: int, *, scale: int) -> int:
-    if route_count <= 0:
+    if route_count <= 1:
         return 0
-    available_rows = max(1, (height - 108 * scale) // (44 * scale))
+    available_rows = max(1, (height - 108 * scale) // (ROUTE_OVERLAY_ROW_HEIGHT * scale))
     return min(route_count, 20, available_rows)
+
+
+def _visible_waypoint_count(waypoint_count: int, height: int, route_count: int, *, scale: int) -> int:
+    if waypoint_count <= 0:
+        return 0
+    used = (
+        ROUTE_OVERLAY_TOP_PADDING * scale
+        + (ROUTE_OVERLAY_HEADING_HEIGHT + route_count * ROUTE_OVERLAY_ROW_HEIGHT) * scale
+        + (ROUTE_OVERLAY_SECTION_GAP * scale if route_count else 0)
+        + ROUTE_OVERLAY_HEADING_HEIGHT * scale
+        + ROUTE_OVERLAY_BOTTOM_PADDING * scale
+    )
+    available_rows = max(0, (height - used - 24 * scale) // (ROUTE_OVERLAY_ROW_HEIGHT * scale))
+    return min(waypoint_count, 12, available_rows)
+
+
+def _waypoint_overlay_height(visible_count: int, *, scale: int) -> int:
+    if visible_count <= 0:
+        return 0
+    return (ROUTE_OVERLAY_HEADING_HEIGHT + visible_count * ROUTE_OVERLAY_ROW_HEIGHT) * scale
+
+
+def _route_overlay_height(
+    *,
+    color_scale_only: bool,
+    visible_route_count: int,
+    visible_waypoint_count: int,
+    scale: int,
+) -> int:
+    if color_scale_only:
+        return 86 * scale
+    if visible_route_count <= 0 and visible_waypoint_count <= 0:
+        return 0
+    height = ROUTE_OVERLAY_TOP_PADDING * scale + ROUTE_OVERLAY_BOTTOM_PADDING * scale
+    if visible_route_count:
+        height += (ROUTE_OVERLAY_HEADING_HEIGHT + visible_route_count * ROUTE_OVERLAY_ROW_HEIGHT) * scale
+    if visible_waypoint_count:
+        if visible_route_count:
+            height += ROUTE_OVERLAY_SECTION_GAP * scale
+        height += _waypoint_overlay_height(visible_waypoint_count, scale=scale)
+    return height
+
+
+def _draw_waypoint_overlay_list(
+    draw: ImageDraw.ImageDraw,
+    waypoints,
+    *,
+    hidden_count: int,
+    left: int,
+    top: int,
+    width: int,
+    text: tuple[int, int, int],
+    muted: tuple[int, int, int],
+    scale: int,
+) -> None:
+    if not waypoints:
+        return
+    overlay_scale = 2 * scale
+    row_font = _font(10 * overlay_scale)
+    distance_font = row_font
+    icon_column = 42 * scale
+    distance_column = 74 * scale
+    _draw_route_overlay_heading(draw, left, top, "Reittimerkit", text, scale=scale)
+    y = top + ROUTE_OVERLAY_HEADING_HEIGHT * scale
+    distance_x = left + width
+    for waypoint in waypoints:
+        _draw_waypoint_overlay_marker(draw, (left + 10 * scale, y + 14 * scale), waypoint.waypoint_type, (124, 58, 237), scale=scale)
+        label = _ellipsize_to_width(draw, waypoint.label or "Reittimerkki", max(40 * scale, width - icon_column - distance_column), row_font)
+        _draw_text(draw, left + icon_column, y - 1 * scale, label, text, row_font)
+        if waypoint.distance_km is not None:
+            _draw_text_right(draw, distance_x, y - 1 * scale, f"{waypoint.distance_km:.1f} km", muted, distance_font)
+        y += ROUTE_OVERLAY_ROW_HEIGHT * scale
+    if hidden_count > 0:
+        _draw_text(draw, left + icon_column, y - 1 * scale, f"+{hidden_count}", muted, row_font)
+
+
+def _draw_route_overlay_heading(
+    draw: ImageDraw.ImageDraw,
+    left: int,
+    top: int,
+    text: str,
+    color: tuple[int, int, int],
+    *,
+    scale: int,
+) -> None:
+    _draw_text(draw, left, top, text, color, _font(12 * 2 * scale, bold=True))
+
+
+def _draw_waypoint_overlay_marker(
+    draw: ImageDraw.ImageDraw,
+    point: tuple[float, float],
+    waypoint_type: str,
+    color: tuple[int, int, int],
+    *,
+    scale: int,
+) -> None:
+    x, y = point
+    icon_color = _waypoint_color(waypoint_type) or color
+    radius = 10 * scale
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(255, 255, 255, 242), outline=icon_color + (255,), width=2 * scale)
+    icon_font = _waypoint_icon_font(9 * scale)
+    icon = _waypoint_icon_text(waypoint_type)
+    if icon_font is not None:
+        text_width, text_height = _text_size(draw, icon, icon_font)
+        _draw_text(draw, round(x - text_width / 2), round(y - text_height / 2), icon, icon_color, icon_font)
+        return
+    fallback = _waypoint_fallback_icon(waypoint_type)
+    font = _font(9 * scale, bold=True)
+    text_width, text_height = _text_size(draw, fallback, font)
+    _draw_text(draw, round(x - text_width / 2), round(y - text_height / 2), fallback, icon_color, font)
 
 
 def _route_color_scale_height(chart: RouteMap, *, scale: int) -> int:
@@ -981,6 +1643,454 @@ def _draw_route_color_scale(
     _draw_text_right(draw, left + bar_width, bar_top + 12 * scale, high, muted_color, _font(8 * 2 * scale))
 
 
+def _draw_elevation_overlay(image: Image.Image, chart: RouteMap, *, scale: int) -> None:
+    profile = chart.elevation_profile
+    if profile is None or len(profile.samples) < 3:
+        return
+    width, height = image.width, image.height
+    margin_x = 14 * scale
+    bottom_margin = ELEVATION_OVERLAY_BOTTOM_MARGIN * scale
+    panel_height = ELEVATION_OVERLAY_HEIGHT * scale
+    left = margin_x
+    right = width - margin_x
+    bottom = height - bottom_margin
+    top = bottom - panel_height
+    panel_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    panel_draw = ImageDraw.Draw(panel_layer, "RGBA")
+    _dark_panel(panel_draw, (left, top, right, bottom))
+    image.alpha_composite(panel_layer)
+    draw = ImageDraw.Draw(image, "RGBA")
+
+    padding_x = 28 * scale
+    padding_y = 16 * scale
+    plot_left = left + padding_x
+    plot_right = right - padding_x
+    elevations = tuple(sample.elevation_m for sample in profile.samples)
+    min_elevation = min(elevations)
+    max_elevation = max(elevations)
+    distance_max = max(sample.distance_km for sample in profile.samples)
+    if distance_max <= 0 or max_elevation - min_elevation < 1:
+        return
+    grade_scale_box = _grade_scale_box(plot_right - 285 * scale, top + 12 * scale, scale=scale)
+    label_band_top = grade_scale_box[3] + 8 * scale
+    label_band_bottom = label_band_top + _elevation_label_row_height(draw, scale=scale) * ELEVATION_LABEL_ROWS
+    preliminary_points = _elevation_profile_points(
+        profile,
+        distance_max=distance_max,
+        y_domain=(min_elevation, max_elevation),
+        plot_left=plot_left,
+        plot_right=plot_right,
+        plot_top=0,
+        plot_bottom=1,
+    )
+    marker_specs = _elevation_marker_specs(profile, chart, preliminary_points)
+    marker_labels = _layout_elevation_marker_labels(
+        draw,
+        marker_specs,
+        label_bounds=(left + 6 * scale, label_band_top, right - 6 * scale, label_band_bottom),
+        scale=scale,
+    )
+    used_label_rows = _used_elevation_label_rows(marker_labels, label_band_top, draw, scale=scale)
+    label_area_bottom = label_band_top + max(1, used_label_rows) * _elevation_label_row_height(draw, scale=scale)
+    axis_height = 24 * scale
+    plot_top = label_area_bottom + 10 * scale
+    plot_bottom = bottom - padding_y - axis_height
+    y_domain = _padded_elevation_domain(min_elevation, max_elevation)
+    points = _elevation_profile_points(
+        profile,
+        distance_max=distance_max,
+        y_domain=y_domain,
+        plot_left=plot_left,
+        plot_right=plot_right,
+        plot_top=plot_top,
+        plot_bottom=plot_bottom,
+    )
+    baseline = plot_bottom
+    for index, (current, following) in enumerate(zip(points, points[1:], strict=False)):
+        _draw_elevation_gradient_segment(
+            draw,
+            current,
+            following,
+            baseline,
+            profile.samples[index].grade,
+            profile.samples[index + 1].grade,
+            scale=scale,
+        )
+    marker_specs = _elevation_marker_specs(profile, chart, points)
+    marker_labels = _layout_elevation_marker_labels(
+        draw,
+        marker_specs,
+        label_bounds=(left + 6 * scale, label_band_top, right - 6 * scale, label_band_bottom),
+        scale=scale,
+    )
+    for marker in marker_labels:
+        _draw_elevation_marker(draw, marker, plot_top, plot_bottom, scale=scale)
+    _draw_grade_scale(draw, profile, grade_scale_box[0], grade_scale_box[1], scale=scale)
+    _draw_elevation_distance_axis(draw, distance_max, plot_left, plot_right, plot_bottom + 9 * scale, scale=scale)
+
+
+def _draw_elevation_gradient_segment(
+    draw: ImageDraw.ImageDraw,
+    current: tuple[float, float],
+    following: tuple[float, float],
+    baseline: int,
+    start_grade: float,
+    end_grade: float,
+    *,
+    scale: int,
+) -> None:
+    segment_width = abs(following[0] - current[0])
+    steps = max(1, min(12, round(segment_width / max(4 * scale, 1))))
+    previous = current
+    for step in range(1, steps + 1):
+        ratio = step / steps
+        point = (
+            current[0] + (following[0] - current[0]) * ratio,
+            current[1] + (following[1] - current[1]) * ratio,
+        )
+        grade = start_grade + (end_grade - start_grade) * (ratio - 0.5 / steps)
+        color = _grade_color(grade)
+        polygon = (previous, point, (point[0], baseline), (previous[0], baseline))
+        draw.polygon(polygon, fill=color + (52,))
+        draw.line((previous, point), fill=color + (255,), width=max(2, 2 * scale))
+        previous = point
+
+
+def _draw_elevation_marker(
+    draw: ImageDraw.ImageDraw,
+    marker: ElevationMarkerLabel,
+    plot_top: int,
+    plot_bottom: int,
+    *,
+    scale: int,
+) -> None:
+    x = marker.spec.x
+    _, _, _, label_bottom = marker.box
+    draw.line((x, label_bottom, x, plot_bottom), fill=(255, 255, 255, 210), width=max(2, 2 * scale))
+    label_left, label_top, _, _ = marker.box
+    _draw_map_label_box(
+        draw,
+        label_left,
+        label_top,
+        marker.text,
+        scale=scale,
+        border_color=(148, 163, 184),
+    )
+
+
+def _elevation_profile_points(
+    profile,
+    *,
+    distance_max: float,
+    y_domain: tuple[float, float],
+    plot_left: int,
+    plot_right: int,
+    plot_top: int,
+    plot_bottom: int,
+) -> list[tuple[float, float]]:
+    return [
+        (
+            _scale_float(sample.distance_km, (0.0, distance_max), plot_left, plot_right),
+            _scale_float(sample.elevation_m, y_domain, plot_bottom, plot_top),
+        )
+        for sample in profile.samples
+    ]
+
+
+def _elevation_marker_specs(
+    profile,
+    chart: RouteMap,
+    points: list[tuple[float, float]],
+) -> tuple[ElevationMarkerSpec, ...]:
+    specs: list[ElevationMarkerSpec] = [
+        ElevationMarkerSpec(
+            label="Lähtö",
+            elevation_m=profile.samples[0].elevation_m,
+            x=points[0][0],
+            priority=0,
+            distance_km=profile.samples[0].distance_km,
+            preferred_side="right",
+        ),
+        ElevationMarkerSpec(
+            label="Maali",
+            elevation_m=profile.samples[-1].elevation_m,
+            x=points[-1][0],
+            priority=1,
+            distance_km=profile.samples[-1].distance_km,
+            preferred_side="left",
+        ),
+    ]
+    for waypoint in chart.waypoints[:10]:
+        if waypoint.distance_km is None:
+            continue
+        waypoint_point = _elevation_point_at_distance(profile, waypoint.distance_km, points)
+        if waypoint_point is None:
+            continue
+        x, _, elevation_m = waypoint_point
+        specs.append(
+            ElevationMarkerSpec(
+                label=waypoint.label or "Reittimerkki",
+                elevation_m=elevation_m,
+                x=x,
+                priority=2,
+                distance_km=waypoint.distance_km,
+                preferred_side="right",
+            )
+        )
+    specs.append(
+        ElevationMarkerSpec(
+            label="Korkein kohta",
+            elevation_m=profile.samples[profile.max_index].elevation_m,
+            x=points[profile.max_index][0],
+            priority=3,
+            distance_km=profile.samples[profile.max_index].distance_km,
+            preferred_side="right",
+            required=False,
+        )
+    )
+    if profile.min_index != profile.max_index:
+        specs.append(
+            ElevationMarkerSpec(
+                label="Matalin kohta",
+                elevation_m=profile.samples[profile.min_index].elevation_m,
+                x=points[profile.min_index][0],
+                priority=4,
+                distance_km=profile.samples[profile.min_index].distance_km,
+                preferred_side="right",
+                required=False,
+            )
+        )
+    return tuple(sorted(specs, key=lambda marker: (marker.priority, marker.distance_km)))
+
+
+def _layout_elevation_marker_labels(
+    draw: ImageDraw.ImageDraw,
+    specs: tuple[ElevationMarkerSpec, ...],
+    *,
+    label_bounds: tuple[float, float, float, float],
+    scale: int,
+) -> tuple[ElevationMarkerLabel, ...]:
+    placed: list[ElevationMarkerLabel] = []
+    occupied_boxes: list[tuple[float, float, float, float]] = []
+    for spec in specs:
+        text = f"{spec.label} {round(spec.elevation_m)} m"
+        for side, row in _elevation_label_candidate_order(spec.preferred_side):
+            box = _elevation_marker_label_box(draw, spec, text, side, row, label_bounds=label_bounds, scale=scale)
+            if box is None:
+                continue
+            if any(_boxes_overlap(box, existing, padding=3 * scale) for existing in occupied_boxes):
+                continue
+            placed_marker = ElevationMarkerLabel(spec=spec, text=text, box=box)
+            placed.append(placed_marker)
+            occupied_boxes.append(box)
+            break
+        else:
+            if spec.required:
+                box = _elevation_marker_label_box(draw, spec, text, spec.preferred_side, 0, label_bounds=label_bounds, scale=scale, clamp=True)
+                if box is not None:
+                    placed_marker = ElevationMarkerLabel(spec=spec, text=text, box=box)
+                    placed.append(placed_marker)
+                    occupied_boxes.append(box)
+    return tuple(placed)
+
+
+def _elevation_label_candidate_order(preferred_side: str) -> tuple[tuple[str, int], ...]:
+    opposite = "left" if preferred_side == "right" else "right"
+    return (
+        (preferred_side, 0),
+        (opposite, 0),
+        (preferred_side, 1),
+        (opposite, 1),
+    )
+
+
+def _elevation_marker_label_box(
+    draw: ImageDraw.ImageDraw,
+    spec: ElevationMarkerSpec,
+    text: str,
+    side: str,
+    row: int,
+    *,
+    label_bounds: tuple[float, float, float, float],
+    scale: int,
+    clamp: bool = False,
+) -> tuple[float, float, float, float] | None:
+    min_x, min_y, max_x, max_y = label_bounds
+    font = _font(10 * scale, bold=True)
+    box_width, box_height = _map_label_size(draw, text, font=font, scale=scale)
+    row_height = _elevation_label_row_height(draw, scale=scale)
+    if row >= ELEVATION_LABEL_ROWS:
+        return None
+    y = min_y + row * row_height
+    if y + box_height > max_y:
+        return None
+    if side == "left":
+        x = spec.x - box_width
+    else:
+        x = spec.x
+    if clamp:
+        x = min(max(x, min_x), max_x - box_width)
+    elif x < min_x or x + box_width > max_x:
+        return None
+    return (x, y, x + box_width, y + box_height)
+
+
+def _elevation_label_row_height(draw: ImageDraw.ImageDraw, *, scale: int) -> int:
+    _, box_height = _map_label_size(draw, "Korkein kohta 999 m", font=_font(10 * scale, bold=True), scale=scale)
+    return box_height + 8 * scale
+
+
+def _used_elevation_label_rows(
+    labels: tuple[ElevationMarkerLabel, ...],
+    top: int,
+    draw: ImageDraw.ImageDraw,
+    *,
+    scale: int,
+) -> int:
+    if not labels:
+        return 0
+    row_height = _elevation_label_row_height(draw, scale=scale)
+    return min(ELEVATION_LABEL_ROWS, max(1, max(math.floor((label.box[1] - top) / row_height) + 1 for label in labels)))
+
+
+def _boxes_overlap(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    *,
+    padding: float = 0.0,
+) -> bool:
+    return not (
+        first[2] + padding <= second[0]
+        or second[2] + padding <= first[0]
+        or first[3] + padding <= second[1]
+        or second[3] + padding <= first[1]
+    )
+
+
+def _elevation_point_at_distance(
+    profile,
+    distance_km: float,
+    points: list[tuple[float, float]],
+) -> tuple[float, float, float] | None:
+    samples = profile.samples
+    if not samples:
+        return None
+    if distance_km <= samples[0].distance_km:
+        return points[0][0], points[0][1], samples[0].elevation_m
+    if distance_km >= samples[-1].distance_km:
+        return points[-1][0], points[-1][1], samples[-1].elevation_m
+    for index, (left_sample, right_sample) in enumerate(zip(samples, samples[1:], strict=False)):
+        if left_sample.distance_km <= distance_km <= right_sample.distance_km:
+            span = max(right_sample.distance_km - left_sample.distance_km, 0.000001)
+            ratio = (distance_km - left_sample.distance_km) / span
+            left_point = points[index]
+            right_point = points[index + 1]
+            x = left_point[0] + (right_point[0] - left_point[0]) * ratio
+            y = left_point[1] + (right_point[1] - left_point[1]) * ratio
+            elevation_m = left_sample.elevation_m + (right_sample.elevation_m - left_sample.elevation_m) * ratio
+            return x, y, elevation_m
+    return None
+
+
+def _padded_elevation_domain(min_value: float, max_value: float) -> tuple[float, float]:
+    span = max(max_value - min_value, 1.0)
+    padding = max(3.0, span * 0.12)
+    return min_value - padding, max_value + padding
+
+
+def _draw_grade_scale(draw: ImageDraw.ImageDraw, profile, left: int, top: int, *, scale: int) -> None:
+    font = _font(12 * scale)
+    left, top, right, _ = _grade_scale_box(left, top, scale=scale)
+    width = right - left
+    height = 12 * scale
+    for offset in range(width):
+        ratio = offset / max(width - 1, 1)
+        grade = -0.15 + ratio * 0.30
+        draw.line((left + offset, top, left + offset, top + height), fill=_grade_color(grade) + (255,), width=1)
+    draw.rectangle((left, top, left + width, top + height), outline=(255, 255, 255, 90), width=max(1, scale))
+    label_y = top + height + 4 * scale
+    _draw_text(draw, left, label_y, _format_grade(profile.min_grade), (226, 232, 240), font)
+    _draw_text_center(draw, left + width // 2, label_y, "0%", (226, 232, 240), font)
+    _draw_text_right(draw, left + width, label_y, _format_grade(profile.max_grade), (226, 232, 240), font)
+
+
+def _grade_scale_box(left: int, top: int, *, scale: int) -> tuple[int, int, int, int]:
+    return (left, top, left + 285 * scale, top + 34 * scale)
+
+
+def _draw_elevation_distance_axis(
+    draw: ImageDraw.ImageDraw,
+    distance_max: float,
+    left: int,
+    right: int,
+    y: int,
+    *,
+    scale: int,
+) -> None:
+    if distance_max <= 0:
+        return
+    tick_step = _distance_tick_step(distance_max)
+    ticks: list[float] = [0.0]
+    value = tick_step
+    while value < distance_max - 0.001:
+        ticks.append(value)
+        value += tick_step
+    if not math.isclose(ticks[-1], distance_max):
+        ticks.append(distance_max)
+    axis_color = (226, 232, 240)
+    muted = (203, 213, 225)
+    font = _font(10 * scale)
+    draw.line((left, y, right, y), fill=axis_color + (150,), width=max(1, scale))
+    for tick in ticks:
+        x = _scale_float(tick, (0.0, distance_max), left, right)
+        draw.line((x, y, x, y + 5 * scale), fill=axis_color + (170,), width=max(1, scale))
+        label = f"{tick:.0f} km" if math.isclose(tick, distance_max) else f"{tick:.0f}"
+        if math.isclose(tick, 0.0):
+            _draw_text(draw, round(x), y + 7 * scale, label, muted, font)
+        elif math.isclose(tick, distance_max):
+            _draw_text_right(draw, round(x), y + 7 * scale, label, muted, font)
+        else:
+            _draw_text_center(draw, round(x), y + 7 * scale, label, muted, font)
+
+
+def _distance_tick_step(distance_km: float) -> float:
+    if distance_km <= 5:
+        return 1.0
+    if distance_km <= 15:
+        return 2.0
+    if distance_km <= 40:
+        return 5.0
+    if distance_km <= 100:
+        return 10.0
+    return 20.0
+
+
+def _format_grade(grade: float) -> str:
+    value = round(grade * 100)
+    return f"{value:+d}%"
+
+
+def _grade_color(grade: float) -> tuple[int, int, int]:
+    percent = grade * 100
+    stops = (
+        (-15.0, (126, 34, 206)),
+        (-12.0, (126, 34, 206)),
+        (-6.0, (37, 99, 235)),
+        (-1.0, (22, 163, 74)),
+        (2.0, (203, 213, 225)),
+        (6.0, (250, 204, 21)),
+        (10.0, (249, 115, 22)),
+        (15.0, (220, 38, 38)),
+    )
+    if percent <= stops[0][0]:
+        return stops[0][1]
+    for (left_value, left_color), (right_value, right_color) in zip(stops, stops[1:], strict=False):
+        if percent <= right_value:
+            ratio = (percent - left_value) / max(right_value - left_value, 0.000001)
+            return _lerp_color(left_color, right_color, max(0.0, min(1.0, ratio)))
+    return stops[-1][1]
+
+
 def _draw_attribution(draw: ImageDraw.ImageDraw, width: int, height: int, attribution: str, *, scale: int) -> None:
     font = _font(10 * scale)
     text_width = min(260 * scale, max(160 * scale, _text_size(draw, attribution, font)[0]))
@@ -1010,10 +2120,104 @@ def _dark_panel(draw: ImageDraw.ImageDraw, bbox: tuple[int, int, int, int]) -> N
 
 def _draw_marker(draw: ImageDraw.ImageDraw, point: tuple[float, float], color: tuple[int, int, int], *, scale: int) -> None:
     x, y = point
-    radius = 5 * scale
+    radius = ROUTE_MARKER_RADIUS * scale
     draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(255, 255, 255, 230), outline=color + (255,), width=2 * scale)
-    inner = 2 * scale
+    inner = 3 * scale
     draw.ellipse((x - inner, y - inner, x + inner, y + inner), fill=color + (255,))
+
+
+def _draw_waypoint_marker(
+    draw: ImageDraw.ImageDraw,
+    point: tuple[float, float],
+    waypoint_type: str,
+    color: tuple[int, int, int],
+    *,
+    scale: int,
+) -> None:
+    x, y = point
+    icon_color = _waypoint_color(waypoint_type) or color
+    radius = ROUTE_MARKER_RADIUS * scale
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(255, 255, 255, 242), outline=icon_color + (255,), width=2 * scale)
+    icon_font = _waypoint_icon_font(8 * scale)
+    icon = _waypoint_icon_text(waypoint_type)
+    if icon_font is not None:
+        text_width, text_height = _text_size(draw, icon, icon_font)
+        _draw_text(draw, round(x - text_width / 2), round(y - text_height / 2), icon, icon_color, icon_font)
+        return
+    fallback = _waypoint_fallback_icon(waypoint_type)
+    font = _font(8 * scale, bold=True)
+    text_width, text_height = _text_size(draw, fallback, font)
+    _draw_text(draw, round(x - text_width / 2), round(y - text_height / 2), fallback, icon_color, font)
+
+
+def _waypoint_icon_text(waypoint_type: str) -> str:
+    normalized = _waypoint_type_key(waypoint_type)
+    return {
+        "info": "\uf129",
+        "checkpoint": "\uf11e",
+        "summit": "\uf6fc",
+        "water": "\uf773",
+        "food": "\uf2e7",
+    }.get(normalized, "\uf3c5")
+
+
+def _waypoint_fallback_icon(waypoint_type: str) -> str:
+    normalized = _waypoint_type_key(waypoint_type)
+    return {
+        "info": "i",
+        "checkpoint": "C",
+        "summit": "^",
+        "water": "W",
+        "food": "F",
+    }.get(normalized, "*")
+
+
+def _waypoint_color(waypoint_type: str) -> tuple[int, int, int]:
+    normalized = _waypoint_type_key(waypoint_type)
+    return {
+        "info": (37, 99, 235),
+        "checkpoint": (22, 163, 74),
+        "summit": (124, 58, 237),
+        "water": (8, 145, 178),
+        "food": (249, 115, 22),
+    }.get(normalized, (124, 58, 237))
+
+
+def _waypoint_type_key(waypoint_type: str) -> str:
+    text = waypoint_type.strip().lower().replace("-", "_").replace(" ", "_")
+    if text in {"information", "info_point"}:
+        return "info"
+    if text in {"check_point", "control", "control_point"}:
+        return "checkpoint"
+    return text
+
+
+@lru_cache(maxsize=16)
+def _waypoint_icon_font(size: int) -> ImageFont.FreeTypeFont | None:
+    path = _fontawesome_solid_path()
+    if path is None:
+        return None
+    try:
+        return ImageFont.truetype(path, size=max(8, size))
+    except OSError:
+        return None
+
+
+@lru_cache(maxsize=1)
+def _fontawesome_solid_path() -> str | None:
+    try:
+        root = resources.files("fontawesomefree")
+    except ModuleNotFoundError:
+        return None
+    candidates = (
+        root / "static" / "fontawesomefree" / "webfonts" / "fa-solid-900.ttf",
+        root / "webfonts" / "fa-solid-900.ttf",
+        root / "fa-solid-900.ttf",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _scale_float(value: float, domain: tuple[float, float], low_px: int, high_px: int) -> float:
@@ -1040,6 +2244,72 @@ def _draw_text_center(draw: ImageDraw.ImageDraw, center_x: int, y: int, text: st
 def _draw_text_right(draw: ImageDraw.ImageDraw, right_x: int, y: int, text: str, color: tuple[int, int, int], font: ImageFont.ImageFont) -> None:
     width, _ = _text_size(draw, text, font)
     draw.text((right_x - width, y), text, fill=color, font=font)
+
+
+def _draw_map_label(
+    draw: ImageDraw.ImageDraw,
+    anchor_x: float,
+    anchor_y: float,
+    text: str,
+    *,
+    side: str,
+    bounds: tuple[float, float, float, float],
+    scale: int,
+    border_color: tuple[int, int, int] = (148, 163, 184),
+    gap: int | None = None,
+    font: ImageFont.ImageFont | None = None,
+) -> tuple[float, float, float, float]:
+    label_font = font or _font(10 * scale, bold=True)
+    gap = 7 * scale if gap is None else gap
+    box_width, box_height = _map_label_size(draw, text, font=label_font, scale=scale)
+    min_x, min_y, max_x, max_y = bounds
+    if side == "left":
+        label_x = anchor_x - gap - box_width
+    elif side == "center":
+        label_x = anchor_x - box_width / 2
+    else:
+        label_x = anchor_x + gap
+    label_y = anchor_y - gap - box_height
+    label_x = min(max(label_x, min_x), max_x - box_width)
+    label_y = min(max(label_y, min_y), max_y - box_height)
+    return _draw_map_label_box(draw, label_x, label_y, text, scale=scale, border_color=border_color, font=label_font)
+
+
+def _draw_map_label_box(
+    draw: ImageDraw.ImageDraw,
+    label_x: float,
+    label_y: float,
+    text: str,
+    *,
+    scale: int,
+    border_color: tuple[int, int, int] = (148, 163, 184),
+    fill_color: tuple[int, int, int, int] = (255, 255, 255, 232),
+    text_color: tuple[int, int, int] = TEXT,
+    font: ImageFont.ImageFont | None = None,
+) -> tuple[float, float, float, float]:
+    label_font = font or _font(10 * scale, bold=True)
+    box_width, box_height = _map_label_size(draw, text, font=label_font, scale=scale)
+    bbox = (label_x, label_y, label_x + box_width, label_y + box_height)
+    draw.rounded_rectangle(bbox, radius=4 * scale, fill=fill_color, outline=border_color + (230,), width=max(1, scale))
+    padding_x, padding_y = _map_label_padding(scale)
+    _draw_text(draw, int(label_x + padding_x), int(label_y + padding_y), text, text_color, label_font)
+    return bbox
+
+
+def _map_label_size(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font: ImageFont.ImageFont,
+    scale: int,
+) -> tuple[int, int]:
+    padding_x, padding_y = _map_label_padding(scale)
+    text_width, text_height = _text_size(draw, text, font)
+    return text_width + 2 * padding_x, text_height + 2 * padding_y
+
+
+def _map_label_padding(scale: int) -> tuple[int, int]:
+    return 7 * scale, 4 * scale
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:

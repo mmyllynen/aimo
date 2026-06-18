@@ -50,6 +50,7 @@ class GpxIngestRequest:
     created_at: datetime
     max_size_bytes: int
     make_active: bool = True
+    title_override: str = ""
     raw_storage_root: Path | None = None
 
 
@@ -75,6 +76,7 @@ def ingest_gpx(request: GpxIngestRequest, repositories: RepositoryBundle) -> Gpx
         )
         if duplicate_workout is None:
             return _create_workout_for_attachment(request, repositories, duplicate_attachment.attachment_id)
+        duplicate_workout = _refresh_duplicate_workout(request, repositories, duplicate_workout)
         return GpxIngestResult(
             status="duplicate",
             workout=duplicate_workout,
@@ -150,6 +152,43 @@ def _replace_streams(repositories: RepositoryBundle, workout_id: str, parsed: Pa
     )
 
 
+def _refresh_duplicate_workout(
+    request: GpxIngestRequest,
+    repositories: RepositoryBundle,
+    duplicate_workout: WorkoutRecord,
+) -> WorkoutRecord:
+    try:
+        parsed = parse_gpx(request.content, fallback_title=request.filename)
+    except GpxParseError as exc:
+        raise InvalidGpxError(str(exc)) from exc
+    refreshed = WorkoutRecord(
+        workout_id=duplicate_workout.workout_id,
+        owner_user_id=duplicate_workout.owner_user_id,
+        source_attachment_id=duplicate_workout.source_attachment_id,
+        guild_id=duplicate_workout.guild_id,
+        channel_id=duplicate_workout.channel_id,
+        title=duplicate_workout.title,
+        kind=parsed.kind,
+        primary_kind=parsed.primary_kind,
+        start_time_utc=parsed.start_time_utc,
+        start_time_local=parsed.start_time_local,
+        local_date=parsed.local_date,
+        distance_km=parsed.distance_km,
+        duration_s=parsed.duration_s,
+        pace_s_per_km=parsed.pace_s_per_km,
+        ascent_m=parsed.ascent_m,
+        avg_hr_bpm=parsed.avg_hr_bpm,
+        max_hr_bpm=parsed.max_hr_bpm,
+        point_count=len(parsed.points),
+        created_at=duplicate_workout.created_at,
+        schema_version=duplicate_workout.schema_version,
+        metadata=parsed.metadata,
+    )
+    repositories.workouts.update_derived_fields(refreshed)
+    _replace_streams(repositories, refreshed.workout_id, parsed)
+    return refreshed
+
+
 def is_supported_gpx_attachment(filename: str, content_type: str) -> bool:
     normalized_type = content_type.strip().lower()
     return filename.lower().endswith(".gpx") or normalized_type in GPX_CONTENT_TYPES
@@ -179,7 +218,7 @@ def _workout_record(
         source_attachment_id=source_attachment_id,
         guild_id=request.guild_id,
         channel_id=request.channel_id,
-        title=parsed.title,
+        title=request.title_override or parsed.title,
         kind=parsed.kind,
         primary_kind=parsed.primary_kind,
         start_time_utc=parsed.start_time_utc,

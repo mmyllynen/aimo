@@ -70,17 +70,6 @@ class MapsConfig:
 
 
 @dataclass(frozen=True)
-class RenderersConfig:
-    default: str = "pillow"
-    line: str = ""
-    multi_panel_line: str = ""
-    bar: str = ""
-    pie: str = ""
-    route: str = ""
-    social_image: str = ""
-
-
-@dataclass(frozen=True)
 class AppConfig:
     bot: BotConfig = field(default_factory=BotConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
@@ -91,7 +80,6 @@ class AppConfig:
     history: HistoryConfig = field(default_factory=HistoryConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
     maps: MapsConfig = field(default_factory=MapsConfig)
-    renderers: RenderersConfig = field(default_factory=RenderersConfig)
 
 
 def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = False) -> AppConfig:
@@ -146,15 +134,6 @@ def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = F
             maptiler_map_id=_get(parser, "maps", "maptiler_map_id", fallback="streets-v4") or "streets-v4",
             timeout_s=_getfloat(parser, "maps", "timeout_s", fallback=10.0),
         ),
-        renderers=RenderersConfig(
-            default=_get(parser, "renderers", "default", fallback="pillow") or "pillow",
-            line=_get(parser, "renderers", "line", fallback="") or "",
-            multi_panel_line=_get(parser, "renderers", "multi_panel_line", fallback="") or "",
-            bar=_get(parser, "renderers", "bar", fallback="") or "",
-            pie=_get(parser, "renderers", "pie", fallback="") or "",
-            route=_get(parser, "renderers", "route", fallback="") or "",
-            social_image=_get(parser, "renderers", "social_image", fallback="") or "",
-        ),
     )
     validate_config(config, require_secrets=require_secrets)
     return config
@@ -173,7 +152,6 @@ def validate_config(config: AppConfig, *, require_secrets: bool = False) -> None
         raise ConfigError("maps.provider must be osm or maptiler")
     if config.maps.timeout_s <= 0:
         raise ConfigError("maps.timeout_s must be positive")
-    _validate_renderers(config.renderers)
     _validate_discord_ids("discord.allowed_guild_ids", config.discord.allowed_guild_ids)
     _validate_discord_ids("discord.allowed_channel_ids", config.discord.allowed_channel_ids)
     if not str(config.storage.database_path):
@@ -224,19 +202,3 @@ def _validate_discord_ids(name: str, values: frozenset[str]) -> None:
     invalid = sorted(value for value in values if not value.isdecimal())
     if invalid:
         raise ConfigError(f"{name} must contain numeric Discord ids")
-
-
-def _validate_renderers(config: RenderersConfig) -> None:
-    allowed = {"internal", "pillow"}
-    if config.default not in allowed:
-        raise ConfigError("renderers.default must be internal or pillow")
-    for name, value in (
-        ("line", config.line),
-        ("multi_panel_line", config.multi_panel_line),
-        ("bar", config.bar),
-        ("pie", config.pie),
-        ("route", config.route),
-        ("social_image", config.social_image),
-    ):
-        if value and value not in allowed:
-            raise ConfigError(f"renderers.{name} must be internal, pillow, or empty")

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from core.config import MapsConfig, RenderersConfig
+from core.config import MapsConfig
 from core.events import CanonicalEvent
 from core.errors import AppError, ErrorCategory
 from core.i18n import LocalizedText, SupportedLanguage, TranslationKey
@@ -31,6 +31,7 @@ from visualization.service import (
     visualization_validation_context,
 )
 from visualization.datasets import resolve_datasets, dataset_request_from_metrics
+from workout.gpx import GpxParseError, parse_gpx
 from workout.periods import PeriodBounds, PeriodRequestError, local_now, resolve_period_bounds
 from llm.operations import PeriodRequest
 from workout.references import (
@@ -66,6 +67,11 @@ VISUALIZATION_MODIFIER_METRICS = {
     "maksimisyke": "max_hr_bpm",
 }
 ROUTE_COLOR_METRICS = frozenset({"heart_rate_bpm", "elevation_m", "pace_s_per_km"})
+SOCIAL_ROUTE_COLOR_MODIFIER_METRICS = {
+    modifier: metric
+    for modifier, metric in VISUALIZATION_MODIFIER_METRICS.items()
+    if metric in ROUTE_COLOR_METRICS
+}
 SOCIAL_STAT_MODIFIER_METRICS = {
     **VISUALIZATION_MODIFIER_METRICS,
     "hr": "avg_hr_bpm",
@@ -80,6 +86,54 @@ VISUALIZATION_ASPECT_SIZES = {
     "square": (1080, 1080),
 }
 SOCIAL_OUTPUT_MODIFIERS = frozenset({"social", "somekuva"})
+SOCIAL_STYLE_PRESETS = frozenset({"classic", "minimal", "poster", "routeonly", "data", "photo"})
+WAYPOINT_HIDE_MODIFIERS = frozenset({"waypoints", "reittimerkit"})
+ELEVATION_OVERLAY_HIDE_MODIFIERS = frozenset({"elevation", "korkeus"})
+SOCIAL_STYLE_ENUMS = {
+    "crop": frozenset({"center", "top", "bottom", "left", "right"}),
+    "filter": frozenset({"none", "warm", "cool", "bw", "vivid", "matte"}),
+    "route_size": frozenset({"small", "normal", "large", "huge"}),
+    "title": frozenset({"top", "bottom", "hide"}),
+    "title_align": frozenset({"left", "center"}),
+    "stats": frozenset({"left", "right", "bottom", "hide"}),
+    "panel": frozenset({"dark", "light", "none"}),
+    "font": frozenset({"clean", "bold", "mono", "serif"}),
+    "route_pos": frozenset({"center", "top", "bottom", "left", "right"}),
+    "stats_style": frozenset({"compact", "large", "stacked"}),
+}
+SOCIAL_STYLE_BOOLEAN_KEYS = frozenset({"route_shadow", "markers"})
+SOCIAL_STYLE_INTEGER_RANGES = {
+    "dim": (0, 70),
+    "blur": (0, 20),
+}
+SOCIAL_STYLE_COLOR_KEYS = frozenset({"route", "text", "accent"})
+SOCIAL_STYLE_COLOR_NAMES = frozenset({"default", "auto", "blue", "white", "black", "red", "green", "yellow"})
+SOCIAL_STYLE_ALIASES = {
+    "background_crop": "crop",
+    "background_dim": "dim",
+    "darken": "dim",
+    "tummennus": "dim",
+    "filtteri": "filter",
+    "suodatin": "filter",
+    "reitti": "route",
+    "route_color": "route",
+    "reitin_vari": "route",
+    "reitin_väri": "route",
+    "route_width": "route_size",
+    "reitin_koko": "route_size",
+    "shadow": "route_shadow",
+    "varjo": "route_shadow",
+    "markerit": "markers",
+    "otsikko": "title",
+    "title_position": "title",
+    "stats_position": "stats",
+    "data": "stats",
+    "paneeli": "panel",
+    "teksti": "text",
+    "koroste": "accent",
+    "sumennus": "blur",
+    "route_position": "route_pos",
+}
 
 
 @dataclass(frozen=True)
@@ -108,7 +162,6 @@ class VisualizationWorkflow:
         language: SupportedLanguage,
         artifact_root: Path | None = None,
         maps_config: MapsConfig | None = None,
-        renderers_config: RenderersConfig | None = None,
     ) -> WorkflowResult:
         try:
             resolved = _resolve_request(event, route, repositories, gateway=gateway, language=language)
@@ -134,6 +187,7 @@ class VisualizationWorkflow:
                 "Ambiguous workout for visualization",
             )
 
+        resolved = _backfill_waypoints_from_raw_gpx(resolved, repositories)
         points = _points_for_resolved_scope(resolved, repositories)
         heart_rate_zones = repositories.heart_rate_zones.list_for_user(event.user_id)
         try:
@@ -145,7 +199,6 @@ class VisualizationWorkflow:
                 gateway=gateway,
                 tile_cache_root=_tile_cache_root(artifact_root),
                 maps_config=maps_config,
-                renderers_config=renderers_config,
                 language=language,
             )
         except MissingHeartRateZonesError:
@@ -262,7 +315,7 @@ def _resolve_request(
     language: SupportedLanguage = SupportedLanguage.FI,
 ) -> ResolvedVisualizationRequest | str | None:
     previous_visualization = _previous_visualization_context(event, repositories)
-    intent = _intent(event, route, gateway, previous_visualization=previous_visualization)
+    intent = _intent(event, route, repositories, gateway, previous_visualization=previous_visualization)
     period = _resolve_period_scope(event, intent, repositories, previous_visualization=previous_visualization, language=language)
     if period == "no_match":
         return None
@@ -294,7 +347,6 @@ def _render_with_optional_revision(
     gateway: LLMGateway | None,
     tile_cache_root: Path | None = None,
     maps_config: MapsConfig | None = None,
-    renderers_config: RenderersConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
 ) -> tuple[VisualizationArtifact, VisualizationIntent]:
     _validate_zone_prerequisite(resolved.intent, heart_rate_zones)
@@ -310,7 +362,6 @@ def _render_with_optional_revision(
                     manifest=manifest,
                     tile_cache_root=tile_cache_root,
                     maps_config=maps_config,
-                    renderers_config=renderers_config,
                     language=language,
                 ),
                 resolved.intent,
@@ -357,7 +408,6 @@ def _render_with_optional_revision(
                     manifest=revised_manifest,
                     tile_cache_root=tile_cache_root,
                     maps_config=maps_config,
-                    renderers_config=renderers_config,
                     language=language,
                 ),
                 revised_intent,
@@ -372,7 +422,6 @@ def _render_with_optional_revision(
                 comparison_workouts=resolved.comparison_workouts,
                 tile_cache_root=tile_cache_root,
                 maps_config=maps_config,
-                renderers_config=renderers_config,
                 language=language,
                 social_background_image=_social_background_image(event),
             ),
@@ -411,7 +460,6 @@ def _render_with_optional_revision(
                 comparison_workouts=resolved.comparison_workouts,
                 tile_cache_root=tile_cache_root,
                 maps_config=maps_config,
-                renderers_config=renderers_config,
                 language=language,
                 social_background_image=_social_background_image(event),
             ),
@@ -592,6 +640,58 @@ def _points_for_resolved_scope(
     return tuple(points)
 
 
+def _backfill_waypoints_from_raw_gpx(
+    resolved: ResolvedVisualizationRequest,
+    repositories: RepositoryBundle,
+) -> ResolvedVisualizationRequest:
+    if resolved.scope_type != "single_workout":
+        return resolved
+    workout = _workout_with_backfilled_waypoints(resolved.workout, repositories)
+    if workout == resolved.workout:
+        return resolved
+    return replace(
+        resolved,
+        workout=workout,
+        workouts=tuple(workout if item.workout_id == workout.workout_id else item for item in resolved.workouts),
+    )
+
+
+def _workout_with_backfilled_waypoints(workout: WorkoutRecord, repositories: RepositoryBundle) -> WorkoutRecord:
+    if _metadata_int(workout.metadata.get("waypoint_count")) <= 0 or not _needs_waypoint_backfill(workout.metadata.get("waypoints")):
+        return workout
+    if not workout.source_attachment_id:
+        return workout
+    attachment = repositories.attachments.get(workout.source_attachment_id)
+    if attachment is None or not attachment.raw_path:
+        return workout
+    raw_path = Path(attachment.raw_path)
+    if not raw_path.exists() or not raw_path.is_file():
+        return workout
+    try:
+        parsed = parse_gpx(raw_path.read_bytes(), fallback_title=attachment.filename)
+    except (GpxParseError, OSError):
+        return workout
+    waypoints = parsed.metadata.get("waypoints")
+    if not isinstance(waypoints, list) or not waypoints:
+        return workout
+    updated = replace(workout, metadata={**workout.metadata, "waypoints": waypoints})
+    repositories.workouts.update_derived_fields(updated)
+    return updated
+
+
+def _needs_waypoint_backfill(value: object) -> bool:
+    if not isinstance(value, list) or not value:
+        return True
+    return any(isinstance(item, dict) and not any(item.get(key) for key in ("comment", "description", "type", "symbol")) for item in value)
+
+
+def _metadata_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _period_manifest(
     resolved: ResolvedVisualizationRequest,
     points: tuple[WorkoutPointRecord, ...],
@@ -616,6 +716,7 @@ def _period_manifest(
 def _intent(
     event: CanonicalEvent,
     route: RouteDecision,
+    repositories: RepositoryBundle,
     gateway: LLMGateway | None,
     *,
     previous_visualization: dict[str, object] | None = None,
@@ -632,6 +733,7 @@ def _intent(
                     "route_confidence": route.confidence.value,
                     "route_reason": route.reason,
                     "has_previous_visualization": previous_visualization is not None,
+                    "active_workout": _active_workout_context(event, repositories),
                 },
                 previous_visualization=previous_visualization,
             ),
@@ -642,19 +744,41 @@ def _intent(
 
 def _apply_visualization_modifiers(intent: VisualizationIntent, text: str) -> VisualizationIntent:
     modifiers = _visualization_modifiers(text)
-    if not modifiers:
+    negative_modifiers = _visualization_negative_modifiers(text)
+    social_style = _social_style_from_text(
+        text,
+        modifiers,
+        base=intent.social_style,
+        enabled=intent.output_mode == "social_image",
+    )
+    if any(modifier in WAYPOINT_HIDE_MODIFIERS for modifier in negative_modifiers):
+        social_style["waypoints"] = False
+    if any(modifier in ELEVATION_OVERLAY_HIDE_MODIFIERS for modifier in negative_modifiers):
+        social_style["elevation_overlay"] = False
+    if not modifiers and social_style == intent.social_style:
         return intent
     output_mode = "social_image" if any(modifier in SOCIAL_OUTPUT_MODIFIERS for modifier in modifiers) else intent.output_mode
     metric_map = SOCIAL_STAT_MODIFIER_METRICS if output_mode == "social_image" else VISUALIZATION_MODIFIER_METRICS
     extra_metrics = tuple(metric_map[modifier] for modifier in modifiers if modifier in metric_map)
     render_size = next((VISUALIZATION_ASPECT_SIZES[modifier] for modifier in modifiers if modifier in VISUALIZATION_ASPECT_SIZES), None)
+    if any(modifier in SOCIAL_STYLE_PRESETS for modifier in modifiers):
+        output_mode = "social_image"
     if output_mode != intent.output_mode:
         extra_metrics = tuple(dict.fromkeys(("route", *extra_metrics)))
-    if not extra_metrics and render_size is None and output_mode == intent.output_mode:
+    if not extra_metrics and render_size is None and output_mode == intent.output_mode and social_style == intent.social_style:
         return intent
     route_color_metric = intent.route_color_metric
     ignored_route_metrics: tuple[str, ...] = ()
-    if intent.chart_kind == "map" and "route" in intent.y_metrics and output_mode != "social_image":
+    if output_mode == "social_image" and "route" in tuple(dict.fromkeys((*intent.y_metrics, *extra_metrics))):
+        route_metrics = tuple(
+            SOCIAL_ROUTE_COLOR_MODIFIER_METRICS[modifier]
+            for modifier in modifiers
+            if modifier in SOCIAL_ROUTE_COLOR_MODIFIER_METRICS
+        )
+        if route_metrics:
+            route_color_metric = route_metrics[0]
+            ignored_route_metrics = route_metrics[1:]
+    elif intent.chart_kind == "map" and "route" in intent.y_metrics:
         route_metrics = tuple(metric for metric in extra_metrics if metric in ROUTE_COLOR_METRICS)
         if route_metrics:
             route_color_metric = route_metrics[0]
@@ -676,6 +800,7 @@ def _apply_visualization_modifiers(intent: VisualizationIntent, text: str) -> Vi
         render_width=render_size[0] if render_size is not None else intent.render_width,
         render_height=render_size[1] if render_size is not None else intent.render_height,
         output_mode=output_mode,
+        social_style=social_style,
     )
 
 
@@ -687,6 +812,123 @@ def _social_route_error_key(intent: VisualizationIntent, exc: MissingPrimaryMetr
 
 def _visualization_modifiers(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(match.group(1).lower().replace("-", "_") for match in re.finditer(r"(?<!\w)\+([\w-]+)", text)))
+
+
+def _visualization_negative_modifiers(text: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(match.group(1).lower().replace("-", "_") for match in re.finditer(r"(?<!\w)-([\w-]+)", text)))
+
+
+def _social_style_from_text(
+    text: str,
+    modifiers: tuple[str, ...],
+    *,
+    base: dict[str, object],
+    enabled: bool = False,
+) -> dict[str, object]:
+    style = _normalize_social_style(base)
+    for modifier in modifiers:
+        if modifier in SOCIAL_STYLE_PRESETS:
+            style["preset"] = modifier
+    style.update(_parse_social_style_block(text))
+    if enabled or any(modifier in SOCIAL_OUTPUT_MODIFIERS or modifier in SOCIAL_STYLE_PRESETS for modifier in modifiers) or style:
+        style.update(_parse_inline_social_style_tokens(text))
+    return style
+
+
+def _parse_social_style_block(text: str) -> dict[str, object]:
+    style: dict[str, object] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith("tyyli:"):
+            style.update(_parse_social_style_tokens(stripped.split(":", 1)[1]))
+        elif lowered.startswith("style:"):
+            style.update(_parse_social_style_tokens(stripped.split(":", 1)[1]))
+    return style
+
+
+def _parse_inline_social_style_tokens(text: str) -> dict[str, object]:
+    lines = [
+        line
+        for line in text.splitlines()
+        if not line.strip().lower().startswith(("tyyli:", "style:"))
+    ]
+    return _parse_social_style_tokens(" ".join(lines))
+
+
+def _parse_social_style_tokens(value: str) -> dict[str, object]:
+    parsed: dict[str, object] = {}
+    for token in re.split(r"[\s;]+", value.strip()):
+        if not token or "=" not in token:
+            continue
+        raw_key, raw_value = token.split("=", 1)
+        key = SOCIAL_STYLE_ALIASES.get(raw_key.strip().lower().replace("-", "_"), raw_key.strip().lower().replace("-", "_"))
+        normalized = _normalize_social_style_value(key, raw_value.strip())
+        if normalized is not None:
+            parsed[key] = normalized
+    return parsed
+
+
+def _normalize_social_style(style: dict[str, object]) -> dict[str, object]:
+    normalized: dict[str, object] = {}
+    for raw_key, raw_value in style.items():
+        key = SOCIAL_STYLE_ALIASES.get(str(raw_key).strip().lower().replace("-", "_"), str(raw_key).strip().lower().replace("-", "_"))
+        value = _normalize_social_style_value(key, raw_value)
+        if value is not None:
+            normalized[key] = value
+    return normalized
+
+
+def _normalize_social_style_value(key: str, value: object) -> object | None:
+    if value in (None, ""):
+        return None
+    if key == "preset":
+        text = str(value).strip().lower().replace("-", "_")
+        return text if text in SOCIAL_STYLE_PRESETS else None
+    if key in SOCIAL_STYLE_ENUMS:
+        text = str(value).strip().lower().replace("-", "_")
+        if key == "crop" and _is_crop_point(text):
+            return text
+        return text if text in SOCIAL_STYLE_ENUMS[key] else None
+    if key in SOCIAL_STYLE_BOOLEAN_KEYS:
+        return _style_bool(value)
+    if key in SOCIAL_STYLE_INTEGER_RANGES:
+        integer = _style_int(value)
+        if integer is None:
+            return None
+        lower, upper = SOCIAL_STYLE_INTEGER_RANGES[key]
+        return max(lower, min(upper, integer))
+    if key in SOCIAL_STYLE_COLOR_KEYS:
+        text = str(value).strip().lower()
+        if text in SOCIAL_STYLE_COLOR_NAMES or re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+            return text
+    return None
+
+
+def _is_crop_point(value: str) -> bool:
+    match = re.fullmatch(r"(\d{1,3}),(\d{1,3})", value)
+    if match is None:
+        return False
+    x_value, y_value = int(match.group(1)), int(match.group(2))
+    return 0 <= x_value <= 100 and 0 <= y_value <= 100
+
+
+def _style_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "kylla", "kyllä"}:
+        return True
+    if text in {"0", "false", "no", "off", "ei"}:
+        return False
+    return None
+
+
+def _style_int(value: object) -> int | None:
+    try:
+        return int(str(value).strip().removesuffix("%"))
+    except ValueError:
+        return None
 
 
 def _structured_intent(event: CanonicalEvent) -> VisualizationIntent | None:
@@ -711,6 +953,7 @@ def _structured_intent(event: CanonicalEvent) -> VisualizationIntent | None:
         chart_kind=str(options.get("chart_kind") or "auto"),
         context_update={"set_current_workout": bool(options.get("set_current_workout", False))},
         output_mode=str(options.get("output_mode") or "chart"),
+        social_style=options.get("social_style") if isinstance(options.get("social_style"), dict) else {},
     )
 
 
@@ -755,6 +998,22 @@ def _previous_visualization_context(
     }
 
 
+def _active_workout_context(event: CanonicalEvent, repositories: RepositoryBundle) -> dict[str, object]:
+    workout = repositories.active_workouts.get(event.user_id)
+    if workout is None:
+        return {}
+    points = repositories.workout_streams.list_points(workout.workout_id)
+    return {
+        "workout_id": workout.workout_id,
+        "title": workout.title,
+        "kind": workout.kind,
+        "primary_kind": workout.primary_kind,
+        "distance_km": workout.distance_km,
+        "local_date": workout.local_date,
+        "has_route_points": any(point.latitude is not None and point.longitude is not None for point in points),
+    }
+
+
 def _intent_payload(intent: VisualizationIntent) -> dict[str, object]:
     return {
         "workout_selector": intent.workout_selector,
@@ -771,6 +1030,7 @@ def _intent_payload(intent: VisualizationIntent) -> dict[str, object]:
         "render_width": intent.render_width,
         "render_height": intent.render_height,
         "output_mode": intent.output_mode,
+        "social_style": intent.social_style,
     }
 
 
@@ -832,7 +1092,7 @@ def _resolve_workout(
     repositories: RepositoryBundle,
 ) -> WorkoutReferenceResolution:
     selector = intent.workout_selector
-    resolved = resolve_workout_selector(repositories, event.user_id, selector, default="latest")
+    resolved = resolve_workout_selector(repositories, event.user_id, selector, default="active")
     return resolved
 
 
