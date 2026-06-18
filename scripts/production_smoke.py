@@ -64,7 +64,7 @@ def _check_command_registration() -> None:
     tree = FakeCommandTree()
     asyncio.run(register_command_specs(tree, guild=SimpleNamespace(id="guild-1")))
     names = {spec.name for spec, _guild in tree.specs}
-    required = {"aimo", "treenit", "debug"}
+    required = {"aimo", "gpx", "help", "treenit", "asetukset", "debug"}
     if not tree.synced or not required.issubset(names):
         raise SmokeError("slash command registration did not include required commands")
 

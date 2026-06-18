@@ -43,6 +43,18 @@ class ParsedGpxStream:
 
 
 @dataclass(frozen=True)
+class ParsedGpxWaypoint:
+    latitude: float
+    longitude: float
+    name: str = ""
+    comment: str = ""
+    description: str = ""
+    waypoint_type: str = ""
+    symbol: str = ""
+    elevation_m: float | None = None
+
+
+@dataclass(frozen=True)
 class ParsedGpxWorkout:
     title: str
     kind: str
@@ -58,6 +70,7 @@ class ParsedGpxWorkout:
     max_hr_bpm: float | None
     points: tuple[ParsedGpxPoint, ...]
     streams: tuple[ParsedGpxStream, ...]
+    waypoints: tuple[ParsedGpxWaypoint, ...] = ()
     metadata: dict[str, object] = field(default_factory=dict)
 
 
@@ -75,7 +88,9 @@ def parse_gpx(content: bytes, *, fallback_title: str = "Workout") -> ParsedGpxWo
     track_points = _collect_points(root, container_name="trkseg", point_name="trkpt")
     route_points = _collect_points(root, container_name="rte", point_name="rtept")
     waypoint_points = _collect_points(root, container_name="gpx", point_name="wpt")
-    raw_points = track_points + route_points + waypoint_points
+    waypoints = _derive_waypoints(waypoint_points)
+    geometry_points = track_points + route_points
+    raw_points = geometry_points if geometry_points else waypoint_points
     if not raw_points:
         raise GpxParseError("GPX contains no usable points")
 
@@ -127,10 +142,12 @@ def parse_gpx(content: bytes, *, fallback_title: str = "Workout") -> ParsedGpxWo
         max_hr_bpm=max(heart_rates) if heart_rates else None,
         points=points,
         streams=streams,
+        waypoints=waypoints,
         metadata={
             "track_point_count": len(track_points),
             "route_point_count": len(route_points),
             "waypoint_count": len(waypoint_points),
+            "waypoints": [_waypoint_metadata(waypoint) for waypoint in waypoints],
         },
     )
 
@@ -159,6 +176,11 @@ def _raw_point(element: ElementTree.Element, *, segment_index: int) -> dict[str,
         "segment_index": segment_index,
         "latitude": _float(element.attrib.get("lat")),
         "longitude": _float(element.attrib.get("lon")),
+        "name": _child_text(element, "name"),
+        "comment": _child_text(element, "cmt"),
+        "description": _child_text(element, "desc"),
+        "waypoint_type": _child_text(element, "type"),
+        "symbol": _child_text(element, "sym"),
         "elevation_m": _float(_child_text(element, "ele")),
         "timestamp_utc": _format_time(_parse_time(_child_text(element, "time"))),
         "heart_rate_bpm": _extension_number(element, {"hr", "heartrate"}),
@@ -205,6 +227,48 @@ def _derive_points(raw_points: list[dict[str, object]]) -> tuple[ParsedGpxPoint,
         previous_raw = raw
         previous_time = timestamp
     return tuple(points)
+
+
+def _derive_waypoints(raw_points: list[dict[str, object]]) -> tuple[ParsedGpxWaypoint, ...]:
+    waypoints: list[ParsedGpxWaypoint] = []
+    for raw in raw_points:
+        latitude = _as_float(raw.get("latitude"))
+        longitude = _as_float(raw.get("longitude"))
+        if latitude is None or longitude is None:
+            continue
+        waypoints.append(
+            ParsedGpxWaypoint(
+                latitude=latitude,
+                longitude=longitude,
+                name=str(raw.get("name") or "").strip(),
+                comment=str(raw.get("comment") or "").strip(),
+                description=str(raw.get("description") or "").strip(),
+                waypoint_type=str(raw.get("waypoint_type") or "").strip(),
+                symbol=str(raw.get("symbol") or "").strip(),
+                elevation_m=_as_float(raw.get("elevation_m")),
+            )
+        )
+    return tuple(waypoints)
+
+
+def _waypoint_metadata(waypoint: ParsedGpxWaypoint) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "latitude": waypoint.latitude,
+        "longitude": waypoint.longitude,
+    }
+    if waypoint.name:
+        payload["name"] = waypoint.name
+    if waypoint.comment:
+        payload["comment"] = waypoint.comment
+    if waypoint.description:
+        payload["description"] = waypoint.description
+    if waypoint.waypoint_type:
+        payload["type"] = waypoint.waypoint_type
+    if waypoint.symbol:
+        payload["symbol"] = waypoint.symbol
+    if waypoint.elevation_m is not None:
+        payload["elevation_m"] = waypoint.elevation_m
+    return payload
 
 
 def _first_text(root: ElementTree.Element, paths: tuple[str, ...]) -> str:
@@ -290,8 +354,10 @@ def _ascent(points: tuple[ParsedGpxPoint, ...]) -> float | None:
 def _classify(*, has_activity: bool, has_track: bool, has_route: bool) -> tuple[str, str]:
     if has_activity and has_route:
         return "hybrid", "hybrid"
-    if has_activity or has_track:
+    if has_activity:
         return "activity", "activity"
+    if has_track or has_route:
+        return "route_plan", "route"
     return "route_plan", "route"
 
 

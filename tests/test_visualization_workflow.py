@@ -12,12 +12,12 @@ from core.routing import WorkflowTarget
 from core.workflows import OutgoingKind, WorkflowStatus
 from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
 from llm.operations import VisualizationIntent
-from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
+from storage.repositories import AttachmentRecord, HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
 from storage.unit_of_work import UnitOfWork, open_database
 import visualization.service as visualization_service
 from visualization.render import DEFAULT_RENDER_HEIGHT, DEFAULT_RENDER_WIDTH, _decode_png_rgb, _png
 from visualization.tiles import TileFetchResult, TileImage
-from workflows.visualization import _apply_visualization_modifiers, _period_title, _visualization_modifiers
+from workflows.visualization import _apply_visualization_modifiers, _period_title, _visualization_modifiers, _visualization_negative_modifiers
 from workout.periods import PeriodBounds
 
 
@@ -58,6 +58,17 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(updated.x_metric, intent.x_metric)
         self.assertEqual(updated.chart_kind, intent.chart_kind)
         self.assertEqual((updated.render_width, updated.render_height), (1080, 1920))
+
+    def test_visualization_negative_modifiers_can_hide_waypoints(self) -> None:
+        intent = _visualization_intent(("route",), x_metric="longitude", chart_kind="map")
+
+        updated = _apply_visualization_modifiers(intent, "näytä reitti kartalla -waypoints -reittimerkit -elevation -korkeus +hr")
+
+        self.assertEqual(_visualization_negative_modifiers("näytä reitti -waypoints ja -reittimerkit -elevation -korkeus"), ("waypoints", "reittimerkit", "elevation", "korkeus"))
+        self.assertEqual(_visualization_modifiers("näytä reitti -waypoints +hr"), ("hr",))
+        self.assertEqual(updated.social_style["waypoints"], False)
+        self.assertEqual(updated.social_style["elevation_overlay"], False)
+        self.assertEqual(updated.route_color_metric, "heart_rate_bpm")
 
     def test_visualization_aspect_modifiers_use_first_known_size(self) -> None:
         intent = _visualization_intent(("heart_rate_bpm",))
@@ -117,6 +128,86 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertGreater(len(result.messages[0].content), 1000)
         self.assertEqual(result.messages[0].localized_text.key, TranslationKey.VISUALIZATION_CREATED)
         self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("heart_rate_bpm",))
+
+    def test_route_map_backfills_waypoints_from_raw_gpx_for_old_uploads(self) -> None:
+        gpx = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="aimo-test" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><name>Route</name></metadata>
+  <wpt lat="60.175" lon="24.945"><name>Info</name><cmt>Aid station</cmt><type>INFO</type></wpt>
+  <trk><trkseg>
+    <trkpt lat="60.170" lon="24.940" />
+    <trkpt lat="60.180" lon="24.950" />
+  </trkseg></trk>
+</gpx>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_path = Path(tmpdir) / "route.gpx"
+            raw_path.write_bytes(gpx)
+            with UnitOfWork(self.connection) as repositories:
+                repositories.users.touch(user_id="user-1", seen_at="2026-06-13T09:00:00Z")
+                repositories.attachments.add(
+                    AttachmentRecord(
+                        attachment_id="attachment-1",
+                        owner_user_id="user-1",
+                        guild_id="guild-1",
+                        channel_id="channel-1",
+                        message_id="message-1",
+                        filename="route.gpx",
+                        content_type="application/gpx+xml",
+                        size_bytes=len(gpx),
+                        sha256="sha",
+                        raw_path=str(raw_path),
+                        created_at="2026-06-18T05:00:00Z",
+                    )
+                )
+                workout = WorkoutRecord(
+                    workout_id="route-1",
+                    owner_user_id="user-1",
+                    source_attachment_id="attachment-1",
+                    guild_id="guild-1",
+                    channel_id="channel-1",
+                    title="Route",
+                    kind="route_plan",
+                    primary_kind="route",
+                    start_time_utc=None,
+                    start_time_local=None,
+                    local_date=None,
+                    distance_km=1.0,
+                    duration_s=None,
+                    pace_s_per_km=None,
+                    ascent_m=None,
+                    avg_hr_bpm=None,
+                    max_hr_bpm=None,
+                    point_count=2,
+                    created_at="2026-06-18T05:00:00Z",
+                    metadata={"track_point_count": 2, "route_point_count": 0, "waypoint_count": 1},
+                )
+                repositories.workouts.add(workout)
+                repositories.workout_streams.replace_for_workout(
+                    workout.workout_id,
+                    points=(
+                        WorkoutPointRecord(workout_id="route-1", point_index=0, latitude=60.170, longitude=24.940),
+                        WorkoutPointRecord(workout_id="route-1", point_index=1, latitude=60.180, longitude=24.950),
+                    ),
+                    streams=(),
+                )
+                repositories.active_workouts.set(user_id="user-1", workout_id="route-1", updated_at="2026-06-18T05:00:00Z")
+            client = _visualization_client(_intent(("route",), x_metric="route", chart_kind="map", workout_selector={"type": "active"}))
+
+            result = self.dispatcher.dispatch(
+                _mention("event-route-waypoints", "näytä reitti kartalla"),
+                DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+            )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["waypoint_count"], 1)
+        self.assertEqual(result.messages[0].metadata["waypoints_rendered"], 1)
+        self.assertEqual(result.messages[0].metadata["waypoint_status"], "rendered")
+        with UnitOfWork(self.connection) as repositories:
+            refreshed = repositories.workouts.get_for_user("user-1", "route-1")
+        self.assertEqual(refreshed.metadata["waypoints"][0]["name"], "Info")
+        self.assertEqual(refreshed.metadata["waypoints"][0]["comment"], "Aid station")
+        self.assertEqual(refreshed.metadata["waypoints"][0]["type"], "INFO")
 
     def test_latest_workout_social_image_defaults_to_square_map_background(self) -> None:
         self._seed_workout(with_heart_rate=True, with_location=True)
@@ -462,6 +553,43 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertTrue(result.messages[0].content.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("route",))
         self.assertEqual(_decode_png_rgb(result.messages[0].content)[:2], (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT))
+
+    def test_ambiguous_route_map_request_uses_active_route_context(self) -> None:
+        self._seed_latest_activity_and_active_route()
+        client = _visualization_client(
+            _intent(
+                ("route",),
+                x_metric="longitude",
+                chart_kind="map",
+                workout_selector={"type": "", "value": ""},
+            )
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "näytä reitti kartalla"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["workout_id"], "route-1")
+        self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("route",))
+        request = next(request for request in client.requests if request.operation == LLMOperation.VISUALIZATION_INTENT)
+        active = request.user_payload["compact_routing_context"]["active_workout"]
+        self.assertEqual(active["workout_id"], "route-1")
+        self.assertEqual(active["primary_kind"], "route")
+        self.assertTrue(active["has_route_points"])
+
+    def test_explicit_latest_route_map_still_uses_latest_by_start_time(self) -> None:
+        self._seed_latest_activity_and_active_route()
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map", workout_selector={"type": "latest"}))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "näytä viimeisin reitti kartalla"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].metadata["workout_id"], "activity-1")
 
     def test_route_map_modifier_colors_single_workout_route_by_heart_rate(self) -> None:
         self._seed_workout(with_heart_rate=True, with_location=True)
@@ -1033,6 +1161,68 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     ),
                 ),
                 streams=(),
+            )
+
+    def _seed_latest_activity_and_active_route(self) -> None:
+        with UnitOfWork(self.connection) as repositories:
+            repositories.users.touch(user_id="user-1", seen_at="2026-06-13T09:00:00Z")
+            activity = WorkoutRecord(
+                workout_id="activity-1",
+                owner_user_id="user-1",
+                source_attachment_id=None,
+                guild_id="guild-1",
+                channel_id="channel-1",
+                title="Sipoo Running",
+                kind="activity",
+                primary_kind="activity",
+                start_time_utc="2026-06-16T03:27:42Z",
+                start_time_local="2026-06-16T03:27:42Z",
+                local_date="2026-06-16",
+                distance_km=5.4,
+                duration_s=1800,
+                pace_s_per_km=333,
+                ascent_m=50,
+                avg_hr_bpm=130,
+                max_hr_bpm=150,
+                point_count=3,
+                created_at="2026-06-16T12:16:37Z",
+            )
+            route = WorkoutRecord(
+                workout_id="route-1",
+                owner_user_id="user-1",
+                source_attachment_id=None,
+                guild_id="guild-1",
+                channel_id="channel-1",
+                title="Juhannusreitti",
+                kind="route_plan",
+                primary_kind="route",
+                start_time_utc=None,
+                start_time_local=None,
+                local_date=None,
+                distance_km=23.9,
+                duration_s=None,
+                pace_s_per_km=None,
+                ascent_m=276,
+                avg_hr_bpm=None,
+                max_hr_bpm=None,
+                point_count=3,
+                created_at="2026-06-18T04:29:34Z",
+            )
+            for workout in (activity, route):
+                repositories.workouts.add(workout)
+                repositories.workout_streams.replace_for_workout(
+                    workout.workout_id,
+                    points=(
+                        WorkoutPointRecord(workout_id=workout.workout_id, point_index=0, latitude=60.17, longitude=24.94),
+                        WorkoutPointRecord(workout_id=workout.workout_id, point_index=1, latitude=60.18, longitude=24.95),
+                        WorkoutPointRecord(workout_id=workout.workout_id, point_index=2, latitude=60.19, longitude=24.96),
+                    ),
+                    streams=(),
+                )
+            repositories.active_workouts.set(
+                user_id="user-1",
+                workout_id=route.workout_id,
+                updated_at="2026-06-18T04:29:34Z",
             )
 
 

@@ -89,6 +89,12 @@ class IntentClassificationInput:
 
 
 @dataclass(frozen=True)
+class GpxTitleInput:
+    user_text: str
+    attachment_count: int
+
+
+@dataclass(frozen=True)
 class WorkoutReferenceInput:
     user_text: str
     candidate_workouts: tuple[JsonObject, ...] = ()
@@ -179,6 +185,11 @@ class WorkoutReply:
 
 
 @dataclass(frozen=True)
+class GpxTitle:
+    title: str
+
+
+@dataclass(frozen=True)
 class VisualizationIntentInput:
     user_text: str
     compact_routing_context: JsonObject = field(default_factory=dict)
@@ -211,6 +222,7 @@ class VisualizationIntent:
     render_width: int = 0
     render_height: int = 0
     output_mode: str = "chart"
+    social_style: JsonObject = field(default_factory=dict)
 
 
 def classify_intent(gateway: LLMGateway, data: IntentClassificationInput) -> RouteDecision:
@@ -249,6 +261,33 @@ def classify_intent(gateway: LLMGateway, data: IntentClassificationInput) -> Rou
     )
 
 
+def extract_gpx_title(gateway: LLMGateway, data: GpxTitleInput) -> GpxTitle:
+    payload = gateway.run(
+        LLMRequest(
+            operation=LLMOperation.GPX_TITLE_EXTRACTION,
+            system_prompt=(
+                "Extract an explicit user-requested title for a single uploaded GPX workout or route. "
+                "The upload may be described as a workout, activity, route, route plan, treeni, reitti, or reittisuunnitelma. "
+                "Return an empty title unless the user clearly asks to name the uploaded workout/route. "
+                "Finnish naming requests include 'anna sille nimeksi', 'nimeä se', and 'nimellä'. "
+                "English naming requests include 'name it', 'call it', and 'give it the name'. "
+                "Examples: "
+                "'tallenna tämä reittisuunnitelma ja nimeä se \"Juhannusreitti\"' -> title 'Juhannusreitti'; "
+                "'save this route and call it \"Midsummer route\"' -> title 'Midsummer route'. "
+                "Do not invent a title from date, filename, or activity type. "
+                "If the request refers to multiple attachments or multiple names, return an empty title."
+            ),
+            user_payload={
+                "user_text": data.user_text,
+                "attachment_count": data.attachment_count,
+            },
+            response_schema=_gpx_title_schema(),
+            max_tokens=200,
+        )
+    )
+    return GpxTitle(title=str(payload.get("title", "")))
+
+
 def _workflow_catalog() -> JsonObject:
     return {
         "visualization": {
@@ -273,6 +312,16 @@ def _workflow_catalog() -> JsonObject:
         },
         "chat": {
             "purpose": "General conversation only when no specialized workflow applies.",
+        },
+    }
+
+
+def _gpx_title_schema() -> JsonObject:
+    return {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+            "title": {"type": "string"},
         },
     }
 
@@ -440,6 +489,10 @@ def extract_visualization_intent(gateway: LLMGateway, data: VisualizationIntentI
                 "previous_visualization may be present for context. Use it only when the user refers to the previous, "
                 "same, or current chart, or asks to refine/change/add to it. In that case return a complete new intent "
                 "by reusing unchanged previous selector, metrics, transforms, chart_kind, and layout hints where appropriate. "
+                "compact_routing_context.active_workout may describe the current active workout or route without raw points. "
+                "When the user asks for 'the route', 'this route', Finnish 'reitti', or 'näytä reitti kartalla' without an "
+                "explicit different selector, prefer workout_selector type active. Use latest only for explicit latest/last/"
+                "viimeisin/uusin wording. "
                 "Use layout_mode auto by default. Use single_axis only when the user explicitly asks for the same y-axis, "
                 "same scale, or overlaid series. Finnish 'samaan kuvaajaan' means the same image, not necessarily one axis. "
                 "Use normalize_to_primary_range only for explicit scale/normalize/skaala requests, not merely for same image. "
@@ -447,7 +500,8 @@ def extract_visualization_intent(gateway: LLMGateway, data: VisualizationIntentI
                 "Set chart_kind to pie only when the user explicitly asks for a pie/piirakka chart. "
                 "Set chart_kind to map and requested_metrics to route only when the user explicitly asks for a route map, "
                 "route plot, or map background visualization. "
-                "Set output_mode to social_image for shareable/social workout images such as Finnish somekuva. "
+                "A normal map request such as 'näytä reitti kartalla' is output_mode chart, not social_image. "
+                "Set output_mode to social_image only for shareable/social/poster workout images such as Finnish somekuva. "
                 "For social_image, select exactly one workout, include route in requested_metrics, and include any explicitly "
                 "requested stat metrics such as distance_km, duration_s, avg_hr_bpm, or ascent_m. "
                 "For workout set or period requests, return a period selector such as current_month, last_week, "
@@ -510,6 +564,7 @@ def _visualization_intent_from_payload(payload: JsonObject) -> VisualizationInte
         render_width=int(payload.get("render_width") or 0),
         render_height=int(payload.get("render_height") or 0),
         output_mode=payload.get("output_mode", "chart"),
+        social_style=payload.get("social_style", {}) if isinstance(payload.get("social_style", {}), dict) else {},
     )
 
 

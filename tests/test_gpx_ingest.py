@@ -11,8 +11,8 @@ from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
 from core.i18n import TranslationKey
 from core.routing import WorkflowTarget
 from core.workflows import WorkflowStatus
-from llm.gateway import FakeLLMClient, LLMGateway
-from storage.repositories import AttachmentRecord
+from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
+from storage.repositories import AttachmentRecord, WorkoutRecord
 from storage.unit_of_work import UnitOfWork, open_database
 from workout.gpx import GpxParseError, parse_gpx
 
@@ -44,6 +44,21 @@ SAMPLE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
 </gpx>
 """
 
+COURSE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="aimo-test" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><name>Lohja 24km</name></metadata>
+  <wpt lat="61.000000" lon="25.000000"><name>Info</name><cmt>Course point</cmt><type>INFO</type></wpt>
+  <trk>
+    <name>Lohja 24km</name>
+    <trkseg>
+      <trkpt lat="60.000000" lon="24.000000"><ele>10</ele></trkpt>
+      <trkpt lat="60.010000" lon="24.000000"><ele>20</ele></trkpt>
+      <trkpt lat="60.020000" lon="24.000000"><ele>15</ele></trkpt>
+    </trkseg>
+  </trk>
+</gpx>
+"""
+
 
 class GpxParserTests(unittest.TestCase):
     def test_parse_gpx_derives_workout_summary_points_and_streams(self) -> None:
@@ -64,6 +79,22 @@ class GpxParserTests(unittest.TestCase):
         stream_keys = {stream.stream_key for stream in parsed.streams}
         self.assertIn("heart_rate", stream_keys)
         self.assertIn("distance", stream_keys)
+
+    def test_parse_gpx_track_without_activity_data_is_route_plan_and_excludes_waypoints_from_distance(self) -> None:
+        parsed = parse_gpx(COURSE_GPX, fallback_title="course.gpx")
+
+        self.assertEqual(parsed.kind, "route_plan")
+        self.assertEqual(parsed.primary_kind, "route")
+        self.assertIsNone(parsed.local_date)
+        self.assertIsNone(parsed.duration_s)
+        self.assertEqual(len(parsed.points), 3)
+        self.assertEqual(parsed.metadata["track_point_count"], 3)
+        self.assertEqual(parsed.metadata["waypoint_count"], 1)
+        self.assertEqual(parsed.metadata["waypoints"], [{"latitude": 61.0, "longitude": 25.0, "name": "Info", "comment": "Course point", "type": "INFO"}])
+        self.assertEqual(parsed.waypoints[0].name, "Info")
+        self.assertEqual(parsed.waypoints[0].comment, "Course point")
+        self.assertEqual(parsed.waypoints[0].waypoint_type, "INFO")
+        self.assertLess(parsed.distance_km or 0.0, 3.0)
 
     def test_parse_gpx_filters_small_elevation_noise_from_ascent(self) -> None:
         gpx = _gpx_with_elevations(
@@ -115,6 +146,19 @@ class GpxIngestWorkflowTests(unittest.TestCase):
         self.assertEqual(len(points), 3)
         self.assertIn("heart_rate", {stream.stream_key for stream in streams})
 
+    def test_route_plan_gpx_feedback_says_route(self) -> None:
+        event = _gpx_event("event-1", "attachment-1", COURSE_GPX)
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.GPX_ACCEPTED_ROUTE)
+        self.assertEqual(result.messages[0].localized_text.params["title"], "Lohja 24km")
+        with UnitOfWork(self.connection) as repositories:
+            workouts = repositories.workouts.list_for_user("user-1")
+
+        self.assertEqual(workouts[0].primary_kind, "route")
+
     def test_multiple_gpx_attachments_dispatch_ingests_each_workout(self) -> None:
         second_gpx = SAMPLE_GPX.replace(b"Morning Run", b"Evening Run").replace(
             b"2026-06-13T06:",
@@ -146,6 +190,143 @@ class GpxIngestWorkflowTests(unittest.TestCase):
         self.assertEqual(len(workouts), 2)
         self.assertEqual({workout.title for workout in workouts}, {"Morning Run", "Evening Run"})
         self.assertEqual(active.title, "Evening Run")
+
+    def test_single_mention_gpx_can_set_title_with_finnish_tarkenne(self) -> None:
+        event = _gpx_event(
+            "event-1",
+            "attachment-1",
+            SAMPLE_GPX,
+            text='tallenna tämä treeni nimi="Aamulenkki 18.6."',
+        )
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].localized_text.params["title"], "Aamulenkki 18.6.")
+        with UnitOfWork(self.connection) as repositories:
+            workouts = repositories.workouts.list_for_user("user-1")
+
+        self.assertEqual(workouts[0].title, "Aamulenkki 18.6.")
+
+    def test_single_mention_gpx_can_set_title_with_english_tarkenne(self) -> None:
+        event = _gpx_event(
+            "event-1",
+            "attachment-1",
+            SAMPLE_GPX,
+            text='save this workout name="Morning run 18.6."',
+        )
+
+        result = self.dispatcher.dispatch(event, DispatchContext(UnitOfWork(self.connection)))
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        with UnitOfWork(self.connection) as repositories:
+            workouts = repositories.workouts.list_for_user("user-1")
+
+        self.assertEqual(workouts[0].title, "Morning run 18.6.")
+
+    def test_single_mention_gpx_can_set_title_from_llm_when_no_tarkenne(self) -> None:
+        client = FakeLLMClient({LLMOperation.GPX_TITLE_EXTRACTION: {"title": "Aamulenkki 18.6."}})
+        event = _gpx_event(
+            "event-1",
+            "attachment-1",
+            SAMPLE_GPX,
+            text='tallenna tämä treeni ja anna sille nimeksi "Aamulenkki 18.6."',
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(client.requests[0].operation, LLMOperation.GPX_TITLE_EXTRACTION)
+        with UnitOfWork(self.connection) as repositories:
+            workouts = repositories.workouts.list_for_user("user-1")
+
+        self.assertEqual(workouts[0].title, "Aamulenkki 18.6.")
+
+    def test_single_mention_gpx_tarkenne_wins_over_llm_title(self) -> None:
+        client = FakeLLMClient({LLMOperation.GPX_TITLE_EXTRACTION: {"title": "Mallin nimi"}})
+        event = _gpx_event(
+            "event-1",
+            "attachment-1",
+            SAMPLE_GPX,
+            text='tallenna tämä nimi="Tarkenteen nimi"',
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(client.requests, [])
+        with UnitOfWork(self.connection) as repositories:
+            workouts = repositories.workouts.list_for_user("user-1")
+
+        self.assertEqual(workouts[0].title, "Tarkenteen nimi")
+
+    def test_multiple_gpx_attachments_ignore_title_tarkenne_and_llm_title(self) -> None:
+        second_gpx = SAMPLE_GPX.replace(b"Morning Run", b"Evening Run").replace(
+            b"2026-06-13T06:",
+            b"2026-06-14T18:",
+        )
+        client = FakeLLMClient({LLMOperation.GPX_TITLE_EXTRACTION: {"title": "Yhteinen nimi"}})
+        event = _gpx_event(
+            "event-1",
+            "attachment-1",
+            SAMPLE_GPX,
+            text='tallenna nämä nimi="Yhteinen nimi"',
+            extra_attachments=(
+                AttachmentRef(
+                    attachment_id="attachment-2",
+                    filename="evening-run.gpx",
+                    content_type="application/gpx+xml",
+                    size_bytes=len(second_gpx),
+                    metadata={"content": second_gpx},
+                ),
+            ),
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(client.requests, [])
+        with UnitOfWork(self.connection) as repositories:
+            workouts = repositories.workouts.list_for_user("user-1")
+
+        self.assertEqual({workout.title for workout in workouts}, {"Morning Run", "Evening Run"})
+
+    def test_slash_gpx_upload_uses_optional_title_without_llm(self) -> None:
+        client = FakeLLMClient({LLMOperation.GPX_TITLE_EXTRACTION: {"title": "Slash title"}})
+        event = _gpx_event(
+            "event-1",
+            "attachment-1",
+            SAMPLE_GPX,
+            text="/gpx tallenna",
+            kind=EventKind.SLASH_COMMAND,
+            source=EventSource.DISCORD_SLASH,
+            metadata={
+                "command_name": "gpx",
+                "subcommand": "tallenna",
+                "options": {"liite": "attachment-1", "nimi": "Slash title"},
+            },
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(client.requests, [])
+        with UnitOfWork(self.connection) as repositories:
+            workouts = repositories.workouts.list_for_user("user-1")
+
+        self.assertEqual(workouts[0].title, "Slash title")
 
     def test_gpx_ingest_writes_raw_file_when_storage_root_is_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -186,6 +367,68 @@ class GpxIngestWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(len(workouts), 1)
         self.assertIsNotNone(attachments)
+
+    def test_duplicate_gpx_refreshes_derived_route_fields_without_renaming(self) -> None:
+        sha256 = hashlib.sha256(COURSE_GPX).hexdigest()
+        with UnitOfWork(self.connection) as repositories:
+            repositories.users.touch(user_id="user-1")
+            repositories.attachments.add(
+                AttachmentRecord(
+                    attachment_id="old-course-attachment",
+                    owner_user_id="user-1",
+                    guild_id="guild-1",
+                    channel_id="channel-1",
+                    message_id="old-message",
+                    filename="COURSE_476622335.gpx",
+                    content_type="application/gpx+xml",
+                    size_bytes=len(COURSE_GPX),
+                    sha256=sha256,
+                    raw_path="raw/course.gpx",
+                    created_at="2026-06-13T07:00:00Z",
+                )
+            )
+            repositories.workouts.add(
+                WorkoutRecord(
+                    workout_id="workout-course",
+                    owner_user_id="user-1",
+                    source_attachment_id="old-course-attachment",
+                    guild_id="guild-1",
+                    channel_id="channel-1",
+                    title="Custom course title",
+                    kind="activity",
+                    primary_kind="activity",
+                    start_time_utc=None,
+                    start_time_local=None,
+                    local_date=None,
+                    distance_km=31.628,
+                    duration_s=None,
+                    pace_s_per_km=None,
+                    ascent_m=276,
+                    avg_hr_bpm=None,
+                    max_hr_bpm=None,
+                    point_count=4,
+                    created_at="2026-06-13T07:00:00Z",
+                    metadata={"track_point_count": 3, "waypoint_count": 1},
+                )
+            )
+
+        result = self.dispatcher.dispatch(
+            _gpx_event("event-1", "new-course-attachment", COURSE_GPX),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.GPX_DUPLICATE_ROUTE)
+        with UnitOfWork(self.connection) as repositories:
+            workout = repositories.workouts.get_for_user("user-1", "workout-course")
+            points = repositories.workout_streams.list_points("workout-course")
+
+        self.assertEqual(workout.title, "Custom course title")
+        self.assertEqual(workout.kind, "route_plan")
+        self.assertEqual(workout.primary_kind, "route")
+        self.assertLess(workout.distance_km or 0.0, 3.0)
+        self.assertEqual(workout.point_count, 3)
+        self.assertEqual(len(points), 3)
 
     def test_duplicate_attachment_without_workout_creates_missing_workout(self) -> None:
         sha256 = hashlib.sha256(SAMPLE_GPX).hexdigest()
@@ -268,17 +511,21 @@ def _gpx_event(
     attachment_id: str,
     content: bytes,
     *,
+    text: str = "tallenna treeni",
+    kind: EventKind = EventKind.MENTION,
+    source: EventSource = EventSource.DISCORD_MESSAGE,
     extra_attachments: tuple[AttachmentRef, ...] = (),
+    metadata: dict[str, object] | None = None,
 ) -> CanonicalEvent:
     return CanonicalEvent(
         event_id=event_id,
-        source=EventSource.DISCORD_MESSAGE,
-        kind=EventKind.MENTION,
+        source=source,
+        kind=kind,
         guild_id="guild-1",
         channel_id="channel-1",
         user_id="user-1",
         user_name="runner",
-        text="tallenna treeni",
+        text=text,
         attachments=(
             AttachmentRef(
                 attachment_id=attachment_id,
@@ -290,6 +537,7 @@ def _gpx_event(
             *extra_attachments,
         ),
         created_at=datetime(2026, 6, 13, 7, 0, tzinfo=timezone.utc),
+        metadata=metadata or {},
     )
 
 

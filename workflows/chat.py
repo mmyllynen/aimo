@@ -146,8 +146,9 @@ def _capability_facts() -> dict[str, object]:
                 "aktiivinen",
                 "aseta_aktiivinen",
                 "poista",
-                "sykerajat",
-                "aseta_sykerajat",
+                "nimea",
+                "tagaa",
+                "poista_tagi",
             ),
             "list_command": "/treenit listaa",
             "private_by_default": True,
@@ -156,8 +157,13 @@ def _capability_facts() -> dict[str, object]:
                 "Guide workout management requests to the slash command instead."
             ),
         },
+        "settings": {
+            "available_via": "/asetukset",
+            "actions": ("nayta", "sykerajat"),
+            "private_by_default": True,
+        },
         "gpx_ingest": {
-            "available_via": "Aimo mention with a .gpx attachment",
+            "available_via": "Aimo mention with a .gpx attachment or /gpx tallenna",
             "behavior": "Only GPX attachments are accepted as workout or route uploads.",
         },
         "debug": {

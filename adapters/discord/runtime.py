@@ -135,13 +135,30 @@ def _register_real_app_commands(command_tree: Any, app_context: ApplicationConte
     @app_commands.command(name="aimo", description=specs["aimo"].description)
     @app_commands.describe(
         syote="Tekstipyyntö Aimolle.",
-        liite="GPX-liite tallennettavaksi.",
     )
     async def aimo_command(
         interaction: DiscordInteraction,
         syote: str = "",
-        liite: DiscordAttachment | None = None,
     ) -> None:
+        await handle_interaction(interaction, app_context, discord_module=discord_module)
+
+    gpx_group = app_commands.Group(name="gpx", description=specs["gpx"].description)
+
+    @gpx_group.command(name="tallenna", description="Tallenna GPX-liite treeniksi.")
+    @app_commands.describe(
+        liite="GPX-liite tallennettavaksi.",
+        nimi="Treenille annettava nimi.",
+    )
+    async def gpx_tallenna_command(
+        interaction: DiscordInteraction,
+        liite: DiscordAttachment,
+        nimi: str = "",
+    ) -> None:
+        await handle_interaction(interaction, app_context, discord_module=discord_module)
+
+    @app_commands.command(name="help", description=specs["help"].description)
+    @app_commands.describe(aihe="Help-aihe: yleinen, komennot, visualisointi, somekuva tai privacy.")
+    async def help_command(interaction: DiscordInteraction, aihe: str = "") -> None:
         await handle_interaction(interaction, app_context, discord_module=discord_module)
 
     treenit_group = app_commands.Group(name="treenit", description=specs["treenit"].description)
@@ -169,13 +186,39 @@ def _register_real_app_commands(command_tree: Any, app_context: ApplicationConte
     async def treenit_poista_command(interaction: DiscordInteraction, viite: str = "") -> None:
         await handle_interaction(interaction, app_context, discord_module=discord_module)
 
-    @treenit_group.command(name="sykerajat", description="Näytä sykerajat.")
-    async def treenit_sykerajat_command(interaction: DiscordInteraction) -> None:
+    @treenit_group.command(name="nimea", description="Nimeä treeni uudelleen.")
+    @app_commands.describe(
+        viite="Treeni-id, listanumero, päivämäärä tai hakuteksti.",
+        nimi="Uusi treenin nimi.",
+    )
+    async def treenit_nimea_command(interaction: DiscordInteraction, nimi: str, viite: str = "") -> None:
         await handle_interaction(interaction, app_context, discord_module=discord_module)
 
-    @treenit_group.command(name="aseta_sykerajat", description="Aseta sykerajat.")
+    @treenit_group.command(name="tagaa", description="Lisää treenille tagi.")
+    @app_commands.describe(
+        viite="Treeni-id, listanumero, päivämäärä tai hakuteksti.",
+        tagi="Lisättävä tagi.",
+    )
+    async def treenit_tagaa_command(interaction: DiscordInteraction, tagi: str, viite: str = "") -> None:
+        await handle_interaction(interaction, app_context, discord_module=discord_module)
+
+    @treenit_group.command(name="poista_tagi", description="Poista treeniltä tagi.")
+    @app_commands.describe(
+        viite="Treeni-id, listanumero, päivämäärä tai hakuteksti.",
+        tagi="Poistettava tagi.",
+    )
+    async def treenit_poista_tagi_command(interaction: DiscordInteraction, tagi: str, viite: str = "") -> None:
+        await handle_interaction(interaction, app_context, discord_module=discord_module)
+
+    settings_group = app_commands.Group(name="asetukset", description=specs["asetukset"].description)
+
+    @settings_group.command(name="nayta", description="Näytä asetukset.")
+    async def asetukset_nayta_command(interaction: DiscordInteraction) -> None:
+        await handle_interaction(interaction, app_context, discord_module=discord_module)
+
+    @settings_group.command(name="sykerajat", description="Aseta sykerajat.")
     @app_commands.describe(zones="Maksimisyke tai viisi ylärajaa, esim. 190 tai 114,133,152,171,190.")
-    async def treenit_aseta_sykerajat_command(interaction: DiscordInteraction, zones: str = "") -> None:
+    async def asetukset_sykerajat_command(interaction: DiscordInteraction, zones: str) -> None:
         await handle_interaction(interaction, app_context, discord_module=discord_module)
 
     @app_commands.command(name="debug", description=specs["debug"].description)
@@ -183,11 +226,20 @@ def _register_real_app_commands(command_tree: Any, app_context: ApplicationConte
     async def debug_command(interaction: DiscordInteraction, tila: str = "") -> None:
         await handle_interaction(interaction, app_context, discord_module=discord_module)
 
-    _add_real_app_commands(command_tree, aimo_command, treenit_group, debug_command)
+    _add_real_app_commands(command_tree, aimo_command, gpx_group, help_command, treenit_group, settings_group, debug_command)
     guilds = _allowed_guild_objects(app_context.runtime.config.discord, discord_module=discord_module)
     if guilds:
         for guild in guilds:
-            _add_real_app_commands(command_tree, aimo_command, treenit_group, debug_command, guild=guild)
+            _add_real_app_commands(
+                command_tree,
+                aimo_command,
+                gpx_group,
+                help_command,
+                treenit_group,
+                settings_group,
+                debug_command,
+                guild=guild,
+            )
         return
 
 

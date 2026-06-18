@@ -311,11 +311,11 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         with UnitOfWork(self.connection) as repositories:
             self.assertIsNotNone(repositories.workouts.get_for_user("user-1", "workout-1"))
 
-    def test_treenit_sykerajat_update_and_list(self) -> None:
-        update = self._treenit_event(
+    def test_asetukset_sykerajat_update_and_show(self) -> None:
+        update = self._asetukset_event(
             "event-zones-update",
             "user-1",
-            "aseta_sykerajat",
+            "sykerajat",
             {
                 "zones": "114,133,152,171,190",
             },
@@ -323,23 +323,24 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
 
         update_result = self.dispatcher.dispatch(update, DispatchContext(UnitOfWork(self.connection)))
         list_result = self.dispatcher.dispatch(
-            self._treenit_event("event-zones-list", "user-1", "sykerajat"),
+            self._asetukset_event("event-zones-list", "user-1", "nayta"),
             DispatchContext(UnitOfWork(self.connection)),
         )
         text = _render_first(list_result)
 
         self.assertEqual(_render_first(update_result), "Päivitin sykerajat.")
+        self.assertIn("Asetuksesi:", text)
         self.assertIn("- pk1: -114 bpm", text)
         self.assertIn("- pk2: 115-133 bpm", text)
         self.assertIn("- vk1: 134-152 bpm", text)
         self.assertIn("- vk2: 153-171 bpm", text)
         self.assertIn("- mk: 172-190 bpm", text)
 
-    def test_treenit_sykerajat_calculates_limits_from_max_heart_rate(self) -> None:
-        update = self._treenit_event(
+    def test_asetukset_sykerajat_calculates_limits_from_max_heart_rate(self) -> None:
+        update = self._asetukset_event(
             "event-zones-update",
             "user-1",
-            "aseta_sykerajat",
+            "sykerajat",
             {
                 "zones": "190",
             },
@@ -347,7 +348,7 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
 
         update_result = self.dispatcher.dispatch(update, DispatchContext(UnitOfWork(self.connection)))
         list_result = self.dispatcher.dispatch(
-            self._treenit_event("event-zones-list", "user-1", "sykerajat"),
+            self._asetukset_event("event-zones-list", "user-1", "nayta"),
             DispatchContext(UnitOfWork(self.connection)),
         )
 
@@ -359,11 +360,11 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
         self.assertIn("- vk2: 153-171 bpm", text)
         self.assertIn("- mk: 172-190 bpm", text)
 
-    def test_treenit_sykerajat_invalid_limits_return_user_error(self) -> None:
-        event = self._treenit_event(
+    def test_asetukset_sykerajat_invalid_limits_return_user_error(self) -> None:
+        event = self._asetukset_event(
             "event-zones-invalid",
             "user-1",
-            "aseta_sykerajat",
+            "sykerajat",
             {"zones": "130,120"},
         )
 
@@ -375,6 +376,15 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
             "Sykerajojen muoto ei kelpaa. Anna maksimisyke tai viisi nousevaa ylärajaa, "
             "esim. 190 tai 114,133,152,171,190.",
         )
+
+    def test_asetukset_nayta_returns_empty_settings_summary(self) -> None:
+        result = self.dispatcher.dispatch(
+            self._asetukset_event("event-settings", "user-1", "nayta"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(_render_first(result), "Asetuksesi:\nSykerajat: ei asetettu.")
 
     def _treenit_event(
         self,
@@ -395,6 +405,26 @@ class WorkoutManagementWorkflowTests(unittest.TestCase):
                 subcommand=subcommand,
                 options=options or {},
                 created_at=created_at or datetime.now(timezone.utc),
+            )
+        )
+
+    def _asetukset_event(
+        self,
+        interaction_id: str,
+        user_id: str,
+        subcommand: str,
+        options: dict[str, object] | None = None,
+    ):
+        return slash_to_event(
+            DiscordSlashSnapshot(
+                interaction_id=interaction_id,
+                guild_id="guild-1",
+                channel_id="channel-1",
+                user=DiscordUserSnapshot(user_id=user_id, user_name=f"name-{user_id}"),
+                command_name="asetukset",
+                subcommand=subcommand,
+                options=options or {},
+                created_at=datetime.now(timezone.utc),
             )
         )
 

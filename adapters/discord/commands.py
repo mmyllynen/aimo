@@ -45,13 +45,27 @@ HEART_RATE_ZONES_OPTION = DiscordCommandOptionSpec(
     name="zones",
     description="Maksimisyke tai viisi ylärajaa, esim. 190 tai 114,133,152,171,190.",
     option_type=DiscordCommandOptionType.STRING,
+    required=True,
 )
 
-WORKOUT_TITLE_OPTION = DiscordCommandOptionSpec(
+GPX_ATTACHMENT_OPTION = DiscordCommandOptionSpec(
+    name="liite",
+    description="GPX-liite tallennettavaksi.",
+    option_type=DiscordCommandOptionType.ATTACHMENT,
+    required=True,
+)
+
+REQUIRED_WORKOUT_TITLE_OPTION = DiscordCommandOptionSpec(
     name="nimi",
     description="Uusi treenin nimi.",
     option_type=DiscordCommandOptionType.STRING,
     required=True,
+)
+
+OPTIONAL_WORKOUT_TITLE_OPTION = DiscordCommandOptionSpec(
+    name="nimi",
+    description="Treenille annettava nimi.",
+    option_type=DiscordCommandOptionType.STRING,
 )
 
 WORKOUT_TAG_OPTION = DiscordCommandOptionSpec(
@@ -61,23 +75,41 @@ WORKOUT_TAG_OPTION = DiscordCommandOptionSpec(
     required=True,
 )
 
+HELP_TOPIC_OPTION = DiscordCommandOptionSpec(
+    name="aihe",
+    description="Help-aihe: yleinen, komennot, visualisointi, somekuva tai privacy.",
+    option_type=DiscordCommandOptionType.STRING,
+    choices=("yleinen", "komennot", "visualisointi", "somekuva", "privacy"),
+)
+
 
 COMMAND_SPECS = (
     DiscordCommandSpec(
         name="aimo",
-        description="Aimo yleiskomento: apu, GPX-liite tai tekstipyyntö.",
+        description="Aimo-chat ja luonnollisen kielen pyynnöt.",
         options=(
             DiscordCommandOptionSpec(
                 name="syote",
                 description="Tekstipyyntö Aimolle.",
                 option_type=DiscordCommandOptionType.STRING,
             ),
-            DiscordCommandOptionSpec(
-                name="liite",
-                description="GPX-liite tallennettavaksi.",
-                option_type=DiscordCommandOptionType.ATTACHMENT,
+        ),
+    ),
+    DiscordCommandSpec(
+        name="gpx",
+        description="Tallenna GPX-liitteitä treeneiksi.",
+        subcommands=(
+            DiscordSubcommandSpec(
+                name="tallenna",
+                description="Tallenna GPX-liite treeniksi.",
+                options=(GPX_ATTACHMENT_OPTION, OPTIONAL_WORKOUT_TITLE_OPTION),
             ),
         ),
+    ),
+    DiscordCommandSpec(
+        name="help",
+        description="Näytä Aimon käyttö-, komento- tai tietosuojainfo.",
+        options=(HELP_TOPIC_OPTION,),
     ),
     DiscordCommandSpec(
         name="treenit",
@@ -95,7 +127,7 @@ COMMAND_SPECS = (
             DiscordSubcommandSpec(
                 name="nimea",
                 description="Nimeä treeni uudelleen.",
-                options=(WORKOUT_REFERENCE_OPTION, WORKOUT_TITLE_OPTION),
+                options=(WORKOUT_REFERENCE_OPTION, REQUIRED_WORKOUT_TITLE_OPTION),
             ),
             DiscordSubcommandSpec(
                 name="tagaa",
@@ -107,9 +139,15 @@ COMMAND_SPECS = (
                 description="Poista treeniltä tagi.",
                 options=(WORKOUT_REFERENCE_OPTION, WORKOUT_TAG_OPTION),
             ),
-            DiscordSubcommandSpec(name="sykerajat", description="Näytä sykerajat."),
+        ),
+    ),
+    DiscordCommandSpec(
+        name="asetukset",
+        description="Näytä ja muuta käyttäjäkohtaisia asetuksia.",
+        subcommands=(
+            DiscordSubcommandSpec(name="nayta", description="Näytä asetukset."),
             DiscordSubcommandSpec(
-                name="aseta_sykerajat",
+                name="sykerajat",
                 description="Aseta sykerajat.",
                 options=(HEART_RATE_ZONES_OPTION,),
             ),

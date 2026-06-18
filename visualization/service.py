@@ -35,11 +35,15 @@ from visualization.render import (
     PieSlice,
     RouteMap,
     RouteMapTile,
+    RouteElevationProfile,
+    RouteElevationSample,
     RoutePoint,
     RoutePolyline,
+    RouteWaypoint,
     RenderSeries,
     SocialImage,
     SocialImageStat,
+    SocialImageStyle,
     route_map_viewport,
 )
 from visualization.renderer import ChartType, resolve_renderer
@@ -330,9 +334,13 @@ def _render_social_image_visualization(
     language: SupportedLanguage = SupportedLanguage.FI,
     background_image: bytes | None = None,
 ) -> VisualizationArtifact:
-    routes = _route_polylines(points, workouts_by_id={workout.workout_id: workout})
+    route_color_metric = intent.route_color_metric if _is_route_color_metric_supported(intent.route_color_metric) else ""
+    routes = _route_polylines(points, workouts_by_id={workout.workout_id: workout}, route_color_metric=route_color_metric)
     if not routes:
         raise MissingPrimaryMetricError("route")
+    color_status = _route_color_status(routes, route_color_metric=route_color_metric)
+    active_color_metric = route_color_metric if color_status == "ok" else ""
+    color_domain = _route_color_domain(routes, active_color_metric) if active_color_metric else None
     render_size = _social_render_size(intent)
     requested_attachment_background = background_image is not None
     if background_image is not None and not _is_decodable_image(background_image):
@@ -370,6 +378,9 @@ def _render_social_image_visualization(
             stats=_social_stats(workout, intent, language=language),
             background_image=background_image,
             map_background=map_background,
+            style=_social_image_style(intent),
+            color_domain=color_domain,
+            color_direction=metric_direction(active_color_metric) if active_color_metric else "ascending",
             width=render_size[0],
             height=render_size[1],
         )
@@ -384,6 +395,10 @@ def _render_social_image_visualization(
         "social_background_requested": "attachment" if requested_attachment_background else "map",
         "social_background_status": "ok" if background_image is not None or not requested_attachment_background else "invalid_image_fallback_to_map",
         "social_layout_version": "2",
+        "social_style": intent.social_style,
+        "social_route_color_metric": active_color_metric,
+        "social_route_color_status": color_status,
+        "social_route_color_domain": color_domain or (),
     }
     if tile_data is not None:
         metadata.update(tile_data["metadata"])
@@ -396,6 +411,89 @@ def _render_social_image_visualization(
         scaled_metrics=(),
         metadata=metadata,
     )
+
+
+def _social_image_style(intent: VisualizationIntent) -> SocialImageStyle:
+    style = _social_style_preset(str(intent.social_style.get("preset", "") or ""))
+    overrides = {key: value for key, value in intent.social_style.items() if key != "preset"}
+    if not overrides:
+        return style
+    return SocialImageStyle(
+        preset=style.preset,
+        background_crop=str(overrides.get("crop", style.background_crop)),
+        background_dim=int(overrides.get("dim", style.background_dim)),
+        background_filter=str(overrides.get("filter", style.background_filter)),
+        route_color=str(overrides.get("route", style.route_color)),
+        route_size=str(overrides.get("route_size", style.route_size)),
+        route_shadow=bool(overrides.get("route_shadow", style.route_shadow)),
+        route_markers=bool(overrides.get("markers", style.route_markers)),
+        title_position=str(overrides.get("title", style.title_position)),
+        title_align=str(overrides.get("title_align", style.title_align)),
+        stats_position=str(overrides.get("stats", style.stats_position)),
+        panel_style=str(overrides.get("panel", style.panel_style)),
+        text_color=str(overrides.get("text", style.text_color)),
+        accent_color=str(overrides.get("accent", style.accent_color)),
+        font=str(overrides.get("font", style.font)),
+        background_blur=int(overrides.get("blur", style.background_blur)),
+        route_position=str(overrides.get("route_pos", style.route_position)),
+        stats_style=str(overrides.get("stats_style", style.stats_style)),
+    )
+
+
+def _social_style_preset(value: str) -> SocialImageStyle:
+    preset = value.strip().lower().replace("-", "_")
+    if preset == "minimal":
+        return SocialImageStyle(
+            preset="minimal",
+            background_dim=24,
+            route_size="normal",
+            route_shadow=False,
+            title_position="bottom",
+            stats_position="hide",
+            panel_style="none",
+            text_color="auto",
+        )
+    if preset == "poster":
+        return SocialImageStyle(
+            preset="poster",
+            background_dim=42,
+            background_filter="vivid",
+            route_color="white",
+            route_size="huge",
+            title_position="bottom",
+            stats_position="right",
+            panel_style="dark",
+            font="bold",
+        )
+    if preset == "routeonly":
+        return SocialImageStyle(
+            preset="routeonly",
+            title_position="hide",
+            stats_position="hide",
+            panel_style="none",
+            route_color="white",
+            route_size="large",
+        )
+    if preset == "data":
+        return SocialImageStyle(
+            preset="data",
+            background_dim=36,
+            route_size="normal",
+            title_position="top",
+            stats_position="right",
+            panel_style="dark",
+            stats_style="stacked",
+        )
+    if preset == "photo":
+        return SocialImageStyle(
+            preset="photo",
+            background_dim=18,
+            route_color="white",
+            route_size="normal",
+            panel_style="none",
+            stats_position="bottom",
+        )
+    return SocialImageStyle(preset="classic" if preset == "classic" else "")
 
 
 def _is_decodable_image(content: bytes) -> bool:
@@ -428,10 +526,17 @@ def _render_route_map_visualization(
     color_status = _route_color_status(routes, route_color_metric=route_color_metric)
     active_color_metric = route_color_metric if color_status == "ok" else ""
     color_domain = _route_color_domain(routes, active_color_metric) if active_color_metric else None
+    waypoint_count = len(_route_waypoints_from_metadata(workout))
+    waypoints = _route_waypoints(workout, routes) if _show_waypoints(intent) and len(routes) == 1 else ()
+    waypoint_status = _waypoint_status(waypoint_count, waypoints, routes, intent)
+    elevation_profile = _route_elevation_profile(points, routes, intent)
+    elevation_status = _elevation_overlay_status(elevation_profile, routes, intent)
     chart = RouteMap(
         title=workout.title,
         subtitle=_route_chart_subtitle(workout, language=language),
         routes=routes,
+        waypoints=waypoints,
+        elevation_profile=elevation_profile,
         legend_title=_route_legend_title(routes, language=language),
         color_metric_label=_route_color_metric_label(active_color_metric, language=language) if active_color_metric else "",
         color_domain=color_domain,
@@ -440,7 +545,15 @@ def _render_route_map_visualization(
         width=render_size[0],
         height=render_size[1],
     )
-    tile_data = _route_tiles(routes, tile_cache_root, maps_config=maps_config, width=chart.width, height=chart.height)
+    tile_data = _route_tiles(
+        routes,
+        tile_cache_root,
+        maps_config=maps_config,
+        width=chart.width,
+        height=chart.height,
+        waypoints=waypoints,
+        safe_rect=_route_map_safe_rect(chart.width, chart.height, elevation_profile),
+    )
     renderer = resolve_renderer(renderers_config, "route")
     rendered = renderer.render_route_map_png(
         RouteMap(
@@ -452,6 +565,8 @@ def _render_route_map_visualization(
             color_tick_format=chart.color_tick_format,
             color_direction=chart.color_direction,
             routes=routes,
+            waypoints=waypoints,
+            elevation_profile=elevation_profile,
             tiles=tile_data["tiles"],
             tile_zoom=tile_data["tile_zoom"],
             tile_size=tile_data["tile_size"],
@@ -481,6 +596,12 @@ def _render_route_map_visualization(
             "route_color_domain": color_domain or (),
             "route_color_tick_format": chart.color_tick_format,
             "route_color_direction": chart.color_direction,
+            "waypoint_count": waypoint_count,
+            "waypoints_rendered": len(waypoints),
+            "waypoint_status": waypoint_status,
+            "elevation_overlay_status": elevation_status,
+            "elevation_overlay_min_m": _elevation_min(elevation_profile),
+            "elevation_overlay_max_m": _elevation_max(elevation_profile),
         },
     )
 
@@ -489,13 +610,14 @@ def _route_tiles(
     routes: tuple[RoutePolyline, ...],
     tile_cache_root: Path | None,
     *,
+    waypoints: tuple[RouteWaypoint, ...] = (),
     maps_config: MapsConfig | None = None,
     width: int = DEFAULT_RENDER_WIDTH,
     height: int = DEFAULT_RENDER_HEIGHT,
     margin_ratio: float = 0.06,
     safe_rect: tuple[int, int, int, int] | None = None,
 ) -> dict[str, Any]:
-    viewport = route_map_viewport(routes, width=width, height=height, margin_ratio=margin_ratio, safe_rect=safe_rect)
+    viewport = route_map_viewport(routes, waypoints=waypoints, width=width, height=height, margin_ratio=margin_ratio, safe_rect=safe_rect)
     base_payload = {
         "x_domain": viewport.x_domain,
         "y_domain": viewport.y_domain,
@@ -522,6 +644,18 @@ def _route_tiles(
         "attribution": "",
         "metadata": {"map_background": "plain", "tile_status": "no_tile_provider"},
     }
+
+
+def _route_map_safe_rect(
+    width: int,
+    height: int,
+    elevation_profile: RouteElevationProfile | None,
+) -> tuple[int, int, int, int] | None:
+    if elevation_profile is None:
+        return None
+    overlay_height = 220
+    overlay_bottom_margin = 14
+    return 48, 156, width - 48, max(156 + 64, height - overlay_height - overlay_bottom_margin - 24)
 
 
 @dataclass(frozen=True)
@@ -664,6 +798,260 @@ def _route_polylines(
                 )
             )
     return tuple(routes)
+
+
+def _show_waypoints(intent: VisualizationIntent) -> bool:
+    return intent.social_style.get("waypoints") is not False
+
+
+def _show_elevation_overlay(intent: VisualizationIntent) -> bool:
+    return intent.social_style.get("elevation_overlay") is not False
+
+
+def _route_waypoints(workout: WorkoutRecord, routes: tuple[RoutePolyline, ...]) -> tuple[RouteWaypoint, ...]:
+    if len(routes) != 1:
+        return ()
+    metadata_waypoints = _route_waypoints_from_metadata(workout)
+    distances = _waypoint_distances_from_start(metadata_waypoints, routes[0])
+    waypoints = tuple(
+        RouteWaypoint(
+            latitude=waypoint.latitude,
+            longitude=waypoint.longitude,
+            label=waypoint.label,
+            waypoint_type=waypoint.waypoint_type,
+            distance_km=distance_km,
+        )
+        for waypoint, distance_km in zip(metadata_waypoints, distances, strict=True)
+    )
+    return tuple(sorted(waypoints, key=lambda waypoint: waypoint.distance_km if waypoint.distance_km is not None else float("inf")))
+
+
+def _route_elevation_profile(
+    points: tuple[WorkoutPointRecord, ...],
+    routes: tuple[RoutePolyline, ...],
+    intent: VisualizationIntent,
+) -> RouteElevationProfile | None:
+    if not _show_elevation_overlay(intent) or len(routes) != 1:
+        return None
+    route_id = _single_route_id(points)
+    route_points = tuple(
+        point
+        for point in points
+        if point.workout_id == route_id and point.latitude is not None and point.longitude is not None and point.elevation_m is not None
+    )
+    if len(route_points) < 3:
+        return None
+    distances = _route_distances_km(route_points)
+    raw_elevations = tuple(float(point.elevation_m) for point in route_points)
+    elevations = _smoothed_elevations(distances, raw_elevations)
+    grades = _smoothed_grades(distances, elevations)
+    samples = tuple(
+        RouteElevationSample(distance_km=distance, elevation_m=elevation, grade=grade)
+        for distance, elevation, grade in zip(distances, elevations, grades, strict=True)
+    )
+    min_index = min(range(len(samples)), key=lambda index: samples[index].elevation_m)
+    max_index = max(range(len(samples)), key=lambda index: samples[index].elevation_m)
+    if abs(samples[max_index].elevation_m - samples[min_index].elevation_m) < 1.0:
+        return None
+    return RouteElevationProfile(
+        samples=samples,
+        min_index=min_index,
+        max_index=max_index,
+        min_grade=min(grades),
+        max_grade=max(grades),
+    )
+
+
+def _single_route_id(points: tuple[WorkoutPointRecord, ...]) -> str:
+    for point in points:
+        if point.latitude is not None and point.longitude is not None:
+            return point.workout_id
+    return ""
+
+
+def _route_distances_km(points: tuple[WorkoutPointRecord, ...]) -> tuple[float, ...]:
+    recorded = tuple(point.distance_km for point in points)
+    if _valid_distance_series(recorded):
+        return tuple(float(distance) for distance in recorded if distance is not None)
+    distances = [0.0]
+    for current, following in zip(points, points[1:], strict=False):
+        if current.latitude is None or current.longitude is None or following.latitude is None or following.longitude is None:
+            distances.append(distances[-1])
+            continue
+        distances.append(distances[-1] + _distance_m(current.latitude, current.longitude, following.latitude, following.longitude) / 1000)
+    return tuple(distances)
+
+
+def _valid_distance_series(values: tuple[float | None, ...]) -> bool:
+    if any(value is None for value in values):
+        return False
+    numeric = tuple(float(value) for value in values if value is not None)
+    return len(numeric) >= 2 and numeric[-1] > numeric[0] and all(right >= left for left, right in zip(numeric, numeric[1:], strict=False))
+
+
+def _smoothed_grades(distances_km: tuple[float, ...], elevations_m: tuple[float, ...]) -> tuple[float, ...]:
+    raw: list[float] = []
+    for index, (current_distance, next_distance) in enumerate(zip(distances_km, distances_km[1:], strict=False)):
+        delta_m = (next_distance - current_distance) * 1000
+        if delta_m <= 0:
+            raw.append(0.0)
+            continue
+        raw.append((elevations_m[index + 1] - elevations_m[index]) / delta_m)
+    raw.append(raw[-1] if raw else 0.0)
+    smoothed: list[float] = []
+    for index in range(len(raw)):
+        window = raw[max(0, index - 2) : min(len(raw), index + 3)]
+        smoothed.append(sum(window) / len(window))
+    return tuple(smoothed)
+
+
+def _smoothed_elevations(distances_km: tuple[float, ...], elevations_m: tuple[float, ...]) -> tuple[float, ...]:
+    if len(elevations_m) < 5:
+        return elevations_m
+    route_distance_m = max(0.0, (distances_km[-1] - distances_km[0]) * 1000)
+    radius_m = max(30.0, min(100.0, route_distance_m * 0.02))
+    median_values: list[float] = []
+    distances_m = tuple(distance * 1000 for distance in distances_km)
+    for center_index, center_distance in enumerate(distances_m):
+        window = [
+            elevation
+            for distance, elevation in zip(distances_m, elevations_m, strict=True)
+            if abs(distance - center_distance) <= radius_m
+        ]
+        if not window:
+            median_values.append(elevations_m[center_index])
+            continue
+        ordered = sorted(window)
+        median_values.append(ordered[len(ordered) // 2])
+    smoothed: list[float] = []
+    for index in range(len(median_values)):
+        window = median_values[max(0, index - 2) : min(len(median_values), index + 3)]
+        smoothed.append(sum(window) / len(window))
+    return tuple(smoothed)
+
+
+def _elevation_overlay_status(
+    profile: RouteElevationProfile | None,
+    routes: tuple[RoutePolyline, ...],
+    intent: VisualizationIntent,
+) -> str:
+    if not _show_elevation_overlay(intent):
+        return "hidden_by_modifier"
+    if len(routes) != 1:
+        return "multi_route_hidden"
+    return "rendered" if profile is not None else "missing_data"
+
+
+def _elevation_min(profile: RouteElevationProfile | None) -> float | None:
+    if profile is None:
+        return None
+    return round(profile.samples[profile.min_index].elevation_m)
+
+
+def _elevation_max(profile: RouteElevationProfile | None) -> float | None:
+    if profile is None:
+        return None
+    return round(profile.samples[profile.max_index].elevation_m)
+
+
+def _route_waypoints_from_metadata(workout: WorkoutRecord) -> tuple[RouteWaypoint, ...]:
+    raw_waypoints = workout.metadata.get("waypoints", ())
+    if not isinstance(raw_waypoints, list | tuple):
+        return ()
+    waypoints: list[RouteWaypoint] = []
+    for raw in raw_waypoints:
+        if not isinstance(raw, dict):
+            continue
+        latitude = _optional_numeric(raw.get("latitude"))
+        longitude = _optional_numeric(raw.get("longitude"))
+        if latitude is None or longitude is None:
+            continue
+        label = _waypoint_label(raw)
+        waypoint_type = str(raw.get("type") or raw.get("waypoint_type") or raw.get("symbol") or "").strip()
+        waypoints.append(RouteWaypoint(latitude=latitude, longitude=longitude, label=label, waypoint_type=waypoint_type))
+    return tuple(waypoints)
+
+
+def _waypoint_label(raw: dict[str, object]) -> str:
+    name = str(raw.get("name") or raw.get("label") or "").strip()
+    comment = str(raw.get("comment") or raw.get("cmt") or "").strip()
+    description = str(raw.get("description") or raw.get("desc") or "").strip()
+    if comment:
+        return comment
+    if description:
+        return description
+    return name
+
+
+def _waypoint_status(
+    waypoint_count: int,
+    rendered: tuple[RouteWaypoint, ...],
+    routes: tuple[RoutePolyline, ...],
+    intent: VisualizationIntent,
+) -> str:
+    if waypoint_count <= 0:
+        return "none"
+    if not _show_waypoints(intent):
+        return "hidden_by_modifier"
+    if len(routes) != 1:
+        return "multi_route_hidden"
+    return "rendered" if rendered else "missing_coordinates"
+
+
+def _waypoint_distances_from_start(
+    waypoints: tuple[RouteWaypoint, ...],
+    route: RoutePolyline,
+) -> tuple[float | None, ...]:
+    route_points = route.points
+    if len(route_points) < 2:
+        return tuple(None for _ in waypoints)
+    xy_points = tuple(_local_xy_m(point.latitude, point.longitude, route_points[0].latitude) for point in route_points)
+    cumulative = [0.0]
+    for current, following in zip(route_points, route_points[1:], strict=False):
+        cumulative.append(cumulative[-1] + _distance_m(current.latitude, current.longitude, following.latitude, following.longitude))
+    distances: list[float | None] = []
+    for waypoint in waypoints:
+        waypoint_xy = _local_xy_m(waypoint.latitude, waypoint.longitude, route_points[0].latitude)
+        best_distance_m: float | None = None
+        best_error: float | None = None
+        for index, (start_xy, end_xy) in enumerate(zip(xy_points, xy_points[1:], strict=False)):
+            projected_ratio, error = _project_point_to_segment(waypoint_xy, start_xy, end_xy)
+            segment_length = cumulative[index + 1] - cumulative[index]
+            candidate_distance = cumulative[index] + projected_ratio * segment_length
+            if best_error is None or error < best_error:
+                best_error = error
+                best_distance_m = candidate_distance
+        distances.append(round(best_distance_m / 1000, 1) if best_distance_m is not None else None)
+    return tuple(distances)
+
+
+def _project_point_to_segment(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> tuple[float, float]:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 0:
+        return 0.0, math.hypot(point[0] - start[0], point[1] - start[1])
+    ratio = max(0.0, min(1.0, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_squared))
+    projected = (start[0] + ratio * dx, start[1] + ratio * dy)
+    return ratio, math.hypot(point[0] - projected[0], point[1] - projected[1])
+
+
+def _local_xy_m(latitude: float, longitude: float, reference_latitude: float) -> tuple[float, float]:
+    meters_per_degree_lat = 111_320.0
+    meters_per_degree_lon = meters_per_degree_lat * math.cos(math.radians(reference_latitude))
+    return longitude * meters_per_degree_lon, latitude * meters_per_degree_lat
+
+
+def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    earth_radius_m = 6_371_000.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return 2 * earth_radius_m * math.asin(math.sqrt(a))
 
 
 def _is_route_color_metric_supported(metric: str) -> bool:
@@ -1026,11 +1414,21 @@ def _format_period_range(value: str | None) -> str:
 def _route_chart_subtitle(workout: WorkoutRecord, *, language: SupportedLanguage) -> str:
     parts = (
         _format_route_datetime(workout.start_time_local or workout.start_time_utc or workout.local_date),
-        _format_number(workout.distance_km, suffix=" km", digits=1),
+        _format_route_distance_and_ascent(workout, language=language),
         _format_route_duration(workout.duration_s),
         _format_route_average_hr(workout.avg_hr_bpm, language=language),
     )
     return " - ".join(part for part in parts if part)
+
+
+def _format_route_distance_and_ascent(workout: WorkoutRecord, *, language: SupportedLanguage) -> str:
+    distance = _format_number(workout.distance_km, suffix=" km", digits=1)
+    if not distance:
+        return ""
+    if workout.ascent_m is None:
+        return distance
+    ascent_label = "nousua" if language == SupportedLanguage.FI else "ascent"
+    return f"{distance} - {ascent_label} {round(workout.ascent_m)} m"
 
 
 def _route_legend_title(routes: tuple[RoutePolyline, ...], *, language: SupportedLanguage) -> str:

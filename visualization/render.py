@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import struct
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from visualization.tiles import TileCoord
 
@@ -133,6 +133,31 @@ class RoutePolyline:
 
 
 @dataclass(frozen=True)
+class RouteWaypoint:
+    latitude: float
+    longitude: float
+    label: str = ""
+    waypoint_type: str = ""
+    distance_km: float | None = None
+
+
+@dataclass(frozen=True)
+class RouteElevationSample:
+    distance_km: float
+    elevation_m: float
+    grade: float = 0.0
+
+
+@dataclass(frozen=True)
+class RouteElevationProfile:
+    samples: tuple[RouteElevationSample, ...]
+    min_index: int
+    max_index: int
+    min_grade: float = 0.0
+    max_grade: float = 0.0
+
+
+@dataclass(frozen=True)
 class RouteMapTile:
     coord: TileCoord
     content: bytes
@@ -142,6 +167,8 @@ class RouteMapTile:
 class RouteMap:
     title: str
     routes: tuple[RoutePolyline, ...]
+    waypoints: tuple[RouteWaypoint, ...] = ()
+    elevation_profile: RouteElevationProfile | None = None
     subtitle: str = ""
     legend_title: str = "Routes"
     color_metric_label: str = ""
@@ -165,12 +192,37 @@ class SocialImageStat:
 
 
 @dataclass(frozen=True)
+class SocialImageStyle:
+    preset: str = ""
+    background_crop: str = "center"
+    background_dim: int = 30
+    background_filter: str = "none"
+    route_color: str = "default"
+    route_size: str = "normal"
+    route_shadow: bool = True
+    route_markers: bool = True
+    title_position: str = "top"
+    title_align: str = "center"
+    stats_position: str = "left"
+    panel_style: str = "dark"
+    text_color: str = "white"
+    accent_color: str = "default"
+    font: str = "clean"
+    background_blur: int = 0
+    route_position: str = "center"
+    stats_style: str = "compact"
+
+
+@dataclass(frozen=True)
 class SocialImage:
     title: str
     routes: tuple[RoutePolyline, ...]
     stats: tuple[SocialImageStat, ...]
     background_image: bytes | None = None
     map_background: RouteMap | None = None
+    style: SocialImageStyle = field(default_factory=SocialImageStyle)
+    color_domain: tuple[float, float] | None = None
+    color_direction: str = "ascending"
     width: int = 1080
     height: int = 1080
 
@@ -511,7 +563,7 @@ def render_route_map_png(chart: RouteMap) -> bytes:
     viewport = (
         RouteMapViewport(chart.x_domain, chart.y_domain)
         if chart.x_domain is not None and chart.y_domain is not None
-        else route_map_viewport(chart.routes, width=width, height=height)
+        else route_map_viewport(chart.routes, waypoints=chart.waypoints, width=width, height=height)
     )
     x_domain = viewport.x_domain
     y_domain = viewport.y_domain
@@ -545,6 +597,13 @@ def render_route_map_png(chart: RouteMap) -> bytes:
         end = points[-1]
         _dot(pixels, width, _scale(start[0], x_domain, 0, width - 1), _scale(start[1], y_domain, 0, height - 1), (22, 163, 74), scale=3)
         _dot(pixels, width, _scale(end[0], x_domain, 0, width - 1), _scale(end[1], y_domain, 0, height - 1), (220, 38, 38), scale=3)
+    for waypoint in chart.waypoints:
+        waypoint_x, waypoint_y = _mercator_xy(waypoint.latitude, waypoint.longitude)
+        x = _scale(waypoint_x, x_domain, 0, width - 1)
+        y = _scale(waypoint_y, y_domain, 0, height - 1)
+        _dot(pixels, width, x, y, (124, 58, 237), scale=4)
+        if waypoint.label:
+            _label_box(pixels, width, x + 8, y - 20, waypoint.label[:32])
     _draw_route_map_overlays(pixels, width, height, chart)
     if chart.attribution:
         _draw_attribution(pixels, width, height, chart.attribution)
@@ -554,6 +613,7 @@ def render_route_map_png(chart: RouteMap) -> bytes:
 def route_map_viewport(
     routes: tuple[RoutePolyline, ...],
     *,
+    waypoints: tuple[RouteWaypoint, ...] = (),
     width: int = DEFAULT_RENDER_WIDTH,
     height: int = DEFAULT_RENDER_HEIGHT,
     margin_ratio: float = 0.06,
@@ -563,7 +623,7 @@ def route_map_viewport(
         _mercator_xy(point.latitude, point.longitude)
         for route in routes
         for point in route.points
-    )
+    ) + tuple(_mercator_xy(waypoint.latitude, waypoint.longitude) for waypoint in waypoints)
     if not projected_points:
         return RouteMapViewport((0.0, 1.0), (0.0, 1.0))
     x_values = tuple(point[0] for point in projected_points)
@@ -1510,6 +1570,21 @@ def _rect(pixels: bytearray, width: int, x1: int, y1: int, x2: int, y2: int, col
     for y in range(min(y1, y2), max(y1, y2) + 1):
         for x in range(min(x1, x2), max(x1, x2) + 1):
             _set(pixels, width, x, y, color)
+
+
+def _label_box(pixels: bytearray, width: int, x: int, y: int, text: str) -> None:
+    label = _ellipsize(text.strip(), 22)
+    if not label:
+        return
+    box_width = _text_width(label) + 12
+    x = max(4, min(width - box_width - 4, x))
+    y = max(4, y)
+    _rect(pixels, width, x, y, x + box_width, y + 18, (255, 255, 255))
+    _rect(pixels, width, x, y, x + box_width, y, (124, 58, 237))
+    _rect(pixels, width, x, y + 18, x + box_width, y + 18, (124, 58, 237))
+    _rect(pixels, width, x, y, x, y + 18, (124, 58, 237))
+    _rect(pixels, width, x + box_width, y, x + box_width, y + 18, (124, 58, 237))
+    _draw_chart_text(pixels, width, x + 6, y + 6, label, TEXT)
 
 
 def _draw_centered_text(

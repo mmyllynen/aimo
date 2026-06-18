@@ -10,6 +10,7 @@ venv/
 aimo.conf
 *.conf.local
 config.local.*
+LOCAL.md
 secrets.*
 
 # Runtime data and generated artifacts

@@ -10,6 +10,7 @@ class WorkflowTarget(StrEnum):
     WORKOUT_CHAT = "workout_chat"
     GPX_INGEST = "gpx_ingest"
     WORKOUT_MANAGEMENT = "workout_management"
+    SETTINGS = "settings"
     VISUALIZATION = "visualization"
     DEBUG = "debug"
     HELP = "help"
@@ -28,4 +29,3 @@ class RouteDecision:
     slots: dict[str, Any] = field(default_factory=dict)
     clarification: str = ""
     reason: str = ""
-

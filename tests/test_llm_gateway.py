@@ -7,6 +7,7 @@ from core.routing import RouteConfidence, WorkflowTarget
 from llm.gateway import FakeLLMClient, LLMGateway, LLMGatewayError, LLMOperation, LLMRequest
 from llm.operations import (
     ChatReplyInput,
+    GpxTitleInput,
     IntentClassificationInput,
     PeriodAnalysisReplyInput,
     PeriodRequestInput,
@@ -15,6 +16,7 @@ from llm.operations import (
     WorkoutReplyInput,
     WorkoutReferenceInput,
     classify_intent,
+    extract_gpx_title,
     extract_visualization_intent,
     extract_workout_reference,
     interpret_period_request,
@@ -58,6 +60,31 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertIn("do not route workout chart requests to chat", request.system_prompt)
         self.assertIn("visualization", request.user_payload["workflow_catalog"])
         self.assertIn("sykealuejakauma", request.user_payload["workflow_catalog"]["visualization"]["examples"][0])
+
+    def test_extract_gpx_title_returns_explicit_title(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.GPX_TITLE_EXTRACTION: {
+                    "title": "Aamulenkki 18.6.",
+                }
+            }
+        )
+
+        title = extract_gpx_title(
+            LLMGateway(client),
+            GpxTitleInput(
+                user_text='tallenna tämä ja anna sille nimeksi "Aamulenkki 18.6."',
+                attachment_count=1,
+            ),
+        )
+
+        self.assertEqual(title.title, "Aamulenkki 18.6.")
+        self.assertEqual(client.requests[0].operation, LLMOperation.GPX_TITLE_EXTRACTION)
+        self.assertEqual(client.requests[0].user_payload["attachment_count"], 1)
+        self.assertIn("reittisuunnitelma", client.requests[0].system_prompt)
+        self.assertIn("nimeä se", client.requests[0].system_prompt)
+        self.assertIn("call it", client.requests[0].system_prompt)
+        self.assertIn("Juhannusreitti", client.requests[0].system_prompt)
 
     def test_rejects_malformed_model_output(self) -> None:
         gateway = LLMGateway(
@@ -229,6 +256,12 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertEqual(intent.y_metrics, ("heart_rate_bpm",))
         self.assertEqual(intent.layout_mode, "auto")
         self.assertEqual(intent.chart_kind, "auto")
+        request = gateway.client.requests[0]
+        self.assertIn("active_workout", request.system_prompt)
+        self.assertIn("prefer workout_selector type active", request.system_prompt)
+        self.assertIn("Use latest only for explicit", request.system_prompt)
+        self.assertIn("näytä reitti kartalla", request.system_prompt)
+        self.assertIn("not social_image", request.system_prompt)
 
     def test_extract_visualization_intent_accepts_route_map_intent(self) -> None:
         gateway = LLMGateway(
@@ -273,6 +306,7 @@ class LLMGatewayTests(unittest.TestCase):
                         "layout_mode": "auto",
                         "chart_kind": "map",
                         "output_mode": "social_image",
+                        "social_style": {"preset": "poster", "route": "white", "dim": 35},
                         "context_update": {"set_current_workout": False},
                     }
                 }
@@ -286,6 +320,7 @@ class LLMGatewayTests(unittest.TestCase):
 
         self.assertEqual(intent.output_mode, "social_image")
         self.assertEqual(intent.y_metrics, ("route", "distance_km", "duration_s"))
+        self.assertEqual(intent.social_style, {"preset": "poster", "route": "white", "dim": 35})
 
     def test_revise_visualization_intent_uses_typed_operation(self) -> None:
         client = FakeLLMClient(

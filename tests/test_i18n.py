@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from core.i18n import (
+    CATALOGS,
     DEFAULT_LANGUAGE,
     SupportedLanguage,
     TranslationKey,
@@ -18,6 +19,59 @@ from core.i18n import (
 class I18nTests(unittest.TestCase):
     def test_catalogs_are_complete(self) -> None:
         validate_catalogs()
+
+    def test_help_topics_are_comprehensive_and_discord_sized(self) -> None:
+        expected_fragments = {
+            TranslationKey.HELP_COMMANDS: (
+                "/treenit listaa",
+                "/treenit poista",
+                "/debug tila",
+            ),
+            TranslationKey.HELP_VISUALIZATION: (
+                "+square",
+                "+portrait",
+                "+landscape",
+                "+distance",
+                "+duration",
+                "+hr",
+                "+maxhr",
+                "+pace",
+                "+ascent",
+                "+date",
+                "+social",
+                "+somekuva",
+            ),
+            TranslationKey.HELP_SOCIAL_IMAGE: (
+                "+classic",
+                "+minimal",
+                "+poster",
+                "+routeonly",
+                "+data",
+                "+photo",
+                "dim=0..70",
+                "blur=0..20",
+                "crop=center|top|bottom|left|right|X,Y",
+                "route=default|auto|blue|white|black|red|green|yellow|#RRGGBB",
+                "route_size=small|normal|large|huge",
+                "title=top|bottom|hide",
+                "stats=left|right|bottom|hide",
+                "panel=dark|light|none",
+                "font=clean|bold|mono|serif",
+            ),
+        }
+        for catalog in CATALOGS.values():
+            for key in (
+                TranslationKey.HELP_INTRO,
+                TranslationKey.HELP_COMMANDS,
+                TranslationKey.HELP_VISUALIZATION,
+                TranslationKey.HELP_SOCIAL_IMAGE,
+                TranslationKey.HELP_PRIVACY,
+                TranslationKey.HELP_UNKNOWN_TOPIC,
+            ):
+                self.assertLessEqual(len(catalog[key]), 2000)
+            for key, fragments in expected_fragments.items():
+                for fragment in fragments:
+                    self.assertIn(fragment, catalog[key])
 
     def test_translator_renders_configured_language(self) -> None:
         translator = Translator(SupportedLanguage.EN)

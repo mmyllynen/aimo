@@ -4,42 +4,37 @@
 
 This directory is the standalone source of truth for Aimo.
 
-Use the specifications and active packages in this directory as guidance. Do not use `legacy/` or documents outside this tree as implementation guidance unless the user explicitly asks for import or comparison work.
+Use only the active packages and documents in this tree as implementation guidance. Do not use `legacy/` or documents outside this tree unless the user explicitly asks for import or comparison work.
 
-Authoritative project documents:
+## Read First
 
-- `README.md`
-- `TODO.md`
-- `docs/PRODUCT_SPEC.md`
-- `docs/COMMAND_SPEC.md`
-- `docs/WORKOUT_SPEC.md`
-- `docs/VISUALIZATION_SPEC.md`
-- `docs/LLM_CONTRACTS.md`
-- `docs/OPERATIONS_SPEC.md`
-- `docs/I18N_SPEC.md`
-- `docs/DATA_IMPORT_SPEC.md`
+- `LOCAL.md` when present: local-only environment notes. Read before operational/deployment work. It is intentionally git-ignored and must not be committed.
+- `README.md`: repository overview and common commands.
+- `TODO.md`: current prioritized backlog.
+- `HANDOVER.md`: current session handoff and smoke-test notes.
+- `docs/SPEC.md`: durable product, workflow, runtime, privacy, and visualization contract.
+- `docs/LLM.md`: typed LLM operation contracts.
+- `docs/OPERATIONS.md`: config, checks, import, retention, backup, and operational rules.
 
-## Product Intent
+## Core Rules
 
-Aimo is a multilingual Discord bot for:
+- Deterministic application code owns state transitions, data access, validation, rendering, permissions, and error handling.
+- LLMs may interpret language and draft prose only through typed gateway contracts.
+- LLM = intelligence: it interprets natural language and returns formal typed intent/specification.
+- Python = engine: it executes typed intent/specification, validates inputs, owns state, storage, rendering, permissions, and errors.
+- Do not add phrase parsers, keyword heuristics, regexes, or `if user text says X then do Y` logic for natural-language intent in Python.
+- The only allowed Python-side natural-text controls are the formal override syntaxes explicitly defined for this project: plustägit (`+word`) add something, miinustägit (`-word`) remove/disable something, and tarkenteet (`key=value`, including supported aliases) set bounded values. Slash-command names, subcommands, and options are also formal UI fields, not natural-language parsing.
+- If existing code appears to perform natural-language intent interpretation in Python outside plustägit, miinustägit, tarkenteet, or slash-command fields, stop and flag it to the user before extending or depending on that behavior.
+- Keep raw GPX and full workout point arrays out of routing/model planning inputs.
+- Keep Discord-specific objects at the adapter boundary.
+- Make workflow code operate on canonical events and workflow results.
+- Use SQLite through the storage helpers/repositories defined here.
+- Deterministic bot-owned messages must use i18n translation keys.
+- Fail with typed error categories and stable localized user-facing responses.
+- Do not use live OpenAI calls in normal tests.
+- Do not commit `LOCAL.md`, `aimo.conf`, tokens, SQLite databases, GPX files, logs, artifacts, or other local runtime data.
 
-- concise public chat replies
-- workout coaching conversation
-- GPX ingest
-- workout management
-- heart-rate zone configuration
-- natural-language workout visualizations
-- structured debug traces
-
-Initial supported languages are Finnish and English. The configured language comes from `aimo.conf`; deterministic bot-owned messages must use translation keys rather than hard-coded response text.
-
-The bot should be dependable and workflow-driven. LLMs may interpret language and draft text, but deterministic application code owns state transitions, data access, validation, rendering, permissions, and error handling.
-
-## Current State
-
-The project contains a production-capable Discord runtime, SQLite storage, typed workflow dispatcher, GPX ingest, workout management, workout chat, visualization, debug traces, LLM gateway, and tests.
-
-Important runtime rules:
+## Runtime Invariants
 
 - Direct messages are rejected.
 - Guild/channel allowlists are enforced before dispatch.
@@ -47,24 +42,12 @@ Important runtime rules:
 - Normal guild messages may be stored as history but remain no-op responses.
 - First active user interaction is tracked separately from passive observation.
 
-## Development Rules
+## Change Discipline
 
-- Do not import modules outside the current Aimo package boundaries.
-- Do not modify unrelated files unless explicitly requested.
 - Prefer adding tests before implementing behavior.
-- Keep model calls behind typed LLM gateway contracts.
-- Keep raw GPX and workout point data out of routing/model planning inputs.
-- Use SQLite through the storage helpers/repositories defined here.
-- Keep Discord-specific objects at the adapter boundary.
-- Make workflow code operate on canonical events and workflow results.
-- Fail with typed error categories and stable localized user-facing responses.
-- Do not use live OpenAI calls in normal tests.
-
-## Roadmap
-
-Use `TODO.md` as the current prioritized backlog.
-
-Avoid work that only polishes internal structure without moving a product, reliability, data-quality, or testability goal forward.
+- Do not modify unrelated files unless explicitly requested.
+- Avoid internal polish that does not move a product, reliability, data-quality, or testability goal forward.
+- Keep repository APIs narrow; add helpers only when a workflow needs them.
 
 ## Verification
 
@@ -72,5 +55,6 @@ When changing Aimo:
 
 - run Python syntax checks for touched modules
 - run relevant tests, and the full test suite for shared dispatcher/storage/runtime changes
-- validate internationalization catalogs when user-facing text changes
+- validate i18n catalogs when user-facing deterministic text changes
 - verify SQLite schema loading/migrations when schema changes
+- follow `docs/OPERATIONS.md` for full handoff and production checks

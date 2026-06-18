@@ -11,6 +11,7 @@ JsonObject = dict[str, Any]
 
 class LLMOperation(StrEnum):
     INTENT_CLASSIFICATION = "intent_classification"
+    GPX_TITLE_EXTRACTION = "gpx_title_extraction"
     WORKOUT_REFERENCE_EXTRACTION = "workout_reference_extraction"
     PERIOD_REQUEST_INTERPRETATION = "period_request_interpretation"
     PERIOD_ANALYSIS_REPLY = "period_analysis_reply"

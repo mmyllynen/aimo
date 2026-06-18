@@ -2,55 +2,56 @@
 
 Aimo is a multilingual Discord bot for concise channel chat, workout coaching, GPX ingest, workout management, and natural-language workout visualizations.
 
-The active implementation is this repository root. The bot runs from local configuration, stores data in SQLite, keeps Discord-specific objects at the adapter boundary, and routes all model usage through typed LLM gateway contracts.
+The active implementation is this repository root. The bot runs from local configuration, stores data in SQLite, keeps Discord-specific objects at the adapter boundary, and routes model usage through typed LLM gateway contracts.
 
-## Current Capabilities
+## Capabilities
 
 - Public replies to `@Aimo` mentions.
-- Slash commands: `/aimo`, `/treenit`, `/debug`.
-- GPX upload and duplicate detection.
-- User-owned workout storage, active workout selection, deletion, and heart-rate zone configuration.
-- Workout chat and chart generation from bounded workout facts and validated visualization specs.
-- Bounded debug traces with redaction and requester/admin access rules.
-- Finnish and English deterministic message catalogs.
-- Production preflight checks and local JSON data import.
+- Slash commands: `/aimo`, `/gpx`, `/help`, `/treenit`, `/asetukset`, `/debug`.
+- GPX upload, duplicate detection, and user-owned workout storage.
+- Active workout selection, button-confirmed deletion, rename/tag editing, and settings-based HR-zone configuration.
+- Workout chat, route maps with waypoints/elevation overlays, period charts, and social workout images.
+- Deterministic help/privacy topics, Finnish/English catalogs, bounded debug traces, preflight checks, and JSON import.
 
-Direct messages are not accepted. Guild/channel allowlists are enforced before dispatch. Normal guild messages can still be stored as bounded channel history, but the bot only responds to mentions and slash commands.
+Direct messages are rejected. Guild/channel allowlists are enforced before dispatch. Normal guild messages can be stored as bounded history, but only mentions and slash commands produce responses.
 
-## Repository Layout
+## Documentation
+
+- [AGENTS.md](AGENTS.md): rules for agents working in this repo.
+- [TODO.md](TODO.md): current prioritized backlog.
+- [HANDOVER.md](HANDOVER.md): short current-state handoff.
+- [docs/SPEC.md](docs/SPEC.md): product and workflow contract.
+- [docs/LLM.md](docs/LLM.md): typed model contracts.
+- [docs/OPERATIONS.md](docs/OPERATIONS.md): config, checks, import, backups, retention, and operations.
+
+`LOCAL.md` may exist locally with machine-specific deployment notes. It is git-ignored.
+
+## Layout
 
 ```text
 aimo.py                 CLI entrypoint
-aimo.conf.example       local config template
+aimo.conf.example       config template
 core/                   canonical events, config, routing, i18n, workflow contracts
 app/                    dispatcher, runtime wiring, preflight, policy, redaction
-adapters/discord/       Discord normalization, runtime, command registration, outgoing rendering
-workflows/              chat, help, debug, GPX, workout management, workout chat, visualization
+adapters/discord/       Discord adapter, command registration, outgoing rendering
+workflows/              chat, help, debug, GPX, workout management/chat, visualization
 storage/                SQLite schema, migrations, repositories, import
-workout/                GPX parsing, ingest, workout reference resolution
-visualization/          datasets, specs, renderer, service
+workout/                GPX parsing, ingest, periods, workout reference resolution
+visualization/          datasets, specs, renderers, tile fetching, service
 llm/                    typed gateway, operations, OpenAI-compatible client
 tests/                  unit and adapter tests
-docs/                   product and engineering specs
+docs/                   durable project documentation
 ```
 
 Do not use `legacy/` as implementation guidance unless explicitly doing import or comparison work.
 
-## Configuration
-
-Runtime configuration is read from `aimo.conf`, which is intentionally ignored by git. Start from `aimo.conf.example`.
-
-Useful checks:
+## Common Commands
 
 ```bash
 python3 aimo.py --check --config aimo.conf.example
 python3 aimo.py --check-services --config aimo.conf.example
 python3 aimo.py --preflight --config aimo.conf
-```
-
-Run Discord:
-
-```bash
+python3 scripts/production_smoke.py --config aimo.conf --log logs/bot.log
 python3 aimo.py --config aimo.conf --run-discord
 ```
 
@@ -61,20 +62,4 @@ python3 aimo.py --config aimo.conf --import-data export.json --dry-run
 python3 aimo.py --config aimo.conf --import-data export.json
 ```
 
-## Development
-
-Read `TODO.md` first for current priorities. Keep behavior aligned with the specs in `docs/`.
-
-Before handing off changes:
-
-```bash
-python3 -m unittest
-python3 -m py_compile aimo.py adapters/*.py adapters/discord/*.py app/*.py core/*.py llm/*.py storage/*.py tests/*.py visualization/*.py workflows/*.py workout/*.py
-python3 aimo.py --check --config aimo.conf.example
-python3 aimo.py --check-services --config aimo.conf.example
-git diff --check
-```
-
-## Security
-
-Never commit local config, secrets, tokens, user data, GPX files, logs, SQLite databases, or generated artifacts.
+Before handoff, use the verification checklist in [docs/OPERATIONS.md](docs/OPERATIONS.md).
