@@ -6,13 +6,12 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from core.config import MapsConfig, RenderersConfig
+from core.config import MapsConfig
 from core.i18n import SupportedLanguage
 from llm.operations import VisualizationIntent
 from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
 from visualization.datasets import dataset_request_from_metrics, resolve_datasets
 from visualization.render import (
-    FONT,
     DEFAULT_RENDER_HEIGHT,
     DEFAULT_RENDER_WIDTH,
     MARKER_POINT_LIMIT,
@@ -33,13 +32,9 @@ from visualization.render import (
     RoutePolyline,
     SocialImage,
     SocialImageStyle,
-    _background,
     _best_route_safe_rect,
     _chart_frame,
-    _decode_png_rgb,
-    _downsample,
     _pie_radius,
-    _png,
     _show_markers,
     _axis,
     _fill_short_gaps,
@@ -48,8 +43,6 @@ from visualization.render import (
     _robust_axis,
     _scale_y,
     _time_axis,
-    render_pie_chart_png,
-    render_route_map_png,
     route_metric_color,
     route_map_viewport,
 )
@@ -75,7 +68,7 @@ from visualization.pillow_renderer import (
     _visible_route_legend_count,
     _visible_waypoint_count,
 )
-from visualization.renderer import renderer_name, resolve_renderer
+from visualization.renderer import resolve_renderer
 from visualization.tiles import TileCoord
 from visualization.specs import (
     Encoding,
@@ -119,24 +112,10 @@ from workflows.visualization import _apply_visualization_modifiers
 
 
 class VisualizationSpecTests(unittest.TestCase):
-    def test_bitmap_font_contains_hash_glyph_for_duplicate_date_labels(self) -> None:
-        self.assertIn("#", FONT)
-        self.assertNotEqual(FONT["#"], FONT["?"])
-
-    def test_bitmap_font_contains_copyright_glyph_for_osm_attribution(self) -> None:
-        self.assertIn("©", FONT)
-        self.assertNotEqual(FONT["©"], FONT["?"])
-
-    def test_background_uses_subtle_vertical_gradient(self) -> None:
-        pixels = _background(1, 3)
-
-        self.assertNotEqual(bytes(pixels[0:3]), bytes(pixels[-3:]))
-        self.assertGreaterEqual(min(pixels), 232)
-
     def test_route_map_can_render_png_tile_background(self) -> None:
         tile_content = _solid_png(256, 256, (171, 205, 239))
 
-        rendered = render_route_map_png(
+        rendered = PillowVisualizationRenderer().render_route_map_png(
             RouteMap(
                 title="Route",
                 routes=(
@@ -154,18 +133,11 @@ class VisualizationSpecTests(unittest.TestCase):
             )
         )
 
-        decoded = _decode_png_rgb(rendered)
-        self.assertIsNotNone(decoded)
-        _, _, pixels = decoded
-        sample = (120 * DEFAULT_RENDER_WIDTH + 160) * 3
-        self.assertEqual(tuple(pixels[sample : sample + 3]), (171, 205, 239))
+        with Image.open(BytesIO(rendered)) as image:
+            self.assertEqual(image.convert("RGB").getpixel((160, 120)), (171, 205, 239))
 
-    def test_renderer_config_resolves_chart_specific_override(self) -> None:
-        config = RenderersConfig(default="internal", route="pillow")
-
-        self.assertEqual(renderer_name(config, "pie"), "internal")
-        self.assertEqual(renderer_name(config, "route"), "pillow")
-        self.assertEqual(resolve_renderer(config, "route").name, "pillow")
+    def test_renderer_resolves_to_pillow(self) -> None:
+        self.assertEqual(resolve_renderer("route").name, "pillow")
 
     def test_pillow_renderer_renders_all_chart_types_as_png(self) -> None:
         renderer = PillowVisualizationRenderer()
@@ -216,9 +188,9 @@ class VisualizationSpecTests(unittest.TestCase):
             (pie, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
             (route, (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT)),
         ):
-            decoded = _decode_png_rgb(content)
-            self.assertIsNotNone(decoded)
-            self.assertEqual(decoded[0:2], expected_size)
+            with Image.open(BytesIO(content)) as decoded:
+                self.assertEqual(decoded.format, "PNG")
+                self.assertEqual(decoded.size, expected_size)
 
     def test_pillow_route_overlay_uses_dark_translucent_panel(self) -> None:
         content = PillowVisualizationRenderer().render_route_map_png(
@@ -237,11 +209,9 @@ class VisualizationSpecTests(unittest.TestCase):
             )
         )
 
-        decoded = _decode_png_rgb(content)
-        self.assertIsNotNone(decoded)
-        width, _, pixels = decoded
-        sample = (96 * width + 700) * 3
-        red, green, blue = pixels[sample : sample + 3]
+        with Image.open(BytesIO(content)) as decoded:
+            self.assertEqual(decoded.format, "PNG")
+            red, green, blue = decoded.convert("RGB").getpixel((700, 96))
         self.assertLess(max(red, green, blue), 170)
         self.assertGreater(min(red, green, blue), 60)
 
@@ -482,7 +452,6 @@ class VisualizationSpecTests(unittest.TestCase):
                 chart_kind="map",
                 route_color_metric="heart_rate_bpm",
             ),
-            renderers_config=RenderersConfig(default="pillow", route="pillow"),
         )
 
         self.assertTrue(artifact.content.startswith(b"\x89PNG"))
@@ -515,7 +484,7 @@ class VisualizationSpecTests(unittest.TestCase):
             chart_kind="map",
         )
 
-        shown = render_workout_visualization(workout, points, base_intent, renderers_config=RenderersConfig(default="pillow", route="pillow"))
+        shown = render_workout_visualization(workout, points, base_intent)
         hidden = render_workout_visualization(
             workout,
             points,
@@ -529,7 +498,6 @@ class VisualizationSpecTests(unittest.TestCase):
                 chart_kind=base_intent.chart_kind,
                 social_style={"waypoints": False},
             ),
-            renderers_config=RenderersConfig(default="pillow", route="pillow"),
         )
 
         self.assertEqual(shown.metadata["waypoint_count"], 1)
@@ -563,7 +531,6 @@ class VisualizationSpecTests(unittest.TestCase):
                 chart_kind="map",
             ),
             comparison_workouts=(_workout(workout_id="other", title="Other"),),
-            renderers_config=RenderersConfig(default="pillow", route="pillow"),
         )
 
         self.assertEqual(artifact.metadata["waypoint_count"], 1)
@@ -617,7 +584,6 @@ class VisualizationSpecTests(unittest.TestCase):
                 comparison_mode="",
                 chart_kind="map",
             ),
-            renderers_config=RenderersConfig(default="pillow", route="pillow"),
         )
 
         self.assertEqual(artifact.metadata["elevation_overlay_status"], "rendered")
@@ -646,7 +612,6 @@ class VisualizationSpecTests(unittest.TestCase):
                 chart_kind="map",
                 social_style={"elevation_overlay": False},
             ),
-            renderers_config=RenderersConfig(default="pillow", route="pillow"),
         )
         multi = render_workout_visualization(
             _workout(workout_id="w", title="Routes"),
@@ -661,7 +626,6 @@ class VisualizationSpecTests(unittest.TestCase):
                 chart_kind="map",
             ),
             comparison_workouts=(_workout(workout_id="other", title="Other"),),
-            renderers_config=RenderersConfig(default="pillow", route="pillow"),
         )
 
         self.assertEqual(hidden.metadata["elevation_overlay_status"], "hidden_by_modifier")
@@ -779,10 +743,10 @@ class VisualizationSpecTests(unittest.TestCase):
                 render_width=1080,
                 render_height=1080,
             ),
-            renderers_config=RenderersConfig(default="pillow"),
         )
 
-        self.assertEqual(_decode_png_rgb(artifact.content)[:2], (1080, 1080))
+        with Image.open(BytesIO(artifact.content)) as image:
+            self.assertEqual(image.size, (1080, 1080))
         self.assertEqual(artifact.metadata["render_width"], 1080)
         self.assertEqual(artifact.metadata["render_height"], 1080)
 
@@ -979,26 +943,6 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(frame.sidebar_right, 899)
         self.assertEqual(frame.sidebar_bottom, 519)
 
-    def test_downsample_averages_supersampled_pixels(self) -> None:
-        pixels = bytearray(
-            (
-                0,
-                0,
-                0,
-                100,
-                0,
-                0,
-                0,
-                100,
-                0,
-                0,
-                0,
-                100,
-            )
-        )
-
-        self.assertEqual(tuple(_downsample(pixels, 1, 1, scale=2)), (25, 25, 25))
-
     def test_pie_radius_uses_available_plot_area(self) -> None:
         frame = _chart_frame(900, 520)
         center_x = (frame.plot_left + frame.plot_right) // 2
@@ -1043,7 +987,7 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertTrue(series.smoothed)
         self.assertNotEqual(series.values, values)
 
-    def test_short_internal_gaps_are_filled_for_smoothed_rendering(self) -> None:
+    def test_short_gaps_are_filled_for_smoothed_rendering(self) -> None:
         filled = _fill_short_gaps((1.0, None, None, 4.0), max_gap=2)
 
         self.assertEqual(filled, (1.0, 2.0, 3.0, 4.0))
@@ -1625,7 +1569,7 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(tuple(row["zone_label"] for row in dataset.rows), ("pk1", "pk2", "vk1"))
 
     def test_pie_chart_renderer_outputs_png_for_generic_slices(self) -> None:
-        content = render_pie_chart_png(
+        content = PillowVisualizationRenderer().render_pie_chart_png(
             PieChart(
                 title="Generic distribution",
                 slices=(
@@ -1641,7 +1585,7 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertGreater(len(content), 1000)
 
     def test_pie_chart_renderer_accepts_zero_value_legend_items(self) -> None:
-        content = render_pie_chart_png(
+        content = PillowVisualizationRenderer().render_pie_chart_png(
             PieChart(
                 title="Generic distribution",
                 slices=(
@@ -1859,7 +1803,10 @@ def _workout(**overrides) -> WorkoutRecord:
 
 
 def _solid_png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
-    return _png(width, height, bytearray(color * width * height))
+    image = Image.new("RGB", (width, height), color)
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 if __name__ == "__main__":

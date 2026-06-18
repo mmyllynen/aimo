@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image
 
-from core.config import MapsConfig, RenderersConfig
+from core.config import MapsConfig
 from core.i18n import SupportedLanguage
 from llm.operations import VisualizationIntent
 from storage.repositories import HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
@@ -110,7 +110,6 @@ def render_workout_visualization(
     comparison_workouts: tuple[WorkoutRecord, ...] = (),
     tile_cache_root: Path | None = None,
     maps_config: MapsConfig | None = None,
-    renderers_config: RenderersConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
     social_background_image: bytes | None = None,
 ) -> VisualizationArtifact:
@@ -122,7 +121,6 @@ def render_workout_visualization(
             filename_prefix=workout.workout_id,
             tile_cache_root=tile_cache_root,
             maps_config=maps_config,
-            renderers_config=renderers_config,
             language=language,
             background_image=social_background_image,
         )
@@ -134,7 +132,6 @@ def render_workout_visualization(
             filename_prefix=workout.workout_id,
             tile_cache_root=tile_cache_root,
             maps_config=maps_config,
-            renderers_config=renderers_config,
             language=language,
         )
     request = dataset_request_from_metrics(
@@ -164,7 +161,7 @@ def render_workout_visualization(
         raise VisualizationSpecInvalidError("DatasetNotFound")
     layout_mode = _effective_layout_mode(intent.layout_mode, spec)
     render_size = _render_size(intent)
-    rendered = _render_spec(workout, spec, dataset, layout_mode=layout_mode, renderers_config=renderers_config, render_size=render_size, language=language)
+    rendered = _render_spec(workout, spec, dataset, layout_mode=layout_mode, render_size=render_size, language=language)
     return VisualizationArtifact(
         content=rendered.content,
         filename=f"{workout.workout_id}-{spec.output_filename_suffix}.png",
@@ -183,7 +180,6 @@ def render_period_visualization(
     manifest: DatasetManifest,
     tile_cache_root: Path | None = None,
     maps_config: MapsConfig | None = None,
-    renderers_config: RenderersConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
 ) -> VisualizationArtifact:
     if _is_route_map_intent(intent):
@@ -196,12 +192,11 @@ def render_period_visualization(
             filename_prefix=title_workout.workout_id,
             tile_cache_root=tile_cache_root,
             maps_config=maps_config,
-            renderers_config=renderers_config,
             language=language,
             route_labels=route_labels,
         )
     request = _dataset_request(intent, comparison=False)
-    return _render_from_manifest(title_workout, intent, request, manifest, filename_prefix=title_workout.workout_id, renderers_config=renderers_config, language=language)
+    return _render_from_manifest(title_workout, intent, request, manifest, filename_prefix=title_workout.workout_id, language=language)
 
 
 def visualization_validation_context(
@@ -274,7 +269,6 @@ def _render_from_manifest(
     manifest: DatasetManifest,
     *,
     filename_prefix: str,
-    renderers_config: RenderersConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
 ) -> VisualizationArtifact:
     try:
@@ -290,7 +284,7 @@ def _render_from_manifest(
         raise VisualizationSpecInvalidError("DatasetNotFound")
     layout_mode = _effective_layout_mode(intent.layout_mode, spec)
     render_size = _render_size(intent)
-    rendered = _render_spec(workout, spec, dataset, layout_mode=layout_mode, renderers_config=renderers_config, render_size=render_size, language=language)
+    rendered = _render_spec(workout, spec, dataset, layout_mode=layout_mode, render_size=render_size, language=language)
     return VisualizationArtifact(
         content=rendered.content,
         filename=f"{filename_prefix}-{spec.output_filename_suffix}.png",
@@ -330,7 +324,6 @@ def _render_social_image_visualization(
     filename_prefix: str,
     tile_cache_root: Path | None = None,
     maps_config: MapsConfig | None = None,
-    renderers_config: RenderersConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
     background_image: bytes | None = None,
 ) -> VisualizationArtifact:
@@ -370,7 +363,7 @@ def _render_social_image_visualization(
             width=render_size[0],
             height=render_size[1],
         )
-    renderer = resolve_renderer(renderers_config, "social_image")
+    renderer = resolve_renderer("social_image")
     rendered = renderer.render_social_image_png(
         SocialImage(
             title=workout.title,
@@ -513,7 +506,6 @@ def _render_route_map_visualization(
     filename_prefix: str,
     tile_cache_root: Path | None = None,
     maps_config: MapsConfig | None = None,
-    renderers_config: RenderersConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
     route_labels: dict[str, str] | None = None,
 ) -> VisualizationArtifact:
@@ -554,7 +546,7 @@ def _render_route_map_visualization(
         waypoints=waypoints,
         safe_rect=_route_map_safe_rect(chart.width, chart.height, elevation_profile),
     )
-    renderer = resolve_renderer(renderers_config, "route")
+    renderer = resolve_renderer("route")
     rendered = renderer.render_route_map_png(
         RouteMap(
             title=chart.title,
@@ -1134,7 +1126,6 @@ def _render_spec(
     dataset: Dataset,
     *,
     layout_mode: str = "single_axis",
-    renderers_config: RenderersConfig | None = None,
     render_size: tuple[int, int] = (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT),
     language: SupportedLanguage = SupportedLanguage.FI,
 ) -> RenderedSpec:
@@ -1145,7 +1136,7 @@ def _render_spec(
     x_label = _metric_label(spec.x.column_id, language=language)
     y_label = _y_axis_label(spec, language=language)
     if _should_render_metric_aggregate_bars(spec, dataset):
-        renderer = resolve_renderer(renderers_config, "bar")
+        renderer = resolve_renderer("bar")
         return RenderedSpec(
             content=renderer.render_bar_chart_png(
                 BarChart(
@@ -1164,7 +1155,7 @@ def _render_spec(
             renderer=renderer.name,
         )
     if spec.mark == "pie":
-        renderer = resolve_renderer(renderers_config, "pie")
+        renderer = resolve_renderer("pie")
         return RenderedSpec(
             content=renderer.render_pie_chart_png(
                 PieChart(
@@ -1189,7 +1180,7 @@ def _render_spec(
             renderer=renderer.name,
         )
     if spec.mark == "bar":
-        renderer = resolve_renderer(renderers_config, "bar")
+        renderer = resolve_renderer("bar")
         return RenderedSpec(
             content=renderer.render_bar_chart_png(
                 BarChart(
@@ -1227,7 +1218,7 @@ def _render_spec(
     if _should_normalize_to_primary_range(spec, layout_mode):
         series = _apply_normalization(series)
     if layout_mode == "small_multiples" and len(series) > 1:
-        renderer = resolve_renderer(renderers_config, "multi_panel_line")
+        renderer = resolve_renderer("multi_panel_line")
         return RenderedSpec(
             content=renderer.render_multi_panel_line_chart_png(
                 MultiPanelLineChart(
@@ -1253,7 +1244,7 @@ def _render_spec(
             chart_type="multi_panel_line",
             renderer=renderer.name,
         )
-    renderer = resolve_renderer(renderers_config, "line")
+    renderer = resolve_renderer("line")
     return RenderedSpec(
         content=renderer.render_line_chart_png(
             LineChart(

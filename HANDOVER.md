@@ -9,7 +9,7 @@ This is the fast entrypoint for a new session. Read `LOCAL.md` first when presen
 - `/aimo` is the chat/natural-language slash surface. `/gpx tallenna` handles GPX slash upload with optional `nimi`.
 - `/treenit` supports list/show/current/set-current/delete with same-user button confirmation, rename, and tag add/remove. `/asetukset` shows settings and sets HR zones.
 - `/help` has deterministic topics for general help, commands, visualization, social images, and privacy/storage/model-context behavior.
-- Visualizations use `internal` or `pillow` renderers through config. `pillow` is the current default path and includes route maps, period charts, and social-image rendering.
+- Visualizations use the Pillow renderer for route maps, period charts, and social-image rendering.
 - Route maps use MapTiler raster tiles when configured, with local OSM fallback. Aimo owns route overlays, unified markers, waypoint/reittimerkki legends, kilometer markers, route coloring, and the single-route elevation overlay.
 - Single-route maps show GPX waypoints by default, support `-waypoints` / `-reittimerkit`, and show a bottom elevation overlay with grade coloring, waypoint/start/finish/min/max labels, a kilometer axis, and `-elevation` / `-korkeus` hiding.
 - Social images use `output_mode=social_image`, plustägit such as `+social` / `+somekuva` / `+poster`, and bounded tarkenteet such as `dim=45` on inline or `style:` / `tyyli:` lines.

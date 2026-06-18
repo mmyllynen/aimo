@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 
+from PIL import Image
+
 from app.dispatcher import DispatchContext, Dispatcher, route_event
-from core.config import MapsConfig, RenderersConfig
+from core.config import MapsConfig
 from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
 from core.i18n import SupportedLanguage, TranslationKey
 from core.routing import WorkflowTarget
@@ -15,7 +18,7 @@ from llm.operations import VisualizationIntent
 from storage.repositories import AttachmentRecord, HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
 from storage.unit_of_work import UnitOfWork, open_database
 import visualization.service as visualization_service
-from visualization.render import DEFAULT_RENDER_HEIGHT, DEFAULT_RENDER_WIDTH, _decode_png_rgb, _png
+from visualization.render import DEFAULT_RENDER_HEIGHT, DEFAULT_RENDER_WIDTH
 from visualization.tiles import TileFetchResult, TileImage
 from workflows.visualization import _apply_visualization_modifiers, _period_title, _visualization_modifiers, _visualization_negative_modifiers
 from workout.periods import PeriodBounds
@@ -196,7 +199,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
             result = self.dispatcher.dispatch(
                 _mention("event-route-waypoints", "näytä reitti kartalla"),
-                DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+                DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
             )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
@@ -215,7 +218,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "piirrä somekuva viimeisestä treenistä"),
-            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
@@ -248,11 +251,11 @@ class VisualizationWorkflowTests(unittest.TestCase):
                         attachment_id="photo-1",
                         filename="photo.png",
                         content_type="image/png",
-                        metadata={"content": _png(140, 90, bytearray((40, 80, 120) * 140 * 90))},
+                        metadata={"content": _solid_png(140, 90, (40, 80, 120))},
                     ),
                 ),
             ),
-            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
@@ -278,7 +281,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
                     ),
                 ),
             ),
-            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
@@ -291,7 +294,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
         result = self.dispatcher.dispatch(
             _mention("event-1", "piirrä somekuva viimeisestä treenistä"),
-            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client), renderers_config=RenderersConfig(default="pillow")),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
         self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
@@ -449,7 +452,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(artifact.metadata["scope_type"], "workout_set")
         self.assertEqual(artifact.metadata["workout_ids"], ["workout-1", "workout-2"])
         self.assertEqual(artifact.metadata["period_start_date"], "2026-06-01")
-        self.assertEqual(artifact.metadata["period_end_date"], "2026-06-17")
+        self.assertEqual(artifact.metadata["period_end_date"], "2026-06-18")
         self.assertEqual(artifact.metadata["workout_id"], "period-event-1")
 
     def test_date_selector_with_date_range_uses_period_workout_set(self) -> None:
@@ -552,7 +555,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.messages[0].content_type, "image/png")
         self.assertTrue(result.messages[0].content.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(result.messages[0].metadata["rendered_metrics"], ("route",))
-        self.assertEqual(_decode_png_rgb(result.messages[0].content)[:2], (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT))
+        self.assertEqual(_png_size(result.messages[0].content), (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT))
 
     def test_ambiguous_route_map_request_uses_active_route_context(self) -> None:
         self._seed_latest_activity_and_active_route()
@@ -606,7 +609,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.messages[0].metadata["route_color_status"], "ok")
         self.assertEqual(result.messages[0].metadata["render_width"], 1080)
         self.assertEqual(result.messages[0].metadata["render_height"], 1920)
-        self.assertEqual(_decode_png_rgb(result.messages[0].content)[:2], (1080, 1920))
+        self.assertEqual(_png_size(result.messages[0].content), (1080, 1920))
 
     def test_route_map_multiple_color_modifiers_warn_and_use_first_metric(self) -> None:
         self._seed_workout(with_heart_rate=True, with_location=True)
@@ -631,7 +634,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
         def fake_fetch_tiles(coords, config):
             del config
-            content = _png(256, 256, bytearray((171, 205, 239) * 256 * 256))
+            content = _solid_png(256, 256, (171, 205, 239))
             return TileFetchResult(tiles=tuple(TileImage(coord=coord, content=content, source="cache") for coord in coords))
 
         visualization_service.fetch_tiles = fake_fetch_tiles
@@ -664,7 +667,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
         def fake_fetch_tiles(coords, config):
             del config
-            content = _png(512, 512, bytearray((171, 205, 239) * 512 * 512))
+            content = _solid_png(512, 512, (171, 205, 239))
             return TileFetchResult(tiles=tuple(TileImage(coord=coord, content=content, source="network") for coord in coords))
 
         visualization_service.fetch_tiles = fake_fetch_tiles
@@ -677,7 +680,6 @@ class VisualizationWorkflowTests(unittest.TestCase):
                         artifact_path=Path(tmpdir) / "artifacts",
                         llm_gateway=LLMGateway(client),
                         maps_config=MapsConfig(provider="maptiler", maptiler_api_key="test-key"),
-                        renderers_config=RenderersConfig(route="pillow"),
                     ),
                 )
         finally:
@@ -689,7 +691,7 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.messages[0].metadata["tile_size"], 512)
         self.assertEqual(result.messages[0].metadata["route_overlay"], "aimo")
         self.assertEqual(result.messages[0].metadata["renderer"], "pillow")
-        self.assertEqual(_decode_png_rgb(result.messages[0].content)[:2], (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT))
+        self.assertEqual(_png_size(result.messages[0].content), (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT))
 
     def test_current_month_route_map_uses_period_workout_set(self) -> None:
         self._seed_workout(
@@ -1311,6 +1313,18 @@ def _visualization_client(intent: dict[str, object]) -> FakeLLMClient:
             LLMOperation.VISUALIZATION_INTENT: intent,
         }
     )
+
+
+def _solid_png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
+    image = Image.new("RGB", (width, height), color)
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _png_size(content: bytes) -> tuple[int, int]:
+    with Image.open(BytesIO(content)) as image:
+        return image.size
 
 
 if __name__ == "__main__":

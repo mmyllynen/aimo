@@ -25,8 +25,6 @@ class ConfigRuntimeTests(unittest.TestCase):
         self.assertEqual(config.discord.allowed_channel_ids, frozenset())
         self.assertFalse(config.discord.allow_direct_messages)
         self.assertEqual(config.history.retention_days, 365)
-        self.assertEqual(config.renderers.default, "pillow")
-        self.assertEqual(config.renderers.route, "")
 
     def test_reads_full_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -64,13 +62,6 @@ class ConfigRuntimeTests(unittest.TestCase):
                         "maptiler_api_key = maptiler-key",
                         "maptiler_map_id = outdoor-v2",
                         "timeout_s = 12.5",
-                        "[renderers]",
-                        "default = internal",
-                        "line = pillow",
-                        "multi_panel_line = internal",
-                        "bar = pillow",
-                        "pie = internal",
-                        "route = pillow",
                     ]
                 ),
                 encoding="utf-8",
@@ -97,12 +88,6 @@ class ConfigRuntimeTests(unittest.TestCase):
         self.assertEqual(config.maps.maptiler_api_key, "maptiler-key")
         self.assertEqual(config.maps.maptiler_map_id, "outdoor-v2")
         self.assertEqual(config.maps.timeout_s, 12.5)
-        self.assertEqual(config.renderers.default, "internal")
-        self.assertEqual(config.renderers.line, "pillow")
-        self.assertEqual(config.renderers.multi_panel_line, "internal")
-        self.assertEqual(config.renderers.bar, "pillow")
-        self.assertEqual(config.renderers.pie, "internal")
-        self.assertEqual(config.renderers.route, "pillow")
 
     def test_require_secrets_rejects_missing_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -133,14 +118,6 @@ class ConfigRuntimeTests(unittest.TestCase):
             path.write_text("[openai]\nmax_tokens = nope\n", encoding="utf-8")
 
             with self.assertRaises(ConfigError):
-                load_app_config(path)
-
-    def test_invalid_renderer_value_fails_clearly(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "aimo.conf"
-            path.write_text("[renderers]\nroute = blurry\n", encoding="utf-8")
-
-            with self.assertRaisesRegex(ConfigError, "renderers.route"):
                 load_app_config(path)
 
     def test_invalid_discord_allowlist_id_fails_clearly(self) -> None:

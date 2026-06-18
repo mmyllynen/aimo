@@ -17,7 +17,6 @@ Important sections:
 - `[history]`: retention policy
 - `[debug]`: debug enablement
 - `[maps]`: tile provider settings
-- `[renderers]`: renderer selection by chart type
 
 Production startup must require Discord token, allowed guild ids, and OpenAI key. Local checks may run without secrets. Direct messages are rejected by runtime policy even if older config files contain an `allow_direct_messages` field.
 

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from app.policy import AdminPolicy
 from app.redaction import redact_payload
-from core.config import MapsConfig, RenderersConfig
+from core.config import MapsConfig
 from core.events import CanonicalEvent, EventKind
 from core.errors import AppError, ErrorCategory
 from core.i18n import DEFAULT_LANGUAGE, LocalizedText, SupportedLanguage, TranslationKey
@@ -40,7 +40,6 @@ class DispatchContext:
     raw_gpx_path: Path | None = None
     artifact_path: Path | None = None
     maps_config: MapsConfig = MapsConfig()
-    renderers_config: RenderersConfig = RenderersConfig()
     status_callback: Callable[[str], None] | None = None
     trace_keep_limit: int = 1000
 
@@ -199,7 +198,6 @@ class Dispatcher:
                     language=context.language,
                     artifact_root=context.artifact_path,
                     maps_config=context.maps_config,
-                    renderers_config=context.renderers_config,
                 )
             elif route.target == WorkflowTarget.WORKOUT_CHAT:
                 result = self.workout_chat_workflow.handle(

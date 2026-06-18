@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from core.config import MapsConfig, RenderersConfig
+from core.config import MapsConfig
 from core.events import CanonicalEvent
 from core.errors import AppError, ErrorCategory
 from core.i18n import LocalizedText, SupportedLanguage, TranslationKey
@@ -162,7 +162,6 @@ class VisualizationWorkflow:
         language: SupportedLanguage,
         artifact_root: Path | None = None,
         maps_config: MapsConfig | None = None,
-        renderers_config: RenderersConfig | None = None,
     ) -> WorkflowResult:
         try:
             resolved = _resolve_request(event, route, repositories, gateway=gateway, language=language)
@@ -200,7 +199,6 @@ class VisualizationWorkflow:
                 gateway=gateway,
                 tile_cache_root=_tile_cache_root(artifact_root),
                 maps_config=maps_config,
-                renderers_config=renderers_config,
                 language=language,
             )
         except MissingHeartRateZonesError:
@@ -349,7 +347,6 @@ def _render_with_optional_revision(
     gateway: LLMGateway | None,
     tile_cache_root: Path | None = None,
     maps_config: MapsConfig | None = None,
-    renderers_config: RenderersConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
 ) -> tuple[VisualizationArtifact, VisualizationIntent]:
     _validate_zone_prerequisite(resolved.intent, heart_rate_zones)
@@ -365,7 +362,6 @@ def _render_with_optional_revision(
                     manifest=manifest,
                     tile_cache_root=tile_cache_root,
                     maps_config=maps_config,
-                    renderers_config=renderers_config,
                     language=language,
                 ),
                 resolved.intent,
@@ -412,7 +408,6 @@ def _render_with_optional_revision(
                     manifest=revised_manifest,
                     tile_cache_root=tile_cache_root,
                     maps_config=maps_config,
-                    renderers_config=renderers_config,
                     language=language,
                 ),
                 revised_intent,
@@ -427,7 +422,6 @@ def _render_with_optional_revision(
                 comparison_workouts=resolved.comparison_workouts,
                 tile_cache_root=tile_cache_root,
                 maps_config=maps_config,
-                renderers_config=renderers_config,
                 language=language,
                 social_background_image=_social_background_image(event),
             ),
@@ -466,7 +460,6 @@ def _render_with_optional_revision(
                 comparison_workouts=resolved.comparison_workouts,
                 tile_cache_root=tile_cache_root,
                 maps_config=maps_config,
-                renderers_config=renderers_config,
                 language=language,
                 social_background_image=_social_background_image(event),
             ),
