@@ -210,13 +210,14 @@ def _is_fresh(metadata: Mapping[str, str], now: datetime) -> bool:
 
 
 def _expiry_from_headers(headers: Mapping[str, str], now: datetime, fallback_ttl: timedelta) -> datetime:
+    minimum = now + fallback_ttl
     max_age = _cache_control_max_age(headers.get("cache-control", ""))
     if max_age is not None:
-        return now + max_age
+        return max(now + max_age, minimum)
     expires_at = _parse_http_date(headers.get("expires", ""))
     if expires_at is not None and expires_at > now:
-        return expires_at
-    return now + fallback_ttl
+        return max(expires_at, minimum)
+    return minimum
 
 
 def _cache_control_max_age(value: str) -> timedelta | None:

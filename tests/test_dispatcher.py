@@ -420,7 +420,7 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(result.status, WorkflowStatus.USER_ERROR)
         self.assertEqual(result.error.category.value, "unsupported_attachment")
 
-    def test_debug_workflow_returns_requesters_latest_trace_as_json_file(self) -> None:
+    def test_debug_workflow_returns_requesters_latest_trace_at_requested_level(self) -> None:
         with UnitOfWork(self.connection) as repositories:
             repositories.debug_traces.create(
                 trace_id="trace-1",
@@ -446,17 +446,56 @@ class DispatcherTests(unittest.TestCase):
             channel_id="channel-1",
             user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
             command_name="debug",
+            options={"level": "1"},
         )
 
         result = self.dispatcher.dispatch(slash_to_event(slash), DispatchContext(UnitOfWork(self.connection)))
 
         self.assertEqual(result.status, WorkflowStatus.SUCCESS)
-        self.assertEqual(result.messages[0].kind, OutgoingKind.EPHEMERAL_FILE)
-        payload = json.loads(result.messages[0].content.decode("utf-8"))
+        self.assertTrue(all(message.kind == OutgoingKind.EPHEMERAL_TEXT for message in result.messages))
+        payload = _debug_payload(result)
+        self.assertEqual(payload["debug_level"], 1)
         self.assertEqual(payload["debug_trace"]["trace_id"], "trace-1")
         self.assertEqual(payload["debug_trace"]["event_count"], 1)
         self.assertEqual(payload["debug_trace"]["events_truncated"], 0)
         self.assertEqual(payload["debug_trace"]["events"][0]["stage"], "route")
+
+    def test_debug_level_zero_returns_compact_summary_without_events(self) -> None:
+        with UnitOfWork(self.connection) as repositories:
+            repositories.debug_traces.create(
+                trace_id="trace-1",
+                source_event_id="event-0",
+                workflow="help",
+                status="success",
+                started_at="2026-06-13T10:00:00Z",
+                payload={"route": "help", "user_id": "user-1"},
+            )
+            repositories.debug_traces.add_event(
+                DebugTraceEventRecord(
+                    trace_event_id="trace-event-1",
+                    trace_id="trace-1",
+                    stage="route",
+                    level="info",
+                    message="routed",
+                    created_at="2026-06-13T10:00:01Z",
+                )
+            )
+        slash = DiscordSlashSnapshot(
+            interaction_id="interaction-1",
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
+            command_name="debug",
+            options={"level": "0"},
+        )
+
+        result = self.dispatcher.dispatch(slash_to_event(slash), DispatchContext(UnitOfWork(self.connection)))
+        payload = _debug_payload(result)
+
+        self.assertEqual(payload["debug_level"], 0)
+        self.assertEqual(payload["debug_trace"]["trace_id"], "trace-1")
+        self.assertEqual(payload["debug_trace"]["event_count"], 1)
+        self.assertNotIn("events", payload["debug_trace"])
 
     def test_debug_workflow_limits_large_trace_export_and_redacts_payloads(self) -> None:
         with UnitOfWork(self.connection) as repositories:
@@ -490,15 +529,16 @@ class DispatcherTests(unittest.TestCase):
             channel_id="channel-1",
             user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
             command_name="debug",
+            options={"level": "1"},
         )
 
         result = self.dispatcher.dispatch(slash_to_event(slash), DispatchContext(UnitOfWork(self.connection)))
-        payload = json.loads(result.messages[0].content.decode("utf-8"))
+        payload = _debug_payload(result)
         trace = payload["debug_trace"]
 
         self.assertEqual(trace["event_count"], 105)
-        self.assertEqual(trace["events_returned"], 100)
-        self.assertEqual(trace["events_truncated"], 5)
+        self.assertEqual(trace["events_returned"], 40)
+        self.assertEqual(trace["events_truncated"], 65)
         self.assertEqual(trace["payload"]["token"], "[redacted]")
         self.assertIn("[truncated]", trace["payload"]["long"])
         self.assertEqual(trace["events"][0]["payload"]["authorization"], "[redacted]")
@@ -520,10 +560,11 @@ class DispatcherTests(unittest.TestCase):
             channel_id="channel-1",
             user=DiscordUserSnapshot(user_id="user-1", user_name="runner"),
             command_name="debug",
+            options={"level": "1"},
         )
 
         result = self.dispatcher.dispatch(slash_to_event(slash), DispatchContext(UnitOfWork(self.connection)))
-        payload = json.loads(result.messages[0].content.decode("utf-8"))
+        payload = _debug_payload(result)
 
         self.assertIsNone(payload["debug_trace"])
 
@@ -543,6 +584,7 @@ class DispatcherTests(unittest.TestCase):
             channel_id="channel-1",
             user=DiscordUserSnapshot(user_id="admin-1", user_name="admin"),
             command_name="debug",
+            options={"level": "1"},
         )
 
         result = self.dispatcher.dispatch(
@@ -552,9 +594,64 @@ class DispatcherTests(unittest.TestCase):
                 admin_policy=AdminPolicy(frozenset({"admin-1"})),
             ),
         )
-        payload = json.loads(result.messages[0].content.decode("utf-8"))
+        payload = _debug_payload(result)
 
         self.assertEqual(payload["debug_trace"]["trace_id"], "other-user-trace")
+
+    def test_mention_debug_plus_tag_returns_current_trace_with_level_two_llm_payloads(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.INTENT_CLASSIFICATION: {
+                    "workflow": "chat",
+                    "confidence": "high",
+                    "slots": {},
+                    "clarification": "",
+                    "reason": "General chat.",
+                },
+                LLMOperation.CHAT_REPLY: {
+                    "reply_text": "Moi.",
+                    "tone": "concise",
+                    "should_update_summary": False,
+                },
+            }
+        )
+        event = CanonicalEvent(
+            event_id="event-1",
+            source=EventSource.DISCORD_MESSAGE,
+            kind=EventKind.MENTION,
+            guild_id="guild-1",
+            channel_id="channel-1",
+            user_id="user-1",
+            user_name="runner",
+            text="mitä kuuluu? +debug2",
+        )
+
+        result = self.dispatcher.dispatch(
+            event,
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+        payload = _debug_payload(result, public_debug=True)
+
+        self.assertEqual(result.messages[0].kind, OutgoingKind.TEXT)
+        self.assertEqual(payload["debug_level"], 2)
+        self.assertEqual(payload["debug_trace"]["source_event_id"], "event-1")
+        llm_event = next(event for event in payload["debug_trace"]["events"] if event["stage"] == "llm")
+        self.assertEqual(llm_event["payload"]["llm_payloads"]["user_payload"]["user_text"], "mitä kuuluu?")
+        self.assertEqual(llm_event["payload"]["llm_payloads"]["response_payload"]["reply_text"], "Moi.")
+        self.assertNotIn("+debug2", client.requests[0].user_payload["user_text"])
+
+
+def _debug_payload(result, *, public_debug: bool = False) -> dict[str, object]:
+    messages = result.messages
+    if public_debug:
+        messages = tuple(message for message in messages if message.metadata.get("debug_level") is not None)
+    chunks = []
+    for message in messages:
+        text = message.text
+        if text.startswith("Aimo debug ") and "\n" in text:
+            text = text.split("\n", 1)[1]
+        chunks.append(text)
+    return json.loads("".join(chunks))
 
 
 if __name__ == "__main__":

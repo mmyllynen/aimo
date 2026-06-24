@@ -20,6 +20,7 @@ EXPECTED_TABLES = {
     "workout_tags",
     "workout_points",
     "workout_streams",
+    "workout_estimate_features",
     "debug_traces",
     "debug_trace_events",
     "rendered_artifacts",
@@ -149,4 +150,3 @@ class StorageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

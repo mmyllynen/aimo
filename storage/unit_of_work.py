@@ -14,6 +14,7 @@ from storage.repositories import (
     PendingWorkoutDeleteRepository,
     RenderedArtifactsRepository,
     UsersRepository,
+    WorkoutEstimateFeaturesRepository,
     WorkoutStreamsRepository,
     WorkoutsRepository,
 )
@@ -31,6 +32,7 @@ class RepositoryBundle:
     attachments: AttachmentsRepository
     workouts: WorkoutsRepository
     active_workouts: ActiveWorkoutRepository
+    workout_estimate_features: WorkoutEstimateFeaturesRepository
     workout_streams: WorkoutStreamsRepository
     debug_traces: DebugTraceRepository
     rendered_artifacts: RenderedArtifactsRepository
@@ -46,6 +48,7 @@ def build_repositories(connection: sqlite3.Connection) -> RepositoryBundle:
         attachments=AttachmentsRepository(connection),
         workouts=WorkoutsRepository(connection),
         active_workouts=ActiveWorkoutRepository(connection),
+        workout_estimate_features=WorkoutEstimateFeaturesRepository(connection),
         workout_streams=WorkoutStreamsRepository(connection),
         debug_traces=DebugTraceRepository(connection),
         rendered_artifacts=RenderedArtifactsRepository(connection),

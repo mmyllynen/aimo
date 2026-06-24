@@ -11,6 +11,10 @@ from llm.operations import (
     IntentClassificationInput,
     PeriodAnalysisReplyInput,
     PeriodRequestInput,
+    RouteTimeEstimateExplanationIntentInput,
+    RouteTimeEstimateExplanationReplyInput,
+    RouteTimeEstimateIntentInput,
+    RouteTimeEstimateReplyInput,
     VisualizationIntentInput,
     VisualizationIntentRevisionInput,
     WorkoutReplyInput,
@@ -19,10 +23,14 @@ from llm.operations import (
     extract_gpx_title,
     extract_visualization_intent,
     extract_workout_reference,
+    interpret_route_time_estimate_explanation_intent,
+    interpret_route_time_estimate_intent,
     interpret_period_request,
     revise_visualization_intent,
     write_chat_reply,
     write_period_analysis_reply,
+    write_route_time_estimate_explanation_reply,
+    write_route_time_estimate_reply,
     write_workout_reply,
 )
 
@@ -203,6 +211,116 @@ class LLMGatewayTests(unittest.TestCase):
         self.assertEqual(reply.reply_text, "Yhteensä 50 m nousua.")
         self.assertNotIn("workout_points", client.requests[0].user_payload)
         self.assertIn("Respond in fi", client.requests[0].system_prompt)
+
+    def test_interpret_route_time_estimate_intent_returns_boolean_intent(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.ROUTE_TIME_ESTIMATE_INTENT: {
+                    "is_route_time_estimate": True,
+                    "activity_intent": "run",
+                    "target_date": "2026-06-20",
+                    "target_time_of_day": "",
+                    "reason": "User asked how long a route would take.",
+                }
+            }
+        )
+
+        intent = interpret_route_time_estimate_intent(
+            LLMGateway(client),
+            RouteTimeEstimateIntentInput(
+                user_text="paljonko tähän reittiin menisi?",
+                current_date="2026-06-18",
+                timezone="Europe/Helsinki",
+                compact_routing_context={"active_workout_id": "workout-1"},
+            ),
+        )
+
+        self.assertTrue(intent.is_route_time_estimate)
+        self.assertEqual(intent.activity_intent, "run")
+        self.assertEqual(intent.target_date, "2026-06-20")
+        self.assertEqual(client.requests[0].operation, LLMOperation.ROUTE_TIME_ESTIMATE_INTENT)
+        self.assertIn("Do not calculate time", client.requests[0].system_prompt)
+
+    def test_write_route_time_estimate_reply_uses_estimate_facts(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.ROUTE_TIME_ESTIMATE_REPLY: {
+                    "reply_text": "Arvio on noin 35 minuuttia.",
+                    "claims_used": ["estimate_s", "route_distance_km"],
+                    "missing_data_notes": ["ascent_m"],
+                }
+            }
+        )
+
+        reply = write_route_time_estimate_reply(
+            LLMGateway(client),
+            RouteTimeEstimateReplyInput(
+                user_text="kauanko tähän menee?",
+                estimate_facts={
+                    "workout_id": "workout-1",
+                    "estimate_s": 2100,
+                    "estimate_text": "35 min",
+                    "route_distance_km": 6.0,
+                    "missing_data": ["ascent_m"],
+                },
+            ),
+            language=SupportedLanguage.FI,
+        )
+
+        self.assertEqual(reply.reply_text, "Arvio on noin 35 minuuttia.")
+        self.assertEqual(reply.missing_data_notes, ("ascent_m",))
+        self.assertIn("estimate_facts", client.requests[0].user_payload)
+        self.assertIn("Do not invent pace", client.requests[0].system_prompt)
+
+    def test_interpret_route_time_estimate_explanation_intent_returns_boolean_intent(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_INTENT: {
+                    "is_explanation_request": True,
+                    "reason": "User asked why the estimate was produced.",
+                }
+            }
+        )
+
+        intent = interpret_route_time_estimate_explanation_intent(
+            LLMGateway(client),
+            RouteTimeEstimateExplanationIntentInput(
+                user_text="millä perusteella tuo arvio tuli?",
+                compact_routing_context={"has_recent_route_time_estimate": True},
+            ),
+        )
+
+        self.assertTrue(intent.is_explanation_request)
+        self.assertEqual(client.requests[0].operation, LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_INTENT)
+        self.assertIn("previous route time estimate", client.requests[0].system_prompt)
+
+    def test_write_route_time_estimate_explanation_reply_uses_explanation_facts(self) -> None:
+        client = FakeLLMClient(
+            {
+                LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_REPLY: {
+                    "reply_text": "Arvio perustui painotettuun vertailuun.",
+                    "claims_used": ["model", "baseline_pace_text"],
+                    "missing_data_notes": [],
+                }
+            }
+        )
+
+        reply = write_route_time_estimate_explanation_reply(
+            LLMGateway(client),
+            RouteTimeEstimateExplanationReplyInput(
+                user_text="avaa laskenta",
+                explanation_facts={
+                    "model": "feature_similarity",
+                    "baseline_pace_text": "8:05 min/km",
+                    "comparable_count": 9,
+                },
+            ),
+            language=SupportedLanguage.FI,
+        )
+
+        self.assertEqual(reply.reply_text, "Arvio perustui painotettuun vertailuun.")
+        self.assertIn("explanation_facts", client.requests[0].user_payload)
+        self.assertIn("Do not invent workouts", client.requests[0].system_prompt)
 
     def test_chat_reply_includes_configured_language_instruction(self) -> None:
         client = FakeLLMClient(

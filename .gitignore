@@ -17,6 +17,7 @@ secrets.*
 data/
 logs/
 artifacts/
+.fuse_hidden*
 *.sqlite
 *.sqlite3
 *.db

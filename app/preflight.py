@@ -8,6 +8,7 @@ from app.runtime import ApplicationContext, build_application_context
 from core.config import ConfigError
 from core.i18n import validate_catalogs
 from storage.files import write_bytes_under
+from visualization.animation import _ffmpeg_executable
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ def run_production_preflight(
         context.close()
 
     checks.append(_discord_package_check(require_discord_package=require_discord_package))
+    checks.append(_ffmpeg_check())
     return PreflightReport(checks=tuple(checks))
 
 
@@ -74,6 +76,8 @@ def _storage_checks(context: ApplicationContext) -> tuple[PreflightCheck, ...]:
         ("artifact_path", context.runtime.config.storage.artifact_path),
     ):
         checks.append(_write_probe(name, root))
+    if context.runtime.config.public_artifacts.path is not None:
+        checks.append(_write_probe("public_artifacts_path", context.runtime.config.public_artifacts.path))
     return tuple(checks)
 
 
@@ -93,6 +97,12 @@ def _discord_package_check(*, require_discord_package: bool) -> PreflightCheck:
     if require_discord_package:
         return _fail("discord.py", "discord package is not installed")
     return _ok("discord.py", "discord package check skipped")
+
+
+def _ffmpeg_check() -> PreflightCheck:
+    if _ffmpeg_executable() is not None:
+        return _ok("ffmpeg", "ffmpeg is available for WebM overlay encoding")
+    return _fail("ffmpeg", "ffmpeg or the imageio-ffmpeg package is required for WebM overlay encoding")
 
 
 def _ok(name: str, message: str) -> PreflightCheck:

@@ -19,6 +19,8 @@ from storage.repositories import (
     RenderedArtifactRecord,
     RenderedArtifactsRepository,
     UsersRepository,
+    WorkoutEstimateFeatureRecord,
+    WorkoutEstimateFeaturesRepository,
     WorkoutPointRecord,
     WorkoutRecord,
     WorkoutStreamRecord,
@@ -348,6 +350,56 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(points[1].heart_rate_bpm, 130)
         self.assertEqual(summaries[0].stream_key, "heart_rate")
         self.assertEqual(summaries[0].avg_value, 125)
+
+    def test_workout_estimate_features_upsert_and_list_for_user(self) -> None:
+        self._seed_two_user_workouts()
+        features = WorkoutEstimateFeaturesRepository(self.connection)
+
+        with transaction(self.connection):
+            features.upsert(
+                WorkoutEstimateFeatureRecord(
+                    workout_id="workout-1",
+                    owner_user_id="user-1",
+                    feature_version=1,
+                    kind="run",
+                    primary_kind="run",
+                    local_date="2026-06-13",
+                    distance_km=5.0,
+                    duration_s=1800,
+                    pace_s_per_km=360,
+                    ascent_m=20,
+                    descent_m=15,
+                    ascent_per_km=4,
+                    descent_per_km=3,
+                    elevation_min_m=10,
+                    elevation_max_m=30,
+                    flat_share=0.4,
+                    climb_share=0.3,
+                    steep_climb_share=0.1,
+                    descent_share=0.2,
+                    steep_descent_share=0.0,
+                    longest_climb_m=12,
+                    longest_descent_m=10,
+                    route_signature="abc123",
+                    distance_band="5-10",
+                    ascent_band="flat",
+                    point_count=100,
+                    distance_coverage=1.0,
+                    elevation_coverage=0.9,
+                    gap_count=0,
+                    quality_flags=("partial_elevation",),
+                    metadata={"source": "test"},
+                    updated_at="2026-06-13T10:00:00Z",
+                )
+            )
+
+        stored = features.get("workout-1")
+        listed = features.list_for_user("user-1")
+
+        self.assertEqual(stored.route_signature, "abc123")
+        self.assertEqual(stored.quality_flags, ("partial_elevation",))
+        self.assertEqual(stored.metadata["source"], "test")
+        self.assertEqual([record.workout_id for record in listed], ["workout-1"])
 
     def test_rendered_artifacts_are_listed_per_owner(self) -> None:
         users = UsersRepository(self.connection)

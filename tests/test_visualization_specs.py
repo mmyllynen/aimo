@@ -62,6 +62,8 @@ from visualization.pillow_renderer import (
     _offset_points,
     _place_map_marker_label,
     _point_at_route_distance,
+    _route_direction_arrows,
+    _route_segment_color,
     _route_km_markers,
     _route_overlay_height,
     _route_subtitle_lines,
@@ -93,7 +95,9 @@ from visualization.service import (
     _bar_tick_format,
     _preferred_tile_zoom,
     _route_chart_subtitle,
+    _route_map_title,
     _route_color_domain,
+    _route_color_mode,
     _route_color_metric_label,
     _route_color_status,
     _route_legend_title,
@@ -138,6 +142,66 @@ class VisualizationSpecTests(unittest.TestCase):
 
     def test_renderer_resolves_to_pillow(self) -> None:
         self.assertEqual(resolve_renderer("route").name, "pillow")
+
+    def test_pillow_route_map_draws_plain_route_line_without_color_metric(self) -> None:
+        content = PillowVisualizationRenderer().render_route_map_png(
+            RouteMap(
+                title="Route",
+                routes=(
+                    RoutePolyline(
+                        label="route",
+                        points=(
+                            RoutePoint(latitude=60.1699, longitude=24.9384),
+                            RoutePoint(latitude=60.1720, longitude=24.9520),
+                            RoutePoint(latitude=60.1750, longitude=24.9600),
+                        ),
+                    ),
+                ),
+                width=640,
+                height=360,
+            )
+        )
+
+        with Image.open(BytesIO(content)) as decoded:
+            image = decoded.convert("RGB")
+            pixels = image.load()
+            blue_route_pixels = sum(
+                1
+                for y in range(image.height)
+                for x in range(image.width)
+                if pixels[x, y][2] > 180 and pixels[x, y][0] < 80 and pixels[x, y][1] < 150
+            )
+        self.assertGreater(blue_route_pixels, 20)
+
+    def test_pillow_route_map_renders_fontawesome_weather_subtitle_tokens(self) -> None:
+        content = PillowVisualizationRenderer().render_route_map_png(
+            RouteMap(
+                title="Reitti: Route",
+                subtitle="23.9 km - 276 nm - Ennuste 3 h 17 min (20/6/2026, {fa:temperature-half} 19°C, {wind:225} 3.3m/s, {fa:sun} sade 0%)",
+                routes=(
+                    RoutePolyline(
+                        label="route",
+                        points=(
+                            RoutePoint(latitude=60.1699, longitude=24.9384),
+                            RoutePoint(latitude=60.1702, longitude=24.9490),
+                        ),
+                    ),
+                ),
+                width=640,
+                height=360,
+            )
+        )
+
+        with Image.open(BytesIO(content)) as decoded:
+            image = decoded.convert("RGB")
+            pixels = image.load()
+            light_subtitle_pixels = sum(
+                1
+                for y in range(50, 95)
+                for x in range(20, min(620, image.width))
+                if min(pixels[x, y]) > 180
+            )
+        self.assertGreater(light_subtitle_pixels, 30)
 
     def test_pillow_renderer_renders_all_chart_types_as_png(self) -> None:
         renderer = PillowVisualizationRenderer()
@@ -432,7 +496,9 @@ class VisualizationSpecTests(unittest.TestCase):
             ascent_m=276,
         )
 
-        self.assertEqual(_route_chart_subtitle(route_with_ascent, language=SupportedLanguage.FI), "23.9 km - nousua 276 m")
+        self.assertEqual(_route_chart_subtitle(route_with_ascent, language=SupportedLanguage.FI), "23.9 km - 276 nm")
+        self.assertEqual(_route_map_title(route_with_ascent.title, language=SupportedLanguage.FI), "Reitti: Juhannusreitti")
+        self.assertEqual(_route_map_title("Reitti: Juhannusreitti", language=SupportedLanguage.FI), "Reitti: Juhannusreitti")
 
     def test_route_map_can_color_single_route_by_heart_rate(self) -> None:
         artifact = render_workout_visualization(
@@ -458,6 +524,85 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(artifact.rendered_metrics, ("route", "heart_rate_bpm"))
         self.assertEqual(artifact.metadata["route_color_metric"], "heart_rate_bpm")
         self.assertEqual(artifact.metadata["route_color_status"], "ok")
+
+    def test_route_map_grade_color_uses_elevation_overlay_grade_scale(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(workout_id="w", title="Run", duration_s=120, distance_km=2.0),
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, distance_km=0.0, latitude=60.17, longitude=24.94, elevation_m=10),
+                WorkoutPointRecord(workout_id="w", point_index=1, distance_km=1.0, latitude=60.18, longitude=24.95, elevation_m=30),
+                WorkoutPointRecord(workout_id="w", point_index=2, distance_km=2.0, latitude=60.19, longitude=24.96, elevation_m=50),
+                WorkoutPointRecord(workout_id="w", point_index=3, distance_km=3.0, latitude=60.20, longitude=24.97, elevation_m=70),
+                WorkoutPointRecord(workout_id="w", point_index=4, distance_km=4.0, latitude=60.21, longitude=24.98, elevation_m=90),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route", "grade"),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+                route_color_metric="grade",
+            ),
+        )
+
+        self.assertTrue(artifact.content.startswith(b"\x89PNG"))
+        self.assertEqual(artifact.rendered_metrics, ("route", "grade"))
+        self.assertEqual(artifact.metadata["route_color_metric"], "grade")
+        self.assertEqual(artifact.metadata["route_color_mode"], "elevation_grade")
+        self.assertEqual(artifact.metadata["route_color_domain"], (0.01, 0.01))
+        self.assertEqual(artifact.metadata["route_color_status"], "ok")
+
+    def test_route_map_elevation_color_uses_absolute_elevation_scale(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(workout_id="w", title="Run", duration_s=120, distance_km=2.0),
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, distance_km=0.0, latitude=60.17, longitude=24.94, elevation_m=10),
+                WorkoutPointRecord(workout_id="w", point_index=1, distance_km=1.0, latitude=60.18, longitude=24.95, elevation_m=30),
+                WorkoutPointRecord(workout_id="w", point_index=2, distance_km=2.0, latitude=60.19, longitude=24.96, elevation_m=50),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route", "elevation_m"),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+                route_color_metric="elevation_m",
+            ),
+        )
+
+        self.assertTrue(artifact.content.startswith(b"\x89PNG"))
+        self.assertEqual(artifact.rendered_metrics, ("route", "elevation_m"))
+        self.assertEqual(artifact.metadata["route_color_metric"], "elevation_m")
+        self.assertEqual(artifact.metadata["route_color_mode"], "metric")
+        self.assertNotEqual(artifact.metadata["route_color_domain"], (-0.15, 0.15))
+        self.assertEqual(artifact.metadata["route_color_status"], "ok")
+
+    def test_route_map_direction_arrows_are_enabled_by_intent_style(self) -> None:
+        artifact = render_workout_visualization(
+            _workout(workout_id="w", title="Run", duration_s=120, distance_km=2.0),
+            (
+                WorkoutPointRecord(workout_id="w", point_index=0, distance_km=0.0, latitude=60.17, longitude=24.94),
+                WorkoutPointRecord(workout_id="w", point_index=1, distance_km=1.0, latitude=60.18, longitude=24.95),
+                WorkoutPointRecord(workout_id="w", point_index=2, distance_km=2.0, latitude=60.19, longitude=24.96),
+            ),
+            VisualizationIntent(
+                workout_selector={"type": "latest"},
+                x_metric="longitude",
+                y_metrics=("route",),
+                transforms=(),
+                date_range={},
+                comparison_mode="",
+                chart_kind="map",
+                social_style={"direction_arrows": True},
+            ),
+        )
+
+        self.assertTrue(artifact.content.startswith(b"\x89PNG"))
+        self.assertEqual(artifact.metadata["route_direction_arrows"], True)
 
     def test_route_map_renders_gpx_waypoints_by_default_and_can_hide_them(self) -> None:
         workout = _workout(
@@ -711,6 +856,19 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertGreaterEqual(len(markers), 1)
         self.assertLess(markers[0][0], 20.0)
 
+    def test_route_direction_arrows_are_sparse_and_follow_route_angle(self) -> None:
+        short = _route_direction_arrows([(0.0, 0.0), (20.0, 0.0)], scale=1)
+        horizontal = _route_direction_arrows([(0.0, 0.0), (500.0, 0.0)], scale=1)
+        vertical = _route_direction_arrows([(0.0, 0.0), (0.0, 500.0)], scale=1)
+
+        self.assertEqual(short, ())
+        self.assertGreaterEqual(len(horizontal), 1)
+        self.assertLessEqual(len(horizontal), 24)
+        self.assertAlmostEqual(horizontal[0].angle, 0.0)
+        self.assertLess(horizontal[0].point[1], 0.0)
+        self.assertGreater(vertical[0].angle, 1.5)
+        self.assertGreater(vertical[0].point[0], 0.0)
+
     def test_map_marker_label_layout_tries_fallback_positions(self) -> None:
         image = Image.new("RGBA", (300, 160), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image, "RGBA")
@@ -784,7 +942,11 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertEqual(_visible_route_legend_count(25, DEFAULT_RENDER_HEIGHT * 2, scale=2), 20)
         self.assertEqual(_visible_route_legend_count(1, DEFAULT_RENDER_HEIGHT * 2, scale=2), 0)
         self.assertGreater(_visible_waypoint_count(2, DEFAULT_RENDER_HEIGHT * 2, 0, scale=2), 0)
-        self.assertEqual(_route_overlay_height(color_scale_only=False, visible_route_count=0, visible_waypoint_count=0, scale=2), 0)
+        self.assertEqual(_route_overlay_height(color_scale_visible=False, visible_route_count=0, visible_waypoint_count=0, scale=2), 0)
+        self.assertGreater(
+            _route_overlay_height(color_scale_visible=True, visible_route_count=0, visible_waypoint_count=2, scale=2),
+            _route_overlay_height(color_scale_visible=False, visible_route_count=0, visible_waypoint_count=2, scale=2),
+        )
 
     def test_pillow_route_subtitle_wraps_structured_summary_only_when_needed(self) -> None:
         draw = ImageDraw.Draw(Image.new("RGBA", (900, 300)))
@@ -922,12 +1084,35 @@ class VisualizationSpecTests(unittest.TestCase):
         self.assertIsNotNone(domain)
         self.assertLess(domain[1], 400)
 
+    def test_route_grade_color_values_are_smoothed_grades(self) -> None:
+        routes = _route_polylines(
+            [
+                WorkoutPointRecord(workout_id="w", point_index=0, distance_km=0.0, latitude=60.10, longitude=24.90, elevation_m=10),
+                WorkoutPointRecord(workout_id="w", point_index=1, distance_km=1.0, latitude=60.11, longitude=24.91, elevation_m=30),
+                WorkoutPointRecord(workout_id="w", point_index=2, distance_km=2.0, latitude=60.12, longitude=24.92, elevation_m=50),
+                WorkoutPointRecord(workout_id="w", point_index=3, distance_km=3.0, latitude=60.13, longitude=24.93, elevation_m=70),
+                WorkoutPointRecord(workout_id="w", point_index=4, distance_km=4.0, latitude=60.14, longitude=24.94, elevation_m=90),
+            ],
+            route_color_metric="grade",
+            route_color_mode=_route_color_mode("grade"),
+        )
+
+        self.assertEqual(routes[0].color_mode, "elevation_grade")
+        self.assertEqual(tuple(round(point.color_value or 0.0, 2) for point in routes[0].points), (0.01, 0.01, 0.01, 0.01, 0.01))
+        self.assertEqual(_route_color_domain(routes, "grade"), (0.01, 0.01))
+
     def test_route_color_direction_is_metric_metadata_driven(self) -> None:
         fast_color = route_metric_color(330, (300, 600), direction="descending")
         slow_color = route_metric_color(570, (300, 600), direction="descending")
 
         self.assertGreater(fast_color[0], slow_color[0])
         self.assertLess(fast_color[2], slow_color[2])
+
+    def test_route_segment_color_can_use_elevation_grade_scale(self) -> None:
+        self.assertEqual(
+            _route_segment_color(0.10, (-0.15, 0.15), direction="ascending", color_mode="elevation_grade"),
+            _grade_color(0.10),
+        )
 
     def test_percentage_ticks_render_with_percent_suffix(self) -> None:
         self.assertEqual(_format_tick(25, tick_format="percentage"), "25%")

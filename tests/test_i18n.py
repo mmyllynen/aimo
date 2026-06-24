@@ -25,7 +25,8 @@ class I18nTests(unittest.TestCase):
             TranslationKey.HELP_COMMANDS: (
                 "/treenit listaa",
                 "/treenit poista",
-                "/debug tila",
+                "/debug level",
+                "+debug2",
             ),
             TranslationKey.HELP_VISUALIZATION: (
                 "+square",

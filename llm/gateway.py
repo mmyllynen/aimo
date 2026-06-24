@@ -15,6 +15,10 @@ class LLMOperation(StrEnum):
     WORKOUT_REFERENCE_EXTRACTION = "workout_reference_extraction"
     PERIOD_REQUEST_INTERPRETATION = "period_request_interpretation"
     PERIOD_ANALYSIS_REPLY = "period_analysis_reply"
+    ROUTE_TIME_ESTIMATE_INTENT = "route_time_estimate_intent"
+    ROUTE_TIME_ESTIMATE_REPLY = "route_time_estimate_reply"
+    ROUTE_TIME_ESTIMATE_EXPLANATION_INTENT = "route_time_estimate_explanation_intent"
+    ROUTE_TIME_ESTIMATE_EXPLANATION_REPLY = "route_time_estimate_explanation_reply"
     CHAT_REPLY = "chat_reply"
     WORKOUT_REPLY = "workout_reply"
     VISUALIZATION_INTENT = "visualization_intent"
@@ -51,6 +55,9 @@ class LLMCallTrace:
     response_keys: tuple[str, ...] = ()
     error_type: str = ""
     error_message: str = ""
+    system_prompt: str = ""
+    user_payload: JsonObject | None = None
+    response_payload: JsonObject | None = None
 
 
 class LLMClient(Protocol):
@@ -71,6 +78,7 @@ class LLMGateway:
     def run(self, request: LLMRequest) -> JsonObject:
         started = perf_counter()
         response_keys: tuple[str, ...] = ()
+        response_payload: JsonObject | None = None
         status = "success"
         error_type = ""
         error_message = ""
@@ -78,6 +86,7 @@ class LLMGateway:
             validate_request(request)
             response = self.client.complete_json(request)
             validate_schema(response.payload, request.response_schema)
+            response_payload = response.payload
             response_keys = tuple(sorted(response.payload.keys()))
             return response.payload
         except Exception as exc:
@@ -95,6 +104,9 @@ class LLMGateway:
                     response_keys=response_keys,
                     error_type=error_type,
                     error_message=error_message,
+                    system_prompt=request.system_prompt,
+                    user_payload=request.user_payload,
+                    response_payload=response_payload,
                 )
             )
 

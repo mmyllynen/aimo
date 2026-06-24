@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
 
 from app.dispatcher import DispatchContext, Dispatcher, route_event
-from core.config import MapsConfig
+from core.config import MapsConfig, PublicArtifactsConfig
 from core.events import AttachmentRef, CanonicalEvent, EventKind, EventSource
 from core.i18n import SupportedLanguage, TranslationKey
 from core.routing import WorkflowTarget
@@ -17,10 +18,13 @@ from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
 from llm.operations import VisualizationIntent
 from storage.repositories import AttachmentRecord, HeartRateZoneRecord, WorkoutPointRecord, WorkoutRecord
 from storage.unit_of_work import UnitOfWork, open_database
+import visualization.animation as visualization_animation
 import visualization.service as visualization_service
 from visualization.render import DEFAULT_RENDER_HEIGHT, DEFAULT_RENDER_WIDTH
 from visualization.tiles import TileFetchResult, TileImage
+from weather.service import WeatherFacts, WeatherLocation
 from workflows.visualization import _apply_visualization_modifiers, _period_title, _visualization_modifiers, _visualization_negative_modifiers
+from workout.estimate_features import backfill_workout_estimate_features
 from workout.periods import PeriodBounds
 
 
@@ -65,13 +69,24 @@ class VisualizationWorkflowTests(unittest.TestCase):
     def test_visualization_negative_modifiers_can_hide_waypoints(self) -> None:
         intent = _visualization_intent(("route",), x_metric="longitude", chart_kind="map")
 
-        updated = _apply_visualization_modifiers(intent, "näytä reitti kartalla -waypoints -reittimerkit -elevation -korkeus +hr")
+        updated = _apply_visualization_modifiers(intent, "näytä reitti kartalla -waypoints -reittimerkit -overlay:elevation -overlay:korkeus +hr")
 
-        self.assertEqual(_visualization_negative_modifiers("näytä reitti -waypoints ja -reittimerkit -elevation -korkeus"), ("waypoints", "reittimerkit", "elevation", "korkeus"))
-        self.assertEqual(_visualization_modifiers("näytä reitti -waypoints +hr"), ("hr",))
+        self.assertEqual(
+            _visualization_negative_modifiers("näytä reitti -waypoints ja -reittimerkit -overlay:elevation -overlay:korkeus"),
+            ("waypoints", "reittimerkit", "overlay:elevation", "overlay:korkeus"),
+        )
+        self.assertEqual(_visualization_modifiers("näytä reitti -waypoints +overlay:elevation +hr"), ("overlay:elevation", "hr"))
         self.assertEqual(updated.social_style["waypoints"], False)
         self.assertEqual(updated.social_style["elevation_overlay"], False)
         self.assertEqual(updated.route_color_metric, "heart_rate_bpm")
+
+    def test_visualization_direction_modifier_enables_route_arrows(self) -> None:
+        intent = _visualization_intent(("route",), x_metric="longitude", chart_kind="map")
+
+        updated = _apply_visualization_modifiers(intent, "näytä reitti kartalla +direction +suunta")
+
+        self.assertEqual(_visualization_modifiers("näytä +direction ja +suunta"), ("direction", "suunta"))
+        self.assertEqual(updated.social_style["direction_arrows"], True)
 
     def test_visualization_aspect_modifiers_use_first_known_size(self) -> None:
         intent = _visualization_intent(("heart_rate_bpm",))
@@ -93,10 +108,16 @@ class VisualizationWorkflowTests(unittest.TestCase):
         intent = _visualization_intent(("route",), x_metric="longitude", chart_kind="map")
 
         updated = _apply_visualization_modifiers(intent, "piirrä viimeisin treeni kartalle +hr +pace")
+        elevation = _apply_visualization_modifiers(intent, "piirrä viimeisin treeni kartalle +elevation")
+        grade = _apply_visualization_modifiers(intent, "piirrä viimeisin treeni kartalle +grade")
 
         self.assertEqual(updated.y_metrics, ("route", "heart_rate_bpm"))
         self.assertEqual(updated.route_color_metric, "heart_rate_bpm")
         self.assertEqual(updated.route_color_ignored_metrics, ("pace_s_per_km",))
+        self.assertEqual(elevation.y_metrics, ("route", "elevation_m"))
+        self.assertEqual(elevation.route_color_metric, "elevation_m")
+        self.assertEqual(grade.y_metrics, ("route", "grade"))
+        self.assertEqual(grade.route_color_metric, "grade")
 
     def test_visualization_modifier_maps_social_stat_aliases(self) -> None:
         intent = _visualization_intent(("route",), x_metric="longitude", chart_kind="map", output_mode="social_image")
@@ -438,7 +459,11 @@ class VisualizationWorkflowTests(unittest.TestCase):
         )
 
         result = self.dispatcher.dispatch(
-            _mention("event-1", "näytä kuluvan kuun treenien sykealueet piirakkagraafina"),
+            _mention(
+                "event-1",
+                "näytä kuluvan kuun treenien sykealueet piirakkagraafina",
+                created_at=datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc),
+            ),
             DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
         )
 
@@ -692,6 +717,62 @@ class VisualizationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.messages[0].metadata["route_overlay"], "aimo")
         self.assertEqual(result.messages[0].metadata["renderer"], "pillow")
         self.assertEqual(_png_size(result.messages[0].content), (DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT))
+
+    def test_route_map_title_includes_base_route_time_estimate(self) -> None:
+        self._seed_latest_activity_and_active_route()
+        client = _visualization_client(_intent(("route",), x_metric="longitude", chart_kind="map", workout_selector={"type": "active"}))
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "näytä reitti kartalla"),
+            DispatchContext(UnitOfWork(self.connection), llm_gateway=LLMGateway(client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertIn("Ennuste", result.messages[0].metadata["route_time_title_summary"])
+        self.assertEqual(result.messages[0].metadata["route_time_weather"], {})
+
+    def test_route_map_title_uses_weather_adjusted_estimate_when_date_is_requested(self) -> None:
+        self._seed_latest_activity_and_active_route()
+        with UnitOfWork(self.connection) as repositories:
+            backfill_workout_estimate_features(repositories, owner_user_id="user-1", updated_at="2026-06-18T12:00:00Z")
+        client = FakeLLMClient(
+            {
+                LLMOperation.INTENT_CLASSIFICATION: _classification(),
+                LLMOperation.VISUALIZATION_INTENT: _intent(
+                    ("route",),
+                    x_metric="longitude",
+                    chart_kind="map",
+                    workout_selector={"type": "active"},
+                    comparison_mode="forecast",
+                ),
+                LLMOperation.ROUTE_TIME_ESTIMATE_INTENT: {
+                    "is_route_time_estimate": True,
+                    "activity_intent": "run",
+                    "target_date": "2026-06-20",
+                    "target_time_of_day": "",
+                    "reason": "dated route estimate",
+                },
+            }
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "näytä reitti kartalla ensi lauantain juoksuennusteella"),
+            DispatchContext(
+                UnitOfWork(self.connection),
+                llm_gateway=LLMGateway(client),
+                weather_provider=_FakeWeatherProvider(),
+            ),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        summary = result.messages[0].metadata["route_time_title_summary"]
+        self.assertIn("Ennuste", summary)
+        self.assertIn("20/6/2026", summary)
+        self.assertIn("{fa:temperature-half}", summary)
+        self.assertIn("30°C", summary)
+        self.assertIn("{wind:225} 3.3m/s", summary)
+        self.assertIn("{fa:sun} sade 0%", summary)
+        self.assertTrue(result.messages[0].metadata["route_time_weather"]["available"])
 
     def test_current_month_route_map_uses_period_workout_set(self) -> None:
         self._seed_workout(
@@ -979,6 +1060,377 @@ class VisualizationWorkflowTests(unittest.TestCase):
 
         self.assertEqual(route.target, WorkflowTarget.CHAT)
 
+    def test_animation_overlay_tarkenne_renders_bundle_without_llm(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+
+        route = route_event(_mention("event-route", "overlay=map,hr dist=0.2km duration=2s fps=4 size=320x180 format=gif"))
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "overlay=map,hr dist=0.2km duration=2s fps=4 size=320x180 format=gif"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(route.target, WorkflowTarget.VISUALIZATION)
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 3)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.TEXT)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.OVERLAY_ANIMATION_BUNDLE_CREATED)
+        self.assertIn("Kartta:", result.messages[0].localized_text.params["items"])
+        self.assertIn("Syke:", result.messages[0].localized_text.params["items"])
+        self.assertEqual(result.messages[1].kind, OutgoingKind.FILE)
+        self.assertEqual(result.messages[1].content_type, "image/gif")
+        self.assertTrue(result.messages[1].content.startswith(b"GIF"))
+        self.assertEqual(result.messages[1].metadata["chart_type"], "animation_overlay")
+        self.assertEqual(result.messages[1].metadata["overlay_type"], "map")
+        self.assertEqual(result.messages[1].metadata["frame_count"], 8)
+        self.assertEqual((result.messages[1].metadata["render_width"], result.messages[1].metadata["render_height"]), (320, 180))
+        self.assertEqual(result.messages[1].filename, "morning-run_2026-06-13_0.20-0.70km_map.gif")
+        self.assertEqual(result.messages[2].metadata["overlay_type"], "hr")
+        self.assertTrue(result.messages[2].content.startswith(b"GIF"))
+
+    def test_animation_overlay_route_overview_renders_full_route_layer(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+
+        route = route_event(_mention("event-route", "overlay=route,map dist=0.2km duration=2s fps=4 size=320x180 format=gif route_position=left route_size=160 route_background=none"))
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "overlay=route,map dist=0.2km duration=2s fps=4 size=320x180 format=gif route_position=left route_size=160 route_background=none"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(route.target, WorkflowTarget.VISUALIZATION)
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 3)
+        self.assertIn("Reitti:", result.messages[0].localized_text.params["items"])
+        self.assertIn("Kartta:", result.messages[0].localized_text.params["items"])
+        self.assertEqual(result.messages[1].filename, "morning-run_2026-06-13_0.20-0.70km_route.gif")
+        self.assertEqual(result.messages[1].content_type, "image/gif")
+        self.assertTrue(result.messages[1].content.startswith(b"GIF"))
+        self.assertEqual(result.messages[1].metadata["overlay_type"], "route")
+        self.assertEqual(result.messages[1].metadata["route_position"], "left")
+        self.assertEqual(result.messages[1].metadata["route_size"], 160)
+        self.assertEqual(result.messages[1].metadata["route_background"], "none")
+        self.assertEqual(result.messages[2].metadata["overlay_type"], "map")
+
+    def test_animation_overlay_plus_tag_no_longer_routes_without_llm(self) -> None:
+        route = route_event(_mention("event-route", "+overlay dist=0.2km duration=2s"))
+
+        self.assertEqual(route.target, WorkflowTarget.CHAT)
+
+    def test_animation_overlay_dist_uses_real_time_local_map(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "overlay=map dist=0.25km duration=12s fps=2 size=320x180 radius=120m tail=80m lookahead=60m format=gif"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        message = result.messages[1]
+        self.assertEqual(message.content_type, "image/gif")
+        self.assertEqual(message.metadata["sync"], "real")
+        self.assertEqual(message.metadata["view"], "local")
+        self.assertEqual(message.metadata["show_map"], True)
+        self.assertEqual(message.metadata["show_speed"], False)
+        self.assertEqual(message.metadata["show_hr"], False)
+        self.assertEqual(message.metadata["start_km"], 0.25)
+        self.assertEqual(message.metadata["start_elapsed_s"], 150.0)
+        self.assertEqual(message.metadata["end_elapsed_s"], 162.0)
+        self.assertEqual(message.metadata["frame_count"], 24)
+        self.assertEqual(message.metadata["radius_km"], 0.12)
+        self.assertEqual(message.metadata["tail_km"], 0.08)
+        self.assertEqual(message.metadata["tail_mode"], "distance")
+        self.assertEqual(message.metadata["lookahead_km"], 0.06)
+        self.assertEqual(message.metadata["auto_zoom"], True)
+        self.assertEqual(message.metadata["radius_min_km"], 0.1)
+        self.assertEqual(message.metadata["tail_min_km"], 0.06)
+
+    def test_animation_overlay_can_render_transparent_webm(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "overlay=map dist=0.25km duration=2s fps=2 size=240x180 format=webm transparent=true"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[1].filename, "morning-run_2026-06-13_0.25-0.75km_map.webm")
+        self.assertEqual(result.messages[1].content_type, "video/webm")
+        self.assertTrue(result.messages[1].content.startswith(b"\x1aE\xdf\xa3"))
+        self.assertEqual(result.messages[1].metadata["format"], "webm")
+        self.assertEqual(result.messages[1].metadata["transparent"], True)
+        self.assertEqual(result.messages[1].metadata["sync"], "real")
+        self.assertEqual(result.messages[1].metadata["view"], "local")
+
+    def test_animation_overlay_defaults_transparent_output_to_mov(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "overlay=map dist=0.25km duration=2s fps=2 size=240x180"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[1].filename, "morning-run_2026-06-13_0.25-0.75km_map.mov")
+        self.assertEqual(result.messages[1].content_type, "video/quicktime")
+        self.assertEqual(result.messages[1].metadata["format"], "mov")
+        self.assertEqual(result.messages[1].metadata["transparent"], True)
+
+    def test_animation_overlay_large_file_is_published_as_link(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            public_root = Path(tmpdir) / "public" / "aimo"
+            result = self.dispatcher.dispatch(
+                _mention("event-1", "overlay=map dist=0.25km duration=2s fps=2 size=240x180"),
+                DispatchContext(
+                    UnitOfWork(self.connection),
+                    public_artifacts=PublicArtifactsConfig(
+                        path=public_root,
+                        base_url="https://example.test/aimo",
+                        max_discord_attachment_bytes=1,
+                    ),
+                ),
+            )
+            published = tuple(public_root.iterdir())
+            published_size = published[0].stat().st_size
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(len(result.messages), 1)
+        self.assertEqual(result.messages[0].kind, OutgoingKind.TEXT)
+        self.assertIsNone(result.messages[0].content)
+        self.assertEqual(result.messages[0].localized_text.key, TranslationKey.OVERLAY_ANIMATION_BUNDLE_CREATED)
+        self.assertIn("Kartta: https://example.test/aimo/morning-run_2026-06-13_0.25-0.75km_map.mov", result.messages[0].localized_text.params["items"])
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0].name, "morning-run_2026-06-13_0.25-0.75km_map.mov")
+        self.assertGreater(published_size, 1)
+
+    def test_animation_overlay_can_force_opaque_output_to_mp4(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "overlay=map dist=0.25km duration=2s fps=2 size=240x180 transparent=false"),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[1].filename, "morning-run_2026-06-13_0.25-0.75km_map.mp4")
+        self.assertEqual(result.messages[1].content_type, "video/mp4")
+        self.assertEqual(result.messages[1].metadata["format"], "mp4")
+        self.assertEqual(result.messages[1].metadata["transparent"], False)
+
+    def test_animation_overlay_defaults_to_hd_resolution_and_dark_tiles(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        original_fetch_tiles = visualization_animation.fetch_tiles
+        seen_urls: list[str] = []
+        seen_cache_roots: list[Path] = []
+
+        def fake_fetch_tiles(coords, config):
+            seen_urls.append(config.url_template)
+            seen_cache_roots.append(config.cache_root)
+            content = _solid_png(512, 512, (20, 24, 34))
+            return TileFetchResult(tiles=tuple(TileImage(coord=coord, content=content, source="cache") for coord in coords))
+
+        visualization_animation.fetch_tiles = fake_fetch_tiles
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = self.dispatcher.dispatch(
+                    _mention("event-1", "overlay=map dist=0.25km duration=1s fps=1 format=gif map_layout=circle map=tiles map_style=outdoor-dark"),
+                    DispatchContext(
+                        UnitOfWork(self.connection),
+                        artifact_path=Path(tmpdir) / "artifacts",
+                        maps_config=MapsConfig(provider="maptiler", maptiler_api_key="test-key"),
+                    ),
+                )
+        finally:
+            visualization_animation.fetch_tiles = original_fetch_tiles
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual((result.messages[1].metadata["render_width"], result.messages[1].metadata["render_height"]), (1280, 720))
+        self.assertEqual(result.messages[1].metadata["map_style"], "outdoor-v2-dark")
+        self.assertEqual(result.messages[1].metadata["tile_alpha"], 0.9)
+        self.assertEqual(result.messages[1].metadata["tile_provider"], "maptiler")
+        self.assertTrue(any("/maps/outdoor-v2-dark/" in url for url in seen_urls))
+        self.assertTrue(any(path.name == "outdoor-v2-dark" for path in seen_cache_roots))
+
+    def test_animation_overlay_circular_map_layout_defaults_to_tiles_and_compass(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        original_fetch_tiles = visualization_animation.fetch_tiles
+
+        def fake_fetch_tiles(coords, config):
+            del config
+            content = _solid_png(512, 512, (20, 24, 34))
+            return TileFetchResult(tiles=tuple(TileImage(coord=coord, content=content, source="cache") for coord in coords))
+
+        visualization_animation.fetch_tiles = fake_fetch_tiles
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = self.dispatcher.dispatch(
+                    _mention("event-1", "overlay=map dist=0.25km duration=1s fps=1 format=gif"),
+                    DispatchContext(
+                        UnitOfWork(self.connection),
+                        artifact_path=Path(tmpdir) / "artifacts",
+                        maps_config=MapsConfig(provider="maptiler", maptiler_api_key="test-key"),
+                    ),
+                )
+        finally:
+            visualization_animation.fetch_tiles = original_fetch_tiles
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[1].metadata["map_layout"], "circle")
+        self.assertEqual(result.messages[1].metadata["map_mode"], "tiles")
+        self.assertEqual(result.messages[1].metadata["compass"], True)
+        self.assertEqual(result.messages[1].metadata["tile_status"], "ok")
+
+    def test_animation_overlay_circular_map_layout_uses_tile_background_and_compass(self) -> None:
+        self._seed_workout(with_heart_rate=True, with_location=True)
+        original_fetch_tiles = visualization_animation.fetch_tiles
+
+        def fake_fetch_tiles(coords, config):
+            del config
+            content = _solid_png(256, 256, (171, 205, 239))
+            return TileFetchResult(tiles=tuple(TileImage(coord=coord, content=content, source="cache") for coord in coords))
+
+        visualization_animation.fetch_tiles = fake_fetch_tiles
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = self.dispatcher.dispatch(
+                    _mention(
+                        "event-1",
+                        "overlay=map dist=0.25km duration=2s fps=2 size=240x180 format=webm map_layout=circle map=tiles compass=true",
+                    ),
+                    DispatchContext(UnitOfWork(self.connection), artifact_path=Path(tmpdir) / "artifacts"),
+                )
+        finally:
+            visualization_animation.fetch_tiles = original_fetch_tiles
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[1].content_type, "video/webm")
+        self.assertEqual(result.messages[1].metadata["map_layout"], "circle")
+        self.assertEqual(result.messages[1].metadata["map_mode"], "tiles")
+        self.assertEqual(result.messages[1].metadata["compass"], True)
+        self.assertEqual(result.messages[1].metadata["tile_status"], "ok")
+        self.assertEqual(result.messages[1].metadata["map_background"], "osm")
+        self.assertGreater(result.messages[1].metadata["tile_count"], 0)
+
+    def test_animation_overlay_circular_map_layout_camera_centers_current_position(self) -> None:
+        current = WorkoutPointRecord(
+            workout_id="workout-1",
+            point_index=1,
+            latitude=60.171,
+            longitude=24.945,
+            distance_km=0.5,
+        )
+        request = visualization_animation.OverlayAnimationRequest(radius_km=0.3, map_layout="circle", map_mode="tiles")
+
+        camera = visualization_animation._overlay_camera(current, 216, request, tile_size=256)
+
+        self.assertEqual(visualization_animation._project_circle(current, camera), (108, 108))
+
+    def test_animation_overlay_circular_map_layout_route_and_tiles_share_render_origin(self) -> None:
+        current = WorkoutPointRecord(
+            workout_id="workout-1",
+            point_index=1,
+            latitude=60.171234,
+            longitude=24.945678,
+            distance_km=0.5,
+        )
+        request = visualization_animation.OverlayAnimationRequest(radius_km=0.3, map_layout="circle", map_mode="tiles")
+
+        camera = visualization_animation._overlay_camera(current, 216, request, tile_size=256)
+        coords = visualization_animation._tile_coords_for_pixel_rect(
+            float(camera.render_world_left),
+            float(camera.render_world_top),
+            camera.diameter,
+            camera.diameter,
+            camera.zoom,
+            camera.tile_size,
+        )
+        tile_origin = coords[0].x * camera.tile_size - camera.render_world_left
+        projected = visualization_animation._project_circle(current, camera)
+
+        self.assertIsInstance(tile_origin, int)
+        self.assertEqual(projected, (108, 108))
+
+    def test_animation_overlay_compass_heading_uses_local_route_direction(self) -> None:
+        eastbound = (
+            WorkoutPointRecord(workout_id="w", point_index=0, latitude=60.0, longitude=24.0, distance_km=0.0),
+            WorkoutPointRecord(workout_id="w", point_index=1, latitude=60.0, longitude=24.02, distance_km=0.2),
+        )
+        northbound = (
+            WorkoutPointRecord(workout_id="w", point_index=0, latitude=60.0, longitude=24.0, distance_km=0.0),
+            WorkoutPointRecord(workout_id="w", point_index=1, latitude=60.02, longitude=24.0, distance_km=0.2),
+        )
+
+        self.assertAlmostEqual(visualization_animation._route_heading_at_distance(eastbound, 0.1), 90.0, delta=2.0)
+        self.assertAlmostEqual(visualization_animation._route_heading_at_distance(northbound, 0.1), 0.0, delta=2.0)
+
+    def test_animation_overlay_auto_zoom_tightens_slow_segments(self) -> None:
+        points = (
+            WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, distance_km=0.0),
+            WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=600, distance_km=1.0),
+            WorkoutPointRecord(workout_id="w", point_index=2, elapsed_s=1200, distance_km=2.0),
+        )
+        request = visualization_animation.OverlayAnimationRequest(
+            radius_km=0.3,
+            tail_km=0.2,
+            tail_mode="distance",
+            radius_min_km=0.1,
+            tail_min_km=0.06,
+            auto_zoom_fast_pace_s_per_km=240,
+            auto_zoom_slow_pace_s_per_km=540,
+            auto_zoom_sample_s=20,
+        )
+
+        zoomed = visualization_animation._auto_zoom_request(points, points[1], request)
+
+        self.assertLess(zoomed.radius_km, request.radius_km)
+        self.assertLess(zoomed.tail_km, request.tail_km)
+        self.assertAlmostEqual(zoomed.radius_km, request.radius_min_km, delta=0.001)
+        self.assertAlmostEqual(zoomed.tail_km, request.tail_min_km, delta=0.001)
+
+    def test_animation_overlay_time_tail_interpolates_to_current_position(self) -> None:
+        points = (
+            WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, distance_km=0.0, latitude=60.0, longitude=24.0),
+            WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=30, distance_km=0.1, latitude=60.001, longitude=24.0),
+            WorkoutPointRecord(workout_id="w", point_index=2, elapsed_s=60, distance_km=0.2, latitude=60.002, longitude=24.0),
+        )
+        current = visualization_animation._point_at_elapsed(points, 45.0)
+        request = visualization_animation.OverlayAnimationRequest(
+            tail_mode="time",
+            tail_time_s=30.0,
+            tail_min_km=0.03,
+            tail_max_km=0.25,
+        )
+
+        tail_start = visualization_animation._tail_start_km(points, current, request)
+        completed = visualization_animation._distance_segment_points(points, tail_start, float(current.distance_km or 0.0))
+
+        self.assertAlmostEqual(tail_start, 0.05, delta=0.0001)
+        self.assertAlmostEqual(float(completed[0].distance_km or 0.0), 0.05, delta=0.0001)
+        self.assertAlmostEqual(float(completed[-1].distance_km or 0.0), 0.15, delta=0.0001)
+        self.assertAlmostEqual(float(completed[-1].latitude or 0.0), float(current.latitude or 0.0), delta=0.000001)
+
+    def test_animation_overlay_auto_zoom_keeps_time_tail_as_speed_indicator(self) -> None:
+        points = (
+            WorkoutPointRecord(workout_id="w", point_index=0, elapsed_s=0, distance_km=0.0),
+            WorkoutPointRecord(workout_id="w", point_index=1, elapsed_s=600, distance_km=1.0),
+            WorkoutPointRecord(workout_id="w", point_index=2, elapsed_s=1200, distance_km=2.0),
+        )
+        request = visualization_animation.OverlayAnimationRequest(
+            radius_km=0.3,
+            tail_km=0.2,
+            tail_mode="time",
+            radius_min_km=0.1,
+            tail_min_km=0.06,
+            auto_zoom_fast_pace_s_per_km=240,
+            auto_zoom_slow_pace_s_per_km=540,
+            auto_zoom_sample_s=20,
+        )
+
+        zoomed = visualization_animation._auto_zoom_request(points, points[1], request)
+
+        self.assertAlmostEqual(zoomed.radius_km, request.radius_min_km, delta=0.001)
+        self.assertEqual(zoomed.tail_km, request.tail_km)
+
     def test_comparison_visualization_uses_recent_owned_workouts(self) -> None:
         self._seed_workout(
             workout_id="workout-1",
@@ -1228,7 +1680,13 @@ class VisualizationWorkflowTests(unittest.TestCase):
             )
 
 
-def _mention(event_id: str, text: str, *, attachments: tuple[AttachmentRef, ...] = ()) -> CanonicalEvent:
+def _mention(
+    event_id: str,
+    text: str,
+    *,
+    attachments: tuple[AttachmentRef, ...] = (),
+    created_at: datetime | None = None,
+) -> CanonicalEvent:
     return CanonicalEvent(
         event_id=event_id,
         source=EventSource.DISCORD_MESSAGE,
@@ -1239,6 +1697,7 @@ def _mention(event_id: str, text: str, *, attachments: tuple[AttachmentRef, ...]
         user_name="runner",
         text=text,
         attachments=attachments,
+        created_at=created_at or datetime.now(timezone.utc),
     )
 
 
@@ -1320,6 +1779,24 @@ def _solid_png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
     output = BytesIO()
     image.save(output, format="PNG")
     return output.getvalue()
+
+
+class _FakeWeatherProvider:
+    def get_weather(self, location: WeatherLocation, target_date):
+        return WeatherFacts(
+            target_date=target_date.isoformat(),
+            latitude=location.latitude,
+            longitude=location.longitude,
+            source="forecast",
+            temperature_c=30.0,
+            apparent_temperature_c=30.0,
+            wind_speed_m_s=3.3,
+            wind_gust_m_s=5.0,
+            wind_direction_deg=225.0,
+            precipitation_probability=0.0,
+            precipitation_mm=0.0,
+            snow_mm=0.0,
+        )
 
 
 def _png_size(content: bytes) -> tuple[int, int]:

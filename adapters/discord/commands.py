@@ -155,12 +155,13 @@ COMMAND_SPECS = (
     ),
     DiscordCommandSpec(
         name="debug",
-        description="Palauta viimeisin rajattu debug-jälki.",
+        description="Palauta debug-jälki valitulla tasolla.",
         options=(
             DiscordCommandOptionSpec(
-                name="tila",
-                description="Debug-tila.",
+                name="level",
+                description="Debug-taso: 0 tiivis, 1 välimalli, 2 laajin turvallinen.",
                 option_type=DiscordCommandOptionType.STRING,
+                choices=("0", "1", "2"),
             ),
         ),
     ),

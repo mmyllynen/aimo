@@ -68,6 +68,63 @@ missing_data_notes
 
 Rules: use provided facts as ground truth, do not invent workout details, and state missing data plainly.
 
+## Route Time Estimate Intent
+
+Input: user text, current date, timezone, and compact routing context.
+
+Output:
+
+```text
+is_route_time_estimate
+activity_intent
+target_date
+target_time_of_day
+reason
+```
+
+Rules: return `true` only when the user asks for an estimated completion time for one stored route, route plan, or workout route, including route-map visualization requests that ask to show a route estimate. If the user says when they intend to do the route, return `target_date` as ISO `YYYY-MM-DD` using the supplied current date and timezone; otherwise return an empty string. Return `activity_intent` as `run`, `walk`, `hike`, `bike`, or `unknown`. Python owns date validation, workout resolution, user data access, route metrics, history comparison, weather retrieval, weather adjustment, rendering, and the estimate calculation.
+
+## Route Time Estimate Reply
+
+Input: user text, Python-calculated compact estimate facts, and bounded recent context.
+
+Output:
+
+```text
+reply_text
+claims_used
+missing_data_notes
+```
+
+Rules: use estimate facts as ground truth, write conversationally in the configured language, and do not invent pace, distance, ascent, confidence, uncertainty, training history, terrain, weather, stops, or route details. If `estimate_facts.weather` is present, state the base estimate and weather-adjusted estimate according to those facts and mention important weather limitations.
+
+## Route Time Estimate Explanation Intent
+
+Input: user text and compact routing context.
+
+Output:
+
+```text
+is_explanation_request
+reason
+```
+
+Rules: return `true` only when the user asks to explain, justify, debug, or open the calculation behind a previous route time estimate. Python owns retrieval of the latest estimate metadata.
+
+## Route Time Estimate Explanation Reply
+
+Input: user text, compact Python-stored explanation facts from the previous estimate, and bounded recent context.
+
+Output:
+
+```text
+reply_text
+claims_used
+missing_data_notes
+```
+
+Rules: use explanation facts as ground truth, write conversationally in the configured language, and do not invent workouts, raw data, weather, terrain, training state, or calculations not present in the payload. If previous estimate metadata includes weather, explain it only from the stored compact weather facts and adjustment components.
+
 ## Visualization Intent
 
 Input: user text, compact routing context, and optional previous visualization context.
@@ -108,6 +165,31 @@ Input: original user text, failed intent/spec metadata, structured validation er
 Output: the same complete visualization intent shape as above.
 
 Rules: fix only reported validation failures within allowed primitives; do not invent metrics, columns, datasets, transforms, chart kinds, or metric-specific chart logic.
+
+## Future: Overlay Animation Intent
+
+The current overlay-animation MVP is deterministic and uses formal controls such as `overlay=map,hr`, `dist=12.4km`, and `duration=60s`. A typed LLM operation may be added later only after the formal path is stable.
+
+Future input: user text, current date/time, compact workout candidates, optional active workout facts, optional previous overlay context, and allowed bounded overlay controls.
+
+Future output:
+
+```text
+workout_selector
+start_distance_km
+source_window_km
+output_length_s
+fps
+render_width
+render_height
+format
+layers
+layout
+style
+context_update
+```
+
+Rules: return semantic intent only. Python owns owner-scoped workout resolution, point access, distance/window slicing, smoothing, rendering, video encoding, artifact storage, validation, and errors. Raw GPX and full workout point arrays must not be included in model inputs.
 
 ## Workout Reference Extraction
 

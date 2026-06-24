@@ -58,6 +58,8 @@ class DiscordCommandSpecTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(settings_subcommands), {"nayta", "sykerajat"})
         self.assertEqual({option.name for option in settings_subcommands["sykerajat"].options}, {"zones"})
         self.assertTrue(settings_subcommands["sykerajat"].options[0].required)
+        self.assertEqual({option.name for option in specs["debug"].options}, {"level"})
+        self.assertEqual(specs["debug"].options[0].choices, ("0", "1", "2"))
 
     async def test_register_command_specs_adds_all_specs_and_syncs(self) -> None:
         tree = FakeCommandTree()

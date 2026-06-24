@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from core.config import MapsConfig
+from core.config import MapsConfig, PublicArtifactsConfig
 from core.events import CanonicalEvent
 from core.errors import AppError, ErrorCategory
 from core.i18n import LocalizedText, SupportedLanguage, TranslationKey
@@ -12,10 +12,12 @@ from core.routing import RouteDecision
 from core.workflows import OutgoingKind, OutgoingMessage, WorkflowResult, WorkflowStatus
 from llm.gateway import LLMGateway, LLMGatewayError
 from llm.operations import (
+    RouteTimeEstimateIntentInput,
     VisualizationIntent,
     VisualizationIntentInput,
     VisualizationIntentRevisionInput,
     extract_visualization_intent,
+    interpret_route_time_estimate_intent,
     revise_visualization_intent,
 )
 from storage.repositories import HeartRateZoneRecord, RenderedArtifactRecord, WorkoutPointRecord, WorkoutRecord
@@ -30,15 +32,24 @@ from visualization.service import (
     render_workout_visualization,
     visualization_validation_context,
 )
+from visualization.animation import (
+    OverlayAnimationEncodingError,
+    OverlayAnimationEncoderUnavailableError,
+    OverlayAnimationRequest,
+    render_workout_overlay_bundle,
+)
 from visualization.datasets import resolve_datasets, dataset_request_from_metrics
 from workout.gpx import GpxParseError, parse_gpx
-from workout.periods import PeriodBounds, PeriodRequestError, local_now, resolve_period_bounds
+from workout.periods import DEFAULT_PERIOD_TIMEZONE, PeriodBounds, PeriodRequestError, local_now, resolve_period_bounds
 from llm.operations import PeriodRequest
 from workout.references import (
     WorkoutReferenceResolution,
     WorkoutReferenceStatus,
     resolve_workout_selector,
 )
+from workout.route_estimate import estimate_route_time_from_features
+from workout.route_time_summary import build_route_time_weather_payload, format_route_time_title_summary
+from weather.service import WeatherProvider
 
 
 VISUALIZATION_MODIFIER_METRICS = {
@@ -49,6 +60,9 @@ VISUALIZATION_MODIFIER_METRICS = {
     "heart_rate": "heart_rate_bpm",
     "elevation": "elevation_m",
     "korkeus": "elevation_m",
+    "grade": "grade",
+    "jyrkkyys": "grade",
+    "kaltevuus": "grade",
     "pace": "pace_s_per_km",
     "vauhti": "pace_s_per_km",
     "ascent": "ascent_m",
@@ -66,7 +80,7 @@ VISUALIZATION_MODIFIER_METRICS = {
     "maxhr": "max_hr_bpm",
     "maksimisyke": "max_hr_bpm",
 }
-ROUTE_COLOR_METRICS = frozenset({"heart_rate_bpm", "elevation_m", "pace_s_per_km"})
+ROUTE_COLOR_METRICS = frozenset({"heart_rate_bpm", "elevation_m", "grade", "pace_s_per_km"})
 SOCIAL_ROUTE_COLOR_MODIFIER_METRICS = {
     modifier: metric
     for modifier, metric in VISUALIZATION_MODIFIER_METRICS.items()
@@ -88,7 +102,9 @@ VISUALIZATION_ASPECT_SIZES = {
 SOCIAL_OUTPUT_MODIFIERS = frozenset({"social", "somekuva"})
 SOCIAL_STYLE_PRESETS = frozenset({"classic", "minimal", "poster", "routeonly", "data", "photo"})
 WAYPOINT_HIDE_MODIFIERS = frozenset({"waypoints", "reittimerkit"})
-ELEVATION_OVERLAY_HIDE_MODIFIERS = frozenset({"elevation", "korkeus"})
+ROUTE_DIRECTION_MODIFIERS = frozenset({"direction", "suunta"})
+ELEVATION_OVERLAY_SHOW_MODIFIERS = frozenset({"overlay:elevation", "overlay:korkeus"})
+ELEVATION_OVERLAY_HIDE_MODIFIERS = frozenset({"overlay:elevation", "overlay:korkeus"})
 SOCIAL_STYLE_ENUMS = {
     "crop": frozenset({"center", "top", "bottom", "left", "right"}),
     "filter": frozenset({"none", "warm", "cool", "bw", "vivid", "matte"}),
@@ -161,8 +177,19 @@ class VisualizationWorkflow:
         gateway: LLMGateway | None,
         language: SupportedLanguage,
         artifact_root: Path | None = None,
+        public_artifacts: PublicArtifactsConfig | None = None,
         maps_config: MapsConfig | None = None,
+        weather_provider: WeatherProvider | None = None,
     ) -> WorkflowResult:
+        if _is_animation_overlay_request(event, route):
+            return _handle_animation_overlay(
+                event,
+                repositories,
+                language=language,
+                artifact_root=artifact_root,
+                public_artifacts=public_artifacts,
+                maps_config=maps_config,
+            )
         try:
             resolved = _resolve_request(event, route, repositories, gateway=gateway, language=language)
         except LLMGatewayError:
@@ -195,10 +222,12 @@ class VisualizationWorkflow:
                 event,
                 resolved,
                 points,
+                repositories,
                 heart_rate_zones=heart_rate_zones,
                 gateway=gateway,
                 tile_cache_root=_tile_cache_root(artifact_root),
                 maps_config=maps_config,
+                weather_provider=weather_provider,
                 language=language,
             )
         except MissingHeartRateZonesError:
@@ -342,11 +371,13 @@ def _render_with_optional_revision(
     event: CanonicalEvent,
     resolved: ResolvedVisualizationRequest,
     points: tuple[WorkoutPointRecord, ...],
+    repositories: RepositoryBundle,
     *,
     heart_rate_zones: tuple[HeartRateZoneRecord, ...],
     gateway: LLMGateway | None,
     tile_cache_root: Path | None = None,
     maps_config: MapsConfig | None = None,
+    weather_provider: WeatherProvider | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
 ) -> tuple[VisualizationArtifact, VisualizationIntent]:
     _validate_zone_prerequisite(resolved.intent, heart_rate_zones)
@@ -413,6 +444,15 @@ def _render_with_optional_revision(
                 revised_intent,
             )
     try:
+        route_time = _route_time_title_context(
+            event,
+            resolved,
+            points,
+            repositories=repositories,
+            gateway=gateway,
+            weather_provider=weather_provider,
+            language=language,
+        )
         return (
                 render_workout_visualization(
                 resolved.workout,
@@ -424,6 +464,8 @@ def _render_with_optional_revision(
                 maps_config=maps_config,
                 language=language,
                 social_background_image=_social_background_image(event),
+                route_time_title_summary=route_time["title_summary"],
+                route_time_metadata=route_time["metadata"],
             ),
             resolved.intent,
         )
@@ -462,6 +504,8 @@ def _render_with_optional_revision(
                 maps_config=maps_config,
                 language=language,
                 social_background_image=_social_background_image(event),
+                route_time_title_summary=route_time["title_summary"],
+                route_time_metadata=route_time["metadata"],
             ),
             revised_intent,
         )
@@ -471,6 +515,469 @@ def _tile_cache_root(artifact_root: Path | None) -> Path | None:
     if artifact_root is None:
         return None
     return artifact_root.parent / "data" / "cache" / "osm_tiles"
+
+
+def _is_animation_overlay_request(event: CanonicalEvent, route: RouteDecision) -> bool:
+    return route.slots.get("animation_overlay") is True or bool(_overlay_tarkenne_values(event.text))
+
+
+def _handle_animation_overlay(
+    event: CanonicalEvent,
+    repositories: RepositoryBundle,
+    *,
+    language: SupportedLanguage,
+    artifact_root: Path | None,
+    public_artifacts: PublicArtifactsConfig | None,
+    maps_config: MapsConfig | None,
+) -> WorkflowResult:
+    del language
+    workout = _resolve_animation_workout(event, repositories)
+    if workout is None:
+        return _error_result(
+            WorkflowStatus.USER_ERROR,
+            ErrorCategory.NO_MATCHING_WORKOUT,
+            TranslationKey.ERROR_NO_MATCHING_WORKOUT,
+            "No matching workout for animation overlay",
+        )
+    points = repositories.workout_streams.list_points(workout.workout_id)
+    request = _animation_request(event.text)
+    try:
+        artifacts = render_workout_overlay_bundle(
+            workout,
+            points,
+            request,
+            tile_cache_root=_tile_cache_root(artifact_root),
+            maps_config=maps_config,
+        )
+    except OverlayAnimationEncoderUnavailableError:
+        return _error_result(
+            WorkflowStatus.SYSTEM_ERROR,
+            ErrorCategory.RENDER_FAILED,
+            TranslationKey.ERROR_OVERLAY_ANIMATION_ENCODER_UNAVAILABLE,
+            "Animation overlay encoder is unavailable",
+        )
+    except OverlayAnimationEncodingError:
+        return _error_result(
+            WorkflowStatus.SYSTEM_ERROR,
+            ErrorCategory.RENDER_FAILED,
+            TranslationKey.ERROR_RENDER_FAILED,
+            "Animation overlay encoding failed",
+        )
+    except ValueError:
+        return _error_result(
+            WorkflowStatus.USER_ERROR,
+            ErrorCategory.MISSING_METRIC,
+            TranslationKey.ERROR_OVERLAY_ANIMATION_REQUIRES_ROUTE,
+            "Animation overlay requires route and distance samples",
+        )
+
+    delivery_items: list[dict[str, object]] = []
+    attachment_messages: list[OutgoingMessage] = []
+    for artifact in artifacts:
+        storage_path = f"artifacts/{artifact.filename}"
+        storage_status = "not_written_in_skeleton"
+        if artifact_root is not None:
+            stored_path = write_bytes_under(artifact_root, artifact.filename, artifact.content)
+            storage_path = str(stored_path)
+            storage_status = "written"
+        metadata = {
+            **artifact.metadata,
+            "channel_id": event.channel_id,
+            "source_event_id": event.event_id,
+            "storage_status": storage_status,
+        }
+        public_url = _publish_public_artifact_if_needed(artifact, public_artifacts)
+        if public_url is not None:
+            metadata["delivery"] = "public_url"
+            metadata["public_url"] = public_url
+        else:
+            metadata["delivery"] = "discord_attachment"
+        overlay_type = str(metadata.get("overlay_type", "overlay"))
+        repositories.rendered_artifacts.add(
+            RenderedArtifactRecord(
+                artifact_id=f"{event.event_id}:animation-overlay:{overlay_type}",
+                owner_user_id=event.user_id,
+                workflow_trace_id=None,
+                artifact_type="animation_overlay",
+                filename=artifact.filename,
+                content_type=artifact.content_type,
+                storage_path=storage_path,
+                created_at=event.created_at.isoformat(),
+                metadata=metadata,
+            )
+        )
+        delivery_items.append(
+            {
+                "overlay_type": overlay_type,
+                "filename": artifact.filename,
+                "url": public_url,
+                "metadata": metadata,
+            }
+        )
+        if public_url is not None:
+            continue
+        attachment_messages.append(
+            OutgoingMessage(
+                kind=OutgoingKind.FILE,
+                filename=artifact.filename,
+                content_type=artifact.content_type,
+                content=artifact.content,
+                metadata=metadata,
+            )
+        )
+    summary = OutgoingMessage(
+        kind=OutgoingKind.TEXT,
+        localized_text=LocalizedText(
+            key=TranslationKey.OVERLAY_ANIMATION_BUNDLE_CREATED,
+            params=_overlay_bundle_message_params(workout, delivery_items),
+        ),
+        metadata={
+            "chart_type": "animation_overlay",
+            "delivery": "bundle_summary",
+            "overlay_count": len(delivery_items),
+            "overlays": tuple(item["overlay_type"] for item in delivery_items),
+        },
+    )
+    if attachment_messages:
+        return WorkflowResult(status=WorkflowStatus.SUCCESS, messages=(summary, *attachment_messages))
+    return WorkflowResult(status=WorkflowStatus.SUCCESS, messages=(summary,))
+
+
+def _overlay_bundle_message_params(workout: WorkoutRecord, items: list[dict[str, object]]) -> dict[str, object]:
+    start_values = [
+        float(metadata["start_km"])
+        for item in items
+        if isinstance(item.get("metadata"), dict)
+        for metadata in (item["metadata"],)
+        if metadata.get("start_km") is not None
+    ]
+    start_km = min(start_values) if start_values else 0.0
+    lines = []
+    for item in items:
+        label = _overlay_label(str(item.get("overlay_type", "overlay")))
+        target = item.get("url") or item.get("filename") or ""
+        lines.append(f"{label}: {target}")
+    return {
+        "title": workout.title or workout.workout_id,
+        "date": workout.local_date or (workout.start_time_local or workout.start_time_utc or "")[:10] or "",
+        "start_km": f"{start_km:.2f}",
+        "items": "\n".join(lines),
+    }
+
+
+def _overlay_label(overlay_type: str) -> str:
+    if overlay_type == "route":
+        return "Reitti"
+    if overlay_type == "map":
+        return "Kartta"
+    if overlay_type == "hr":
+        return "Syke"
+    return overlay_type
+
+
+def _publish_public_artifact_if_needed(
+    artifact: VisualizationArtifact,
+    public_artifacts: PublicArtifactsConfig | None,
+) -> str | None:
+    if public_artifacts is None or public_artifacts.path is None or not public_artifacts.base_url:
+        return None
+    if len(artifact.content) <= public_artifacts.max_discord_attachment_bytes:
+        return None
+    public_filename = Path(artifact.filename).name
+    write_bytes_under(public_artifacts.path, public_filename, artifact.content)
+    return f"{public_artifacts.base_url.rstrip('/')}/{public_filename}"
+
+
+def _resolve_animation_workout(event: CanonicalEvent, repositories: RepositoryBundle) -> WorkoutRecord | None:
+    selector = _tarkenne_value(event.text, "workout") or _tarkenne_value(event.text, "treeni")
+    if selector:
+        resolved = resolve_workout_selector(repositories, event.user_id, _animation_selector(selector), default="none")
+        return resolved.workout if resolved.status == WorkoutReferenceStatus.MATCHED else None
+    resolved = resolve_workout_selector(repositories, event.user_id, {"type": "active", "value": "", "count": None, "limit": None}, default="active")
+    if resolved.status == WorkoutReferenceStatus.MATCHED:
+        return resolved.workout
+    resolved = resolve_workout_selector(repositories, event.user_id, {"type": "latest", "value": "", "count": None, "limit": None}, default="latest")
+    return resolved.workout if resolved.status == WorkoutReferenceStatus.MATCHED else None
+
+
+def _animation_selector(value: str) -> dict[str, object]:
+    normalized = value.strip().lower()
+    if normalized in {"active", "aktiivinen"}:
+        return {"type": "active", "value": "", "count": None, "limit": None}
+    if normalized in {"latest", "last", "viimeisin", "uusin"}:
+        return {"type": "latest", "value": "", "count": None, "limit": None}
+    return {"type": "id", "value": value.strip(), "count": None, "limit": None}
+
+
+def _animation_request(text: str) -> OverlayAnimationRequest:
+    overlay_types = _overlay_tarkenne_values(text)
+    if not overlay_types:
+        overlay_types = ("map",)
+    has_dist = bool(_tarkenne_value(text, "dist"))
+    start_km = _distance_tarkenne(
+        text,
+        "dist",
+        default=_distance_tarkenne(text, "start", default=_distance_tarkenne(text, "distance", default=0.0)),
+    )
+    sync = _tarkenne_value(text, "sync").lower()
+    real_time = has_dist or sync == "real"
+    length_default = 60.0 if real_time else 5.0
+    length_s = _duration_tarkenne(text, "duration", default=_duration_tarkenne(text, "length", default=length_default))
+    view = _tarkenne_value(text, "view").lower()
+    output_format = _tarkenne_value(text, "format").lower()
+    map_layout = _tarkenne_value(text, "map_layout").lower() or "circle"
+    hr_layout = _tarkenne_value(text, "hr_layout").lower() or "line"
+    map_mode = _tarkenne_value(text, "map").lower()
+    tail_mode = _tarkenne_value(text, "tail_mode").lower()
+    has_fixed_tail = bool(_tarkenne_value(text, "tail"))
+    route_position = _tarkenne_value(text, "route_position").lower()
+    route_background = _tarkenne_value(text, "route_background").lower()
+    normalized_map_layout = map_layout if map_layout in {"circle", "default"} else "circle"
+    normalized_hr_layout = hr_layout if hr_layout in {"line"} else "line"
+    normalized_map_mode = map_mode if map_mode in {"schematic", "tiles"} else ("tiles" if normalized_map_layout == "circle" else "schematic")
+    normalized_tail_mode = tail_mode if tail_mode in {"time", "distance"} else ("distance" if has_fixed_tail else "time")
+    normalized_route_position = route_position if route_position in {"left", "right", "center"} else "right"
+    normalized_route_background = route_background if route_background in {"dim", "none"} else "dim"
+    transparent = _boolean_tarkenne(text, "transparent", default=True) or _tarkenne_value(text, "background").lower() == "transparent"
+    if not output_format:
+        output_format = "mov" if transparent else "mp4"
+    return OverlayAnimationRequest(
+        start_km=start_km,
+        window_km=max(0.05, _distance_tarkenne(text, "window", default=0.5)),
+        length_s=_clamped_float(length_s, 1.0, 300.0 if real_time else 15.0),
+        fps=int(_clamped_float(_numeric_tarkenne(text, "fps", default=10.0), 1.0, 20.0)),
+        width=_render_size_tarkenne(text)[0],
+        height=_render_size_tarkenne(text)[1],
+        overlay_types=overlay_types,
+        show_map="map" in overlay_types,
+        show_speed=False,
+        show_hr="hr" in overlay_types,
+        sync="real" if real_time else "fit",
+        view="local" if real_time and view not in {"segment", "full"} else (view or "segment"),
+        radius_km=max(0.04, _distance_tarkenne(text, "radius", default=0.3)),
+        tail_km=max(0.0, _distance_tarkenne(text, "tail", default=0.2)),
+        tail_mode=normalized_tail_mode,
+        tail_time_s=_clamped_float(_duration_tarkenne(text, "tail_time", default=30.0), 3.0, 180.0),
+        tail_max_km=max(0.03, _distance_tarkenne(text, "tail_max", default=0.25)),
+        lookahead_km=max(0.0, _distance_tarkenne(text, "lookahead", default=0.1)),
+        auto_zoom=_boolean_tarkenne(text, "auto_zoom", default=True),
+        radius_min_km=max(0.04, _distance_tarkenne(text, "radius_min", default=0.1)),
+        tail_min_km=max(0.02, _distance_tarkenne(text, "tail_min", default=0.06)),
+        auto_zoom_fast_pace_s_per_km=_pace_tarkenne(text, "auto_zoom_fast", default=240.0),
+        auto_zoom_slow_pace_s_per_km=_pace_tarkenne(text, "auto_zoom_slow", default=540.0),
+        auto_zoom_sample_s=_clamped_float(_duration_tarkenne(text, "auto_zoom_sample", default=20.0), 4.0, 60.0),
+        output_format=output_format if output_format in {"gif", "webm", "mov", "mp4"} else ("mov" if transparent else "mp4"),
+        transparent=transparent,
+        map_layout=normalized_map_layout,
+        hr_layout=normalized_hr_layout,
+        map_mode=normalized_map_mode,
+        compass=_boolean_tarkenne(text, "compass", default=normalized_map_layout == "circle"),
+        map_style=_map_style_tarkenne(text),
+        tile_alpha=_clamped_float(_numeric_tarkenne(text, "tile_alpha", default=0.9), 0.0, 1.0),
+        route_position=normalized_route_position,
+        route_size=int(_clamped_float(_numeric_tarkenne(text, "route_size", default=360.0), 120.0, 720.0)),
+        route_background=normalized_route_background,
+        route_tail=_boolean_tarkenne(text, "route_tail", default=True),
+    )
+
+
+def _overlay_tarkenne_values(text: str) -> tuple[str, ...]:
+    value = _tarkenne_value(text, "overlay")
+    if not value:
+        return ()
+    aliases = {
+        "map": "map",
+        "kartta": "map",
+        "route": "route",
+        "reitti": "route",
+        "overview": "route",
+        "hr": "hr",
+        "syke": "hr",
+        "heart": "hr",
+        "heartrate": "hr",
+        "heart-rate": "hr",
+        "heart_rate": "hr",
+    }
+    values: list[str] = []
+    for item in re.split(r"[,/]+", value.strip().lower().replace("_", "-")):
+        normalized = aliases.get(item.strip())
+        if normalized is not None and normalized not in values:
+            values.append(normalized)
+    return tuple(values)
+
+
+def _tarkenne_value(text: str, key: str) -> str:
+    match = re.search(rf"(?<!\w){re.escape(key)}\s*=\s*([^\s;]+)", text, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _distance_tarkenne(text: str, key: str, *, default: float) -> float:
+    value = _tarkenne_value(text, key)
+    if not value:
+        return default
+    match = re.fullmatch(r"(\d+(?:[.,]\d+)?)(km|m)?", value.strip().lower())
+    if match is None:
+        return default
+    amount = float(match.group(1).replace(",", "."))
+    return amount / 1000.0 if match.group(2) == "m" else amount
+
+
+def _duration_tarkenne(text: str, key: str, *, default: float) -> float:
+    value = _tarkenne_value(text, key)
+    if not value:
+        return default
+    match = re.fullmatch(r"(\d+(?:[.,]\d+)?)(s|sec|sek|min|m)?", value.strip().lower())
+    if match is None:
+        return default
+    amount = float(match.group(1).replace(",", "."))
+    return amount * 60.0 if match.group(2) in {"min", "m"} else amount
+
+
+def _pace_tarkenne(text: str, key: str, *, default: float) -> float:
+    value = _tarkenne_value(text, key)
+    if not value:
+        return default
+    normalized = value.strip().lower().removesuffix("/km")
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", normalized)
+    if match is not None:
+        return float(int(match.group(1)) * 60 + int(match.group(2)))
+    try:
+        return float(normalized.replace(",", "."))
+    except ValueError:
+        return default
+
+
+def _numeric_tarkenne(text: str, key: str, *, default: float) -> float:
+    value = _tarkenne_value(text, key)
+    if not value:
+        return default
+    try:
+        return float(value.replace(",", "."))
+    except ValueError:
+        return default
+
+
+def _boolean_tarkenne(text: str, key: str, *, default: bool) -> bool:
+    value = _tarkenne_value(text, key).strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on", "kylla", "kyllä"}:
+        return True
+    if value in {"0", "false", "no", "off", "ei"}:
+        return False
+    return default
+
+
+def _render_size_tarkenne(text: str) -> tuple[int, int]:
+    value = _tarkenne_value(text, "size")
+    match = re.fullmatch(r"(\d{2,4})x(\d{2,4})", value.lower()) if value else None
+    if match is None:
+        return (1280, 720)
+    width = int(_clamped_float(float(match.group(1)), 240, 1280))
+    height = int(_clamped_float(float(match.group(2)), 180, 720))
+    return width, height
+
+
+def _map_style_tarkenne(text: str) -> str:
+    value = _tarkenne_value(text, "map_style") or _tarkenne_value(text, "style")
+    normalized = value.strip().lower().replace("_", "-")
+    aliases = {
+        "dark": "streets-v2-dark",
+        "streets-dark": "streets-v2-dark",
+        "streets-v2-dark": "streets-v2-dark",
+        "streets-v4-dark": "streets-v4-dark",
+        "outdoor-dark": "outdoor-v2-dark",
+        "outdoor-v2-dark": "outdoor-v2-dark",
+        "outdoors-dark": "outdoor-v2-dark",
+        "outdoor": "outdoor-v2",
+        "outdoor-v2": "outdoor-v2",
+        "outdoors": "outdoor-v2",
+        "dataviz-dark": "dataviz-dark",
+        "light": "dataviz-light",
+        "dataviz-light": "dataviz-light",
+        "dataviz": "dataviz",
+        "streets": "streets-v4",
+        "streets-v4": "streets-v4",
+        "streets-v2": "streets-v2",
+        "basic-dark": "basic-v2-dark",
+        "basic-v2-dark": "basic-v2-dark",
+        "basic": "basic-v2",
+        "basic-v2": "basic-v2",
+    }
+    return aliases.get(normalized, "streets-v2-dark")
+
+
+def _clamped_float(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _route_time_title_context(
+    event: CanonicalEvent,
+    resolved: ResolvedVisualizationRequest,
+    points: tuple[WorkoutPointRecord, ...],
+    *,
+    repositories: RepositoryBundle,
+    gateway: LLMGateway | None,
+    weather_provider: WeatherProvider | None,
+    language: SupportedLanguage,
+) -> dict[str, object]:
+    if not _route_map_can_show_estimate(resolved):
+        return {"title_summary": "", "metadata": {}}
+    target_feature = repositories.workout_estimate_features.get(resolved.workout.workout_id)
+    history_features = repositories.workout_estimate_features.list_for_user(event.user_id, limit=100)
+    history = repositories.workouts.list_for_user(event.user_id, limit=100)
+    estimate = estimate_route_time_from_features(resolved.workout, target_feature, points, history_features, history)
+    if estimate is None:
+        return {"title_summary": "", "metadata": {}}
+    target_date = ""
+    activity_intent = "unknown"
+    if gateway is not None:
+        try:
+            route_time_intent = interpret_route_time_estimate_intent(
+                gateway,
+                RouteTimeEstimateIntentInput(
+                    user_text=event.text,
+                    current_date=local_now(event.created_at).date().isoformat(),
+                    timezone=DEFAULT_PERIOD_TIMEZONE,
+                    compact_routing_context={
+                        "active_workout_id": _active_workout_context(event, repositories).get("workout_id", ""),
+                        "recent_workout_count": len(repositories.workouts.list_for_user(event.user_id, limit=20)),
+                    },
+                ),
+            )
+        except LLMGatewayError:
+            route_time_intent = None
+        if route_time_intent is not None and route_time_intent.is_route_time_estimate:
+            target_date = route_time_intent.target_date
+            activity_intent = route_time_intent.activity_intent
+    weather_payload = build_route_time_weather_payload(
+        estimate,
+        target_feature,
+        points,
+        target_date=target_date,
+        activity_intent=activity_intent,
+        provider=weather_provider,
+    )
+    title_summary = format_route_time_title_summary(estimate, weather_payload, language=language.value)
+    return {
+        "title_summary": title_summary,
+        "metadata": {
+            "route_time_title_summary": title_summary,
+            "route_time_estimate_s": round(estimate.estimate_s),
+            "route_time_weather": weather_payload or {},
+        },
+    }
+
+
+def _route_map_can_show_estimate(resolved: ResolvedVisualizationRequest) -> bool:
+    intent = resolved.intent
+    return (
+        resolved.scope_type == "single_workout"
+        and not _is_comparison_intent(intent)
+        and intent.output_mode == "chart"
+        and intent.chart_kind == "map"
+        and "route" in intent.y_metrics
+    )
 
 
 def _validate_zone_prerequisite(intent: VisualizationIntent, heart_rate_zones: tuple[HeartRateZoneRecord, ...]) -> None:
@@ -755,6 +1262,10 @@ def _apply_visualization_modifiers(intent: VisualizationIntent, text: str) -> Vi
         social_style["waypoints"] = False
     if any(modifier in ELEVATION_OVERLAY_HIDE_MODIFIERS for modifier in negative_modifiers):
         social_style["elevation_overlay"] = False
+    if any(modifier in ELEVATION_OVERLAY_SHOW_MODIFIERS for modifier in modifiers):
+        social_style["elevation_overlay"] = True
+    if any(modifier in ROUTE_DIRECTION_MODIFIERS for modifier in modifiers):
+        social_style["direction_arrows"] = True
     if not modifiers and social_style == intent.social_style:
         return intent
     output_mode = "social_image" if any(modifier in SOCIAL_OUTPUT_MODIFIERS for modifier in modifiers) else intent.output_mode
@@ -811,11 +1322,11 @@ def _social_route_error_key(intent: VisualizationIntent, exc: MissingPrimaryMetr
 
 
 def _visualization_modifiers(text: str) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(match.group(1).lower().replace("-", "_") for match in re.finditer(r"(?<!\w)\+([\w-]+)", text)))
+    return tuple(dict.fromkeys(match.group(1).lower().replace("-", "_") for match in re.finditer(r"(?<!\w)\+([\w:-]+)", text)))
 
 
 def _visualization_negative_modifiers(text: str) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(match.group(1).lower().replace("-", "_") for match in re.finditer(r"(?<!\w)-([\w-]+)", text)))
+    return tuple(dict.fromkeys(match.group(1).lower().replace("-", "_") for match in re.finditer(r"(?<!\w)-([\w:-]+)", text)))
 
 
 def _social_style_from_text(
@@ -1075,12 +1586,14 @@ def _route_color_metric_label(metric: str, *, language: SupportedLanguage) -> st
         labels = {
             "heart_rate_bpm": "syke",
             "elevation_m": "korkeus",
+            "grade": "jyrkkyys",
             "pace_s_per_km": "vauhti",
         }
         return labels.get(metric, metric)
     labels = {
         "heart_rate_bpm": "heart rate",
         "elevation_m": "elevation",
+        "grade": "grade",
         "pace_s_per_km": "pace",
     }
     return labels.get(metric, metric)
@@ -1120,7 +1633,7 @@ def _comparison_count(intent: VisualizationIntent) -> int:
 
 def _is_comparison_intent(intent: VisualizationIntent) -> bool:
     comparison = intent.comparison_mode.strip().lower()
-    return comparison not in {"", "none", "single"}
+    return comparison in {"recent", "compare", "comparison", "previous", "previous_period", "multi", "multiple"}
 
 
 def _should_set_current_workout(intent: VisualizationIntent) -> bool:

@@ -13,6 +13,7 @@ from core.runtime import RuntimeContext, build_runtime
 from llm.factory import build_openai_gateway
 from llm.gateway import LLMGateway
 from storage.unit_of_work import UnitOfWork, open_database
+from weather.service import OpenMeteoWeatherProvider
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,9 @@ class ApplicationContext:
             max_attachment_size_bytes=self.runtime.config.limits.max_attachment_size_bytes,
             raw_gpx_path=self.runtime.config.storage.raw_gpx_path,
             artifact_path=self.runtime.config.storage.artifact_path,
+            public_artifacts=self.runtime.config.public_artifacts,
             maps_config=self.runtime.config.maps,
+            weather_provider=_weather_provider(self.runtime.config.weather),
         )
 
     def dispatch_event(self, event: CanonicalEvent):
@@ -51,7 +54,9 @@ class ApplicationContext:
                     max_attachment_size_bytes=self.runtime.config.limits.max_attachment_size_bytes,
                     raw_gpx_path=self.runtime.config.storage.raw_gpx_path,
                     artifact_path=self.runtime.config.storage.artifact_path,
+                    public_artifacts=self.runtime.config.public_artifacts,
                     maps_config=self.runtime.config.maps,
+                    weather_provider=_weather_provider(self.runtime.config.weather),
                     status_callback=status_callback,
                 ),
             )
@@ -80,6 +85,8 @@ def build_application_context(
     _ensure_parent_dir(database_path)
     runtime.config.storage.raw_gpx_path.mkdir(parents=True, exist_ok=True)
     runtime.config.storage.artifact_path.mkdir(parents=True, exist_ok=True)
+    if runtime.config.public_artifacts.path is not None:
+        runtime.config.public_artifacts.path.mkdir(parents=True, exist_ok=True)
     connection = open_database(str(database_path), apply_migrations=apply_schema)
     llm_gateway = build_openai_gateway(runtime.config.openai) if enable_llm and runtime.config.openai.api_key else None
     return ApplicationContext(
@@ -95,3 +102,9 @@ def _ensure_parent_dir(path: Path) -> None:
     parent = path.parent
     if str(parent) and str(parent) != ".":
         parent.mkdir(parents=True, exist_ok=True)
+
+
+def _weather_provider(config):
+    if not config.enabled or config.provider == "none":
+        return None
+    return OpenMeteoWeatherProvider(timeout_s=config.timeout_s)
