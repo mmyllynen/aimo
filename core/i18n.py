@@ -56,6 +56,9 @@ class TranslationKey(StrEnum):
     VISUALIZATION_WORKING = "visualization.working"
     VISUALIZATION_CREATED = "visualization.created"
     VISUALIZATION_ROUTE_COLOR_LIMITED = "visualization.route_color_limited"
+    OVERLAY_ANIMATION_CREATED = "overlay_animation.created"
+    OVERLAY_ANIMATION_CREATED_LINK = "overlay_animation.created_link"
+    OVERLAY_ANIMATION_BUNDLE_CREATED = "overlay_animation.bundle_created"
     ERROR_UNSUPPORTED_ATTACHMENT = "error.unsupported_attachment"
     ERROR_INVALID_GPX = "error.invalid_gpx"
     ERROR_NO_MATCHING_WORKOUT = "error.no_matching_workout"
@@ -65,6 +68,8 @@ class TranslationKey(StrEnum):
     ERROR_PERIOD_REQUEST_INVALID = "error.period_request_invalid"
     ERROR_VISUALIZATION_PLAN_INVALID = "error.visualization_plan_invalid"
     ERROR_SOCIAL_IMAGE_REQUIRES_ROUTE = "error.social_image_requires_route"
+    ERROR_OVERLAY_ANIMATION_REQUIRES_ROUTE = "error.overlay_animation_requires_route"
+    ERROR_OVERLAY_ANIMATION_ENCODER_UNAVAILABLE = "error.overlay_animation_encoder_unavailable"
     ERROR_RENDER_FAILED = "error.render_failed"
     ERROR_MODEL_UNAVAILABLE = "error.model_unavailable"
     ERROR_PERMISSION_DENIED = "error.permission_denied"
@@ -97,7 +102,7 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
             "- `/treenit nimea viite nimi`, `tagaa viite tagi`, `poista_tagi viite tagi` muokkaavat treeniä.\n"
             "- `/treenit poista viite` poistaa vasta 60 s painikevahvistuksen jälkeen.\n"
             "- `/asetukset nayta` näyttää asetukset; `/asetukset sykerajat zones` hyväksyy esim. `190` tai `114,133,152,171,190`.\n"
-            "- `/debug tila` palauttaa rajatun debug-jäljen."
+            "- `/debug level` palauttaa rajatun debug-jäljen. Maininnoissa `+debug0`, `+debug1` ja `+debug2` lisäävät debug-jäljen vastaukseen."
         ),
         TranslationKey.HELP_VISUALIZATION: (
             "**Visualisointi**\n"
@@ -108,6 +113,7 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
             "- Mittarit: `+hr`/`+syke`, `+elevation`/`+korkeus`, `+pace`/`+vauhti`, `+distance`/`+matka`, `+duration`/`+kesto`, `+ascent`/`+nousu`/`+nousumetrit`, `+maxhr`/`+maksimisyke`, `+date`/`+paiva`/`+päivä`.\n"
             "- Plustägi `+sana` lisää, miinustägi `-sana` poistaa, tarkenne `avain=arvo` asettaa arvon; esim. `+hr`, `-waypoints`, `-korkeus`, `dim=45`.\n"
             "- Somekuva: `+social` tai `+somekuva`; presetit ja tarkenteet: `/help aihe:somekuva`.\n"
+            "- Overlay-animaatio: `+overlay start=12.4km length=5s fps=10 size=1280x720 +map +speed +hr`; pyöreä Resolve-yhteensopiva kartta: `+overlay +map dist=12.4km duration=60s transparent=true layout=circle_map map_style=dark tile_alpha=0.9`.\n"
             "- Reittikartta voi korostaa yhden datamittarin kerrallaan: `+hr`, `+elevation` tai `+pace`.\n"
             "- Yhden reitin kartassa GPX-waypointit/reittimerkit ja km-markerit näytetään kartalla; waypointit näkyvät myös overlay-listassa. Poista waypointit `-waypoints` tai `-reittimerkit`.\n"
             "- Yhden reitin kartassa korkeuskäyrä, jyrkkyysvärit ja km-akseli näytetään alalaidassa, jos korkeustieto löytyy; poista ne `-elevation` tai `-korkeus`.\n"
@@ -195,6 +201,12 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.VISUALIZATION_ROUTE_COLOR_LIMITED: (
             "Kartalla voi korostaa vain yhtä data-arvoa kerrallaan. Valitsin ensimmäisen: {metric}."
         ),
+        TranslationKey.OVERLAY_ANIMATION_CREATED: "Tein overlay-animaation treenistä: {title}.",
+        TranslationKey.OVERLAY_ANIMATION_CREATED_LINK: (
+            "Tein overlay-animaation treenistä: {title}.\n"
+            "Tiedosto on liian iso Discord-liitteeksi, lataa se tästä: {url}"
+        ),
+        TranslationKey.OVERLAY_ANIMATION_BUNDLE_CREATED: 'Tein overlayt treenistä "{title}" {date}, alkaen {start_km} km:\n{items}',
         TranslationKey.ERROR_UNSUPPORTED_ATTACHMENT: "Tuo liitetyyppi ei ole tuettu.",
         TranslationKey.ERROR_INVALID_GPX: "Tuo liite ei näytä kelvolliselta GPX-tiedostolta.",
         TranslationKey.ERROR_NO_MATCHING_WORKOUT: "En löytänyt pyynnölle sopivaa treeniä.",
@@ -204,6 +216,8 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.ERROR_PERIOD_REQUEST_INVALID: "En saanut muodostettua kelvollista treenijakson rajausta.",
         TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID: "En saanut muodostettua kelvollista kuvaajasuunnitelmaa.",
         TranslationKey.ERROR_SOCIAL_IMAGE_REQUIRES_ROUTE: "Somekuva tarvitsee treenin, jossa on reittipisteet.",
+        TranslationKey.ERROR_OVERLAY_ANIMATION_REQUIRES_ROUTE: "Overlay-animaatio tarvitsee treenin, jossa on reitti- ja matkapisteet.",
+        TranslationKey.ERROR_OVERLAY_ANIMATION_ENCODER_UNAVAILABLE: "Overlay-videon enkooderi puuttuu. WebM-ulostulo vaatii ffmpeg-ohjelman tai imageio-ffmpeg-paketin.",
         TranslationKey.ERROR_RENDER_FAILED: "Kuvaajan piirtäminen epäonnistui.",
         TranslationKey.ERROR_MODEL_UNAVAILABLE: "Kielimalli ei ole juuri nyt käytettävissä.",
         TranslationKey.ERROR_PERMISSION_DENIED: "Sinulla ei ole oikeutta tähän toimintoon.",
@@ -231,7 +245,7 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
             "- `/treenit nimea viite nimi`, `tagaa viite tagi`, `poista_tagi viite tagi` edit a workout.\n"
             "- `/treenit poista viite` deletes only after a 60-second button confirmation.\n"
             "- `/asetukset nayta` shows settings; `/asetukset sykerajat zones` accepts e.g. `190` or `114,133,152,171,190`.\n"
-            "- `/debug tila` returns a bounded debug trace."
+            "- `/debug level` returns a bounded debug trace. On mentions, `+debug0`, `+debug1`, and `+debug2` add debug output to the response."
         ),
         TranslationKey.HELP_VISUALIZATION: (
             "**Visualizations**\n"
@@ -242,6 +256,7 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
             "- Metrics: `+hr`/`+syke`, `+elevation`/`+korkeus`, `+pace`/`+vauhti`, `+distance`/`+matka`, `+duration`/`+kesto`, `+ascent`/`+nousu`/`+nousumetrit`, `+maxhr`/`+maksimisyke`, `+date`/`+paiva`/`+päivä`.\n"
             "- A plustägi `+word` adds something, a miinustägi `-word` removes something, and a tarkenne `key=value` sets a value; e.g. `+hr`, `-waypoints`, `-korkeus`, `dim=45`.\n"
             "- Social image: `+social` or `+somekuva`; presets and tarkenteet: `/help aihe:somekuva`.\n"
+            "- Overlay animation: `+overlay start=12.4km length=5s fps=10 size=1280x720 +map +speed +hr`; circular Resolve-compatible map: `+overlay +map dist=12.4km duration=60s transparent=true layout=circle_map map_style=dark tile_alpha=0.9`.\n"
             "- A route map can highlight one data metric at a time: `+hr`, `+elevation`, or `+pace`.\n"
             "- On single-route maps, GPX waypoints/route markers and kilometer markers are shown on the map; waypoints also appear in the overlay list. Hide waypoints with `-waypoints` or `-reittimerkit`.\n"
             "- On single-route maps, an elevation profile, grade colors, and kilometer axis are shown at the bottom when elevation data exists; hide them with `-elevation` or `-korkeus`.\n"
@@ -327,6 +342,12 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.VISUALIZATION_ROUTE_COLOR_LIMITED: (
             "A route map can highlight only one data value at a time. I used the first one: {metric}."
         ),
+        TranslationKey.OVERLAY_ANIMATION_CREATED: "I created an overlay animation for workout: {title}.",
+        TranslationKey.OVERLAY_ANIMATION_CREATED_LINK: (
+            "I created an overlay animation for workout: {title}.\n"
+            "The file is too large for a Discord attachment, download it here: {url}"
+        ),
+        TranslationKey.OVERLAY_ANIMATION_BUNDLE_CREATED: 'I created overlays for "{title}" {date}, starting at {start_km} km:\n{items}',
         TranslationKey.ERROR_UNSUPPORTED_ATTACHMENT: "That attachment type is not supported.",
         TranslationKey.ERROR_INVALID_GPX: "That attachment does not look like a valid GPX file.",
         TranslationKey.ERROR_NO_MATCHING_WORKOUT: "I could not find a workout matching the request.",
@@ -336,6 +357,8 @@ CATALOGS: dict[SupportedLanguage, Catalog] = {
         TranslationKey.ERROR_PERIOD_REQUEST_INVALID: "I could not build a valid workout-period selection.",
         TranslationKey.ERROR_VISUALIZATION_PLAN_INVALID: "I could not build a valid chart plan.",
         TranslationKey.ERROR_SOCIAL_IMAGE_REQUIRES_ROUTE: "A social image needs a workout with route points.",
+        TranslationKey.ERROR_OVERLAY_ANIMATION_REQUIRES_ROUTE: "An overlay animation needs a workout with route and distance points.",
+        TranslationKey.ERROR_OVERLAY_ANIMATION_ENCODER_UNAVAILABLE: "The overlay video encoder is unavailable. WebM output requires ffmpeg or the imageio-ffmpeg package.",
         TranslationKey.ERROR_RENDER_FAILED: "Rendering the chart failed.",
         TranslationKey.ERROR_MODEL_UNAVAILABLE: "The language model is not available right now.",
         TranslationKey.ERROR_PERMISSION_DENIED: "You do not have permission for that action.",

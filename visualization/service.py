@@ -94,6 +94,10 @@ class MissingPrimaryMetricError(VisualizationError):
         super().__init__(metric)
 
 
+ROUTE_COLOR_MODE_METRIC = "metric"
+ROUTE_COLOR_MODE_ELEVATION_GRADE = "elevation_grade"
+
+
 class VisualizationSpecInvalidError(VisualizationError):
     def __init__(self, reason: str, *, validation_errors: tuple[dict[str, Any], ...] = ()) -> None:
         self.reason = reason
@@ -112,6 +116,8 @@ def render_workout_visualization(
     maps_config: MapsConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
     social_background_image: bytes | None = None,
+    route_time_title_summary: str = "",
+    route_time_metadata: dict[str, Any] | None = None,
 ) -> VisualizationArtifact:
     if _is_social_image_intent(intent):
         return _render_social_image_visualization(
@@ -133,6 +139,8 @@ def render_workout_visualization(
             tile_cache_root=tile_cache_root,
             maps_config=maps_config,
             language=language,
+            route_time_title_summary=route_time_title_summary,
+            route_time_metadata=route_time_metadata,
         )
     request = dataset_request_from_metrics(
         x_metric=intent.x_metric,
@@ -328,11 +336,18 @@ def _render_social_image_visualization(
     background_image: bytes | None = None,
 ) -> VisualizationArtifact:
     route_color_metric = intent.route_color_metric if _is_route_color_metric_supported(intent.route_color_metric) else ""
-    routes = _route_polylines(points, workouts_by_id={workout.workout_id: workout}, route_color_metric=route_color_metric)
+    route_color_mode = _route_color_mode(route_color_metric)
+    routes = _route_polylines(
+        points,
+        workouts_by_id={workout.workout_id: workout},
+        route_color_metric=route_color_metric,
+        route_color_mode=route_color_mode,
+    )
     if not routes:
         raise MissingPrimaryMetricError("route")
     color_status = _route_color_status(routes, route_color_metric=route_color_metric)
     active_color_metric = route_color_metric if color_status == "ok" else ""
+    active_color_mode = route_color_mode if active_color_metric else ROUTE_COLOR_MODE_METRIC
     color_domain = _route_color_domain(routes, active_color_metric) if active_color_metric else None
     render_size = _social_render_size(intent)
     requested_attachment_background = background_image is not None
@@ -390,6 +405,7 @@ def _render_social_image_visualization(
         "social_layout_version": "2",
         "social_style": intent.social_style,
         "social_route_color_metric": active_color_metric,
+        "social_route_color_mode": active_color_mode,
         "social_route_color_status": color_status,
         "social_route_color_domain": color_domain or (),
     }
@@ -508,15 +524,25 @@ def _render_route_map_visualization(
     maps_config: MapsConfig | None = None,
     language: SupportedLanguage = SupportedLanguage.FI,
     route_labels: dict[str, str] | None = None,
+    route_time_title_summary: str = "",
+    route_time_metadata: dict[str, Any] | None = None,
 ) -> VisualizationArtifact:
     workouts_by_id = {workout.workout_id: workout}
     route_color_metric = intent.route_color_metric if _is_route_color_metric_supported(intent.route_color_metric) else ""
-    routes = _route_polylines(points, workouts_by_id=workouts_by_id, route_labels=route_labels, route_color_metric=route_color_metric)
+    route_color_mode = _route_color_mode(route_color_metric)
+    routes = _route_polylines(
+        points,
+        workouts_by_id=workouts_by_id,
+        route_labels=route_labels,
+        route_color_metric=route_color_metric,
+        route_color_mode=route_color_mode,
+    )
     if not routes:
         raise MissingPrimaryMetricError("route")
     render_size = _render_size(intent)
     color_status = _route_color_status(routes, route_color_metric=route_color_metric)
     active_color_metric = route_color_metric if color_status == "ok" else ""
+    active_color_mode = route_color_mode if active_color_metric else ROUTE_COLOR_MODE_METRIC
     color_domain = _route_color_domain(routes, active_color_metric) if active_color_metric else None
     waypoint_count = len(_route_waypoints_from_metadata(workout))
     waypoints = _route_waypoints(workout, routes) if _show_waypoints(intent) and len(routes) == 1 else ()
@@ -524,8 +550,8 @@ def _render_route_map_visualization(
     elevation_profile = _route_elevation_profile(points, routes, intent)
     elevation_status = _elevation_overlay_status(elevation_profile, routes, intent)
     chart = RouteMap(
-        title=workout.title,
-        subtitle=_route_chart_subtitle(workout, language=language),
+        title=_route_map_title(workout.title, language=language),
+        subtitle=_route_chart_subtitle(workout, language=language, estimate_summary=route_time_title_summary),
         routes=routes,
         waypoints=waypoints,
         elevation_profile=elevation_profile,
@@ -534,6 +560,8 @@ def _render_route_map_visualization(
         color_domain=color_domain,
         color_tick_format=metric_tick_format(active_color_metric) if active_color_metric else "number",
         color_direction=metric_direction(active_color_metric) if active_color_metric else "ascending",
+        color_mode=active_color_mode,
+        show_direction=_show_route_direction(intent),
         width=render_size[0],
         height=render_size[1],
     )
@@ -556,6 +584,8 @@ def _render_route_map_visualization(
             color_domain=chart.color_domain,
             color_tick_format=chart.color_tick_format,
             color_direction=chart.color_direction,
+            color_mode=chart.color_mode,
+            show_direction=chart.show_direction,
             routes=routes,
             waypoints=waypoints,
             elevation_profile=elevation_profile,
@@ -569,6 +599,29 @@ def _render_route_map_visualization(
             height=render_size[1],
         )
     )
+    metadata = {
+        **tile_data["metadata"],
+        "renderer": renderer.name,
+        "chart_type": "route",
+        "render_width": chart.width,
+        "render_height": chart.height,
+        "route_color_metric": active_color_metric,
+        "route_color_ignored_metrics": intent.route_color_ignored_metrics,
+        "route_color_status": color_status,
+        "route_color_domain": color_domain or (),
+        "route_color_tick_format": chart.color_tick_format,
+        "route_color_direction": chart.color_direction,
+        "route_color_mode": chart.color_mode,
+        "route_direction_arrows": chart.show_direction,
+        "waypoint_count": waypoint_count,
+        "waypoints_rendered": len(waypoints),
+        "waypoint_status": waypoint_status,
+        "elevation_overlay_status": elevation_status,
+        "elevation_overlay_min_m": _elevation_min(elevation_profile),
+        "elevation_overlay_max_m": _elevation_max(elevation_profile),
+    }
+    if route_time_metadata:
+        metadata.update(route_time_metadata)
     return VisualizationArtifact(
         content=rendered,
         filename=f"{filename_prefix}-route-map.png",
@@ -576,25 +629,7 @@ def _render_route_map_visualization(
         rendered_metrics=("route", active_color_metric) if active_color_metric else ("route",),
         missing_metrics=(),
         scaled_metrics=(),
-        metadata={
-            **tile_data["metadata"],
-            "renderer": renderer.name,
-            "chart_type": "route",
-            "render_width": chart.width,
-            "render_height": chart.height,
-            "route_color_metric": active_color_metric,
-            "route_color_ignored_metrics": intent.route_color_ignored_metrics,
-            "route_color_status": color_status,
-            "route_color_domain": color_domain or (),
-            "route_color_tick_format": chart.color_tick_format,
-            "route_color_direction": chart.color_direction,
-            "waypoint_count": waypoint_count,
-            "waypoints_rendered": len(waypoints),
-            "waypoint_status": waypoint_status,
-            "elevation_overlay_status": elevation_status,
-            "elevation_overlay_min_m": _elevation_min(elevation_profile),
-            "elevation_overlay_max_m": _elevation_max(elevation_profile),
-        },
+        metadata=metadata,
     )
 
 
@@ -763,6 +798,7 @@ def _route_polylines(
     workouts_by_id: dict[str, WorkoutRecord] | None = None,
     route_labels: dict[str, str] | None = None,
     route_color_metric: str = "",
+    route_color_mode: str = ROUTE_COLOR_MODE_METRIC,
 ) -> tuple[RoutePolyline, ...]:
     workouts_by_id = workouts_by_id or {}
     route_labels = route_labels or {}
@@ -774,7 +810,7 @@ def _route_polylines(
     routes = []
     for workout_id, route_points in grouped.items():
         if len(route_points) >= 2:
-            color_values = _route_metric_values(route_points, route_color_metric)
+            color_values = _route_metric_values(route_points, route_color_metric, route_color_mode=route_color_mode)
             routes.append(
                 RoutePolyline(
                     label=route_labels.get(workout_id) or _route_label(workouts_by_id.get(workout_id), workout_id),
@@ -787,6 +823,7 @@ def _route_polylines(
                         for point, color_value in zip(route_points, color_values, strict=True)
                     ),
                     color_metric=route_color_metric,
+                    color_mode=route_color_mode,
                 )
             )
     return tuple(routes)
@@ -798,6 +835,10 @@ def _show_waypoints(intent: VisualizationIntent) -> bool:
 
 def _show_elevation_overlay(intent: VisualizationIntent) -> bool:
     return intent.social_style.get("elevation_overlay") is not False
+
+
+def _show_route_direction(intent: VisualizationIntent) -> bool:
+    return intent.social_style.get("direction_arrows") is True
 
 
 def _route_waypoints(workout: WorkoutRecord, routes: tuple[RoutePolyline, ...]) -> tuple[RouteWaypoint, ...]:
@@ -1047,7 +1088,13 @@ def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _is_route_color_metric_supported(metric: str) -> bool:
-    return metric in {"heart_rate_bpm", "elevation_m", "pace_s_per_km"}
+    return metric in {"heart_rate_bpm", "elevation_m", "grade", "pace_s_per_km"}
+
+
+def _route_color_mode(metric: str) -> str:
+    if metric == "grade":
+        return ROUTE_COLOR_MODE_ELEVATION_GRADE
+    return ROUTE_COLOR_MODE_METRIC
 
 
 def _route_color_status(routes: tuple[RoutePolyline, ...], *, route_color_metric: str) -> str:
@@ -1060,14 +1107,37 @@ def _route_color_status(routes: tuple[RoutePolyline, ...], *, route_color_metric
 
 
 def _route_color_domain(routes: tuple[RoutePolyline, ...], metric: str) -> tuple[float, float] | None:
+    if any(route.color_mode == ROUTE_COLOR_MODE_ELEVATION_GRADE for route in routes):
+        values = tuple(point.color_value for route in routes for point in route.points if point.color_value is not None and math.isfinite(point.color_value))
+        if not values:
+            return None
+        return min(values), max(values)
     values = tuple(point.color_value for route in routes for point in route.points if point.color_value is not None)
     return visual_domain(metric, values)
 
 
-def _route_metric_values(points: list[WorkoutPointRecord], metric: str) -> tuple[float | None, ...]:
+def _route_metric_values(
+    points: list[WorkoutPointRecord],
+    metric: str,
+    *,
+    route_color_mode: str = ROUTE_COLOR_MODE_METRIC,
+) -> tuple[float | None, ...]:
     if not metric:
         return tuple(None for _ in points)
+    if route_color_mode == ROUTE_COLOR_MODE_ELEVATION_GRADE:
+        return _route_elevation_grade_values(points)
     return clean_metric_series(metric, tuple(_route_point_metric_value(point, metric) for point in points))
+
+
+def _route_elevation_grade_values(points: list[WorkoutPointRecord]) -> tuple[float | None, ...]:
+    if len(points) < 2 or any(point.elevation_m is None for point in points):
+        return tuple(None for _ in points)
+    route_points = tuple(points)
+    distances = _route_distances_km(route_points)
+    if len(distances) != len(route_points):
+        return tuple(None for _ in points)
+    elevations = _smoothed_elevations(distances, tuple(float(point.elevation_m) for point in route_points if point.elevation_m is not None))
+    return _smoothed_grades(distances, elevations)
 
 
 def _route_point_metric_value(point: WorkoutPointRecord, metric: str) -> float | None:
@@ -1075,6 +1145,8 @@ def _route_point_metric_value(point: WorkoutPointRecord, metric: str) -> float |
         return point.heart_rate_bpm
     if metric == "elevation_m":
         return point.elevation_m
+    if metric == "grade":
+        return None
     if metric == "pace_s_per_km":
         return point.pace_s_per_km
     return None
@@ -1402,14 +1474,23 @@ def _format_period_range(value: str | None) -> str:
     return " - ".join(part for part in (start_text, end_text) if part)
 
 
-def _route_chart_subtitle(workout: WorkoutRecord, *, language: SupportedLanguage) -> str:
+def _route_chart_subtitle(workout: WorkoutRecord, *, language: SupportedLanguage, estimate_summary: str = "") -> str:
     parts = (
         _format_route_datetime(workout.start_time_local or workout.start_time_utc or workout.local_date),
         _format_route_distance_and_ascent(workout, language=language),
+        estimate_summary,
         _format_route_duration(workout.duration_s),
         _format_route_average_hr(workout.avg_hr_bpm, language=language),
     )
     return " - ".join(part for part in parts if part)
+
+
+def _route_map_title(title: str, *, language: SupportedLanguage) -> str:
+    prefix = "Reitti" if language == SupportedLanguage.FI else "Route"
+    clean = title.strip()
+    if clean.lower().startswith(f"{prefix.lower()}:"):
+        return clean
+    return f"{prefix}: {clean}" if clean else prefix
 
 
 def _format_route_distance_and_ascent(workout: WorkoutRecord, *, language: SupportedLanguage) -> str:
@@ -1418,8 +1499,9 @@ def _format_route_distance_and_ascent(workout: WorkoutRecord, *, language: Suppo
         return ""
     if workout.ascent_m is None:
         return distance
-    ascent_label = "nousua" if language == SupportedLanguage.FI else "ascent"
-    return f"{distance} - {ascent_label} {round(workout.ascent_m)} m"
+    if language == SupportedLanguage.FI:
+        return f"{distance} - {round(workout.ascent_m)} nm"
+    return f"{distance} - ascent {round(workout.ascent_m)} m"
 
 
 def _route_legend_title(routes: tuple[RoutePolyline, ...], *, language: SupportedLanguage) -> str:
@@ -1433,10 +1515,12 @@ def _route_color_metric_label(metric: str, *, language: SupportedLanguage) -> st
         labels = {
             "heart_rate_bpm": "Syke",
             "elevation_m": "Korkeus",
+            "grade": "Jyrkkyys",
             "pace_s_per_km": "Vauhti (min/km)",
         }
         return labels.get(metric, _series_label(metric, language=language))
     labels = {
+        "grade": "Grade",
         "pace_s_per_km": "Pace (min/km)",
     }
     return labels.get(metric, _series_label(metric, language=language))
@@ -1776,7 +1860,7 @@ def _format_number(value: object, *, prefix: str = "", suffix: str = "", digits:
 
 def _is_comparison_intent(intent: VisualizationIntent) -> bool:
     comparison = intent.comparison_mode.strip().lower()
-    return comparison not in {"", "none", "single"}
+    return comparison in {"recent", "compare", "comparison", "previous", "previous_period", "multi", "multiple"}
 
 
 def _numeric(value: Any) -> float:

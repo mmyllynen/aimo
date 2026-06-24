@@ -42,6 +42,14 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class PublicArtifactsConfig:
+    path: Path | None = None
+    base_url: str = ""
+    max_discord_attachment_bytes: int = 8 * 1024 * 1024
+    retention_hours: int = 24
+
+
+@dataclass(frozen=True)
 class AdminConfig:
     user_ids: frozenset[str] = field(default_factory=frozenset)
 
@@ -70,16 +78,25 @@ class MapsConfig:
 
 
 @dataclass(frozen=True)
+class WeatherConfig:
+    enabled: bool = True
+    provider: str = "open_meteo"
+    timeout_s: float = 8.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     bot: BotConfig = field(default_factory=BotConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    public_artifacts: PublicArtifactsConfig = field(default_factory=PublicArtifactsConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
     maps: MapsConfig = field(default_factory=MapsConfig)
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
 
 
 def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = False) -> AppConfig:
@@ -111,6 +128,17 @@ def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = F
             artifact_path=Path(_get(parser, "storage", "artifact_path", fallback="artifacts")),
             raw_gpx_path=Path(_get(parser, "storage", "raw_gpx_path", fallback="data/raw_gpx")),
         ),
+        public_artifacts=PublicArtifactsConfig(
+            path=_optional_path(_get(parser, "public_artifacts", "path", fallback="")),
+            base_url=(_get(parser, "public_artifacts", "base_url", fallback="") or "").strip(),
+            max_discord_attachment_bytes=_getint(
+                parser,
+                "public_artifacts",
+                "max_discord_attachment_bytes",
+                fallback=8 * 1024 * 1024,
+            ),
+            retention_hours=_getint(parser, "public_artifacts", "retention_hours", fallback=24),
+        ),
         admin=AdminConfig(
             user_ids=frozenset(_split_csv(_get(parser, "admin", "user_ids", fallback=""))),
         ),
@@ -134,6 +162,11 @@ def load_app_config(path: str | Path = "aimo.conf", *, require_secrets: bool = F
             maptiler_map_id=_get(parser, "maps", "maptiler_map_id", fallback="streets-v4") or "streets-v4",
             timeout_s=_getfloat(parser, "maps", "timeout_s", fallback=10.0),
         ),
+        weather=WeatherConfig(
+            enabled=_getbool(parser, "weather", "enabled", fallback=True),
+            provider=_get(parser, "weather", "provider", fallback="open_meteo") or "open_meteo",
+            timeout_s=_getfloat(parser, "weather", "timeout_s", fallback=8.0),
+        ),
     )
     validate_config(config, require_secrets=require_secrets)
     return config
@@ -146,12 +179,24 @@ def validate_config(config: AppConfig, *, require_secrets: bool = False) -> None
         raise ConfigError("openai.timeout_s must be positive")
     if config.limits.max_attachment_size_bytes <= 0:
         raise ConfigError("limits.max_attachment_size_bytes must be positive")
+    if config.public_artifacts.max_discord_attachment_bytes <= 0:
+        raise ConfigError("public_artifacts.max_discord_attachment_bytes must be positive")
+    if config.public_artifacts.retention_hours <= 0:
+        raise ConfigError("public_artifacts.retention_hours must be positive")
+    if bool(config.public_artifacts.path) != bool(config.public_artifacts.base_url):
+        raise ConfigError("public_artifacts.path and public_artifacts.base_url must be set together")
+    if config.public_artifacts.base_url and not config.public_artifacts.base_url.startswith(("https://", "http://")):
+        raise ConfigError("public_artifacts.base_url must start with https:// or http://")
     if config.history.retention_days <= 0:
         raise ConfigError("history.retention_days must be positive")
     if config.maps.provider not in {"osm", "maptiler"}:
         raise ConfigError("maps.provider must be osm or maptiler")
     if config.maps.timeout_s <= 0:
         raise ConfigError("maps.timeout_s must be positive")
+    if config.weather.provider not in {"open_meteo", "none"}:
+        raise ConfigError("weather.provider must be open_meteo or none")
+    if config.weather.timeout_s <= 0:
+        raise ConfigError("weather.timeout_s must be positive")
     _validate_discord_ids("discord.allowed_guild_ids", config.discord.allowed_guild_ids)
     _validate_discord_ids("discord.allowed_channel_ids", config.discord.allowed_channel_ids)
     if not str(config.storage.database_path):
@@ -196,6 +241,12 @@ def _getbool(parser: ConfigParser, section: str, option: str, *, fallback: bool)
 
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _optional_path(value: str | None) -> Path | None:
+    if value is None or not value.strip():
+        return None
+    return Path(value.strip())
 
 
 def _validate_discord_ids(name: str, values: frozenset[str]) -> None:

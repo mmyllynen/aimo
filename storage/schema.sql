@@ -109,6 +109,49 @@ CREATE TABLE IF NOT EXISTS workouts (
 CREATE INDEX IF NOT EXISTS idx_workouts_owner_start
     ON workouts(owner_user_id, start_time_local DESC, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS workout_estimate_features (
+    workout_id TEXT PRIMARY KEY,
+    owner_user_id TEXT NOT NULL,
+    feature_version INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT '',
+    primary_kind TEXT NOT NULL DEFAULT '',
+    local_date TEXT,
+    distance_km REAL,
+    duration_s REAL,
+    pace_s_per_km REAL,
+    ascent_m REAL,
+    descent_m REAL,
+    ascent_per_km REAL,
+    descent_per_km REAL,
+    elevation_min_m REAL,
+    elevation_max_m REAL,
+    flat_share REAL,
+    climb_share REAL,
+    steep_climb_share REAL,
+    descent_share REAL,
+    steep_descent_share REAL,
+    longest_climb_m REAL,
+    longest_descent_m REAL,
+    route_signature TEXT NOT NULL DEFAULT '',
+    distance_band TEXT NOT NULL DEFAULT '',
+    ascent_band TEXT NOT NULL DEFAULT '',
+    point_count INTEGER NOT NULL DEFAULT 0,
+    distance_coverage REAL,
+    elevation_coverage REAL,
+    gap_count INTEGER NOT NULL DEFAULT 0,
+    quality_flags_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (workout_id) REFERENCES workouts(workout_id) ON DELETE CASCADE,
+    FOREIGN KEY (owner_user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_workout_estimate_features_owner_compare
+    ON workout_estimate_features(owner_user_id, primary_kind, distance_band, ascent_band, local_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workout_estimate_features_route_signature
+    ON workout_estimate_features(owner_user_id, route_signature);
+
 CREATE TABLE IF NOT EXISTS active_workouts (
     user_id TEXT PRIMARY KEY,
     workout_id TEXT NOT NULL,

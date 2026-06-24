@@ -167,8 +167,8 @@ def _capability_facts() -> dict[str, object]:
             "behavior": "Only GPX attachments are accepted as workout or route uploads.",
         },
         "debug": {
-            "available_via": "/debug",
-            "behavior": "Debug output is a separate operational command.",
+            "available_via": "/debug level or +debug0/+debug1/+debug2 on a mention",
+            "behavior": "Debug output is returned on request and does not enable a persistent mode.",
         },
     }
 

@@ -14,6 +14,7 @@ from core.workflows import WorkflowStatus
 from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
 from storage.repositories import AttachmentRecord, WorkoutRecord
 from storage.unit_of_work import UnitOfWork, open_database
+from workout.estimate_features import backfill_workout_estimate_features
 from workout.gpx import GpxParseError, parse_gpx
 
 
@@ -140,11 +141,20 @@ class GpxIngestWorkflowTests(unittest.TestCase):
             active = repositories.active_workouts.get("user-1")
             points = repositories.workout_streams.list_points(workouts[0].workout_id)
             streams = repositories.workout_streams.list_streams(workouts[0].workout_id)
+            features = repositories.workout_estimate_features.get(workouts[0].workout_id)
 
         self.assertEqual(len(workouts), 1)
         self.assertEqual(active.workout_id, workouts[0].workout_id)
         self.assertEqual(len(points), 3)
         self.assertIn("heart_rate", {stream.stream_key for stream in streams})
+        self.assertIsNotNone(features)
+        self.assertEqual(features.owner_user_id, "user-1")
+        self.assertEqual(features.feature_version, 1)
+        self.assertGreater(features.distance_km or 0.0, 0.0)
+        self.assertEqual(features.ascent_m, 6)
+        self.assertIn("low_point_count", features.quality_flags)
+        self.assertIn("location", features.metadata)
+        self.assertAlmostEqual(features.metadata["location"]["centroid_latitude"], 60.1709, places=3)
 
     def test_route_plan_gpx_feedback_says_route(self) -> None:
         event = _gpx_event("event-1", "attachment-1", COURSE_GPX)
@@ -422,6 +432,7 @@ class GpxIngestWorkflowTests(unittest.TestCase):
         with UnitOfWork(self.connection) as repositories:
             workout = repositories.workouts.get_for_user("user-1", "workout-course")
             points = repositories.workout_streams.list_points("workout-course")
+            features = repositories.workout_estimate_features.get("workout-course")
 
         self.assertEqual(workout.title, "Custom course title")
         self.assertEqual(workout.kind, "route_plan")
@@ -429,6 +440,31 @@ class GpxIngestWorkflowTests(unittest.TestCase):
         self.assertLess(workout.distance_km or 0.0, 3.0)
         self.assertEqual(workout.point_count, 3)
         self.assertEqual(len(points), 3)
+        self.assertIsNotNone(features)
+        self.assertEqual(features.primary_kind, "route")
+        self.assertLess(features.distance_km or 0.0, 3.0)
+
+    def test_estimate_feature_backfill_rebuilds_missing_features(self) -> None:
+        self.dispatcher.dispatch(
+            _gpx_event("event-1", "attachment-1", SAMPLE_GPX),
+            DispatchContext(UnitOfWork(self.connection)),
+        )
+        with UnitOfWork(self.connection) as repositories:
+            workout = repositories.workouts.list_for_user("user-1")[0]
+            repositories.workout_estimate_features.connection.execute(
+                "DELETE FROM workout_estimate_features WHERE workout_id = ?",
+                (workout.workout_id,),
+            )
+
+        with UnitOfWork(self.connection) as repositories:
+            count = backfill_workout_estimate_features(repositories, owner_user_id="user-1", updated_at="2026-06-13T08:00:00Z")
+            features = repositories.workout_estimate_features.get(workout.workout_id)
+
+        self.assertEqual(count, 1)
+        self.assertIsNotNone(features)
+        self.assertEqual(features.updated_at, "2026-06-13T08:00:00Z")
+        self.assertGreater(features.distance_km or 0.0, 0.0)
+        self.assertIn("location", features.metadata)
 
     def test_duplicate_attachment_without_workout_creates_missing_workout(self) -> None:
         sha256 = hashlib.sha256(SAMPLE_GPX).hexdigest()

@@ -147,6 +147,42 @@ class WorkoutStreamRecord:
 
 
 @dataclass(frozen=True)
+class WorkoutEstimateFeatureRecord:
+    workout_id: str
+    owner_user_id: str
+    feature_version: int
+    kind: str
+    primary_kind: str
+    local_date: str | None
+    distance_km: float | None
+    duration_s: float | None
+    pace_s_per_km: float | None
+    ascent_m: float | None
+    descent_m: float | None
+    ascent_per_km: float | None
+    descent_per_km: float | None
+    elevation_min_m: float | None
+    elevation_max_m: float | None
+    flat_share: float | None
+    climb_share: float | None
+    steep_climb_share: float | None
+    descent_share: float | None
+    steep_descent_share: float | None
+    longest_climb_m: float | None
+    longest_descent_m: float | None
+    route_signature: str
+    distance_band: str
+    ascent_band: str
+    point_count: int
+    distance_coverage: float | None
+    elevation_coverage: float | None
+    gap_count: int
+    quality_flags: tuple[str, ...] = ()
+    metadata: JsonObject = field(default_factory=dict)
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
 class RenderedArtifactRecord:
     artifact_id: str
     owner_user_id: str
@@ -598,6 +634,18 @@ class WorkoutsRepository:
         ).fetchall()
         return tuple(_workout_from_row(row) for row in rows)
 
+    def list_all(self, *, limit: int = 100000) -> tuple[WorkoutRecord, ...]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM workouts
+            ORDER BY created_at DESC, workout_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return tuple(_workout_from_row(row) for row in rows)
+
     def list_for_user_in_period(
         self,
         owner_user_id: str,
@@ -788,6 +836,144 @@ class ActiveWorkoutRepository:
         if row is None:
             return None
         return _workout_from_row(row)
+
+
+class WorkoutEstimateFeaturesRepository:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+
+    def upsert(self, record: WorkoutEstimateFeatureRecord) -> WorkoutEstimateFeatureRecord:
+        self.connection.execute(
+            """
+            INSERT INTO workout_estimate_features (
+                workout_id,
+                owner_user_id,
+                feature_version,
+                kind,
+                primary_kind,
+                local_date,
+                distance_km,
+                duration_s,
+                pace_s_per_km,
+                ascent_m,
+                descent_m,
+                ascent_per_km,
+                descent_per_km,
+                elevation_min_m,
+                elevation_max_m,
+                flat_share,
+                climb_share,
+                steep_climb_share,
+                descent_share,
+                steep_descent_share,
+                longest_climb_m,
+                longest_descent_m,
+                route_signature,
+                distance_band,
+                ascent_band,
+                point_count,
+                distance_coverage,
+                elevation_coverage,
+                gap_count,
+                quality_flags_json,
+                metadata_json,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workout_id) DO UPDATE SET
+                owner_user_id = excluded.owner_user_id,
+                feature_version = excluded.feature_version,
+                kind = excluded.kind,
+                primary_kind = excluded.primary_kind,
+                local_date = excluded.local_date,
+                distance_km = excluded.distance_km,
+                duration_s = excluded.duration_s,
+                pace_s_per_km = excluded.pace_s_per_km,
+                ascent_m = excluded.ascent_m,
+                descent_m = excluded.descent_m,
+                ascent_per_km = excluded.ascent_per_km,
+                descent_per_km = excluded.descent_per_km,
+                elevation_min_m = excluded.elevation_min_m,
+                elevation_max_m = excluded.elevation_max_m,
+                flat_share = excluded.flat_share,
+                climb_share = excluded.climb_share,
+                steep_climb_share = excluded.steep_climb_share,
+                descent_share = excluded.descent_share,
+                steep_descent_share = excluded.steep_descent_share,
+                longest_climb_m = excluded.longest_climb_m,
+                longest_descent_m = excluded.longest_descent_m,
+                route_signature = excluded.route_signature,
+                distance_band = excluded.distance_band,
+                ascent_band = excluded.ascent_band,
+                point_count = excluded.point_count,
+                distance_coverage = excluded.distance_coverage,
+                elevation_coverage = excluded.elevation_coverage,
+                gap_count = excluded.gap_count,
+                quality_flags_json = excluded.quality_flags_json,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                record.workout_id,
+                record.owner_user_id,
+                record.feature_version,
+                record.kind,
+                record.primary_kind,
+                record.local_date,
+                record.distance_km,
+                record.duration_s,
+                record.pace_s_per_km,
+                record.ascent_m,
+                record.descent_m,
+                record.ascent_per_km,
+                record.descent_per_km,
+                record.elevation_min_m,
+                record.elevation_max_m,
+                record.flat_share,
+                record.climb_share,
+                record.steep_climb_share,
+                record.descent_share,
+                record.steep_descent_share,
+                record.longest_climb_m,
+                record.longest_descent_m,
+                record.route_signature,
+                record.distance_band,
+                record.ascent_band,
+                record.point_count,
+                record.distance_coverage,
+                record.elevation_coverage,
+                record.gap_count,
+                _to_json({"flags": list(record.quality_flags)}),
+                _to_json(record.metadata),
+                record.updated_at or _timestamp(None),
+            ),
+        )
+        return record
+
+    def get(self, workout_id: str) -> WorkoutEstimateFeatureRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM workout_estimate_features
+            WHERE workout_id = ?
+            """,
+            (workout_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _workout_estimate_feature_from_row(row)
+
+    def list_for_user(self, owner_user_id: str, *, limit: int = 100) -> tuple[WorkoutEstimateFeatureRecord, ...]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM workout_estimate_features
+            WHERE owner_user_id = ?
+            ORDER BY local_date DESC, updated_at DESC, workout_id DESC
+            LIMIT ?
+            """,
+            (owner_user_id, limit),
+        ).fetchall()
+        return tuple(_workout_estimate_feature_from_row(row) for row in rows)
 
 
 class WorkoutStreamsRepository:
@@ -1297,6 +1483,47 @@ def _workout_stream_from_row(row: sqlite3.Row) -> WorkoutStreamRecord:
         max_value=row["max_value"],
         avg_value=row["avg_value"],
         metadata=_from_json(row["metadata_json"]),
+    )
+
+
+def _workout_estimate_feature_from_row(row: sqlite3.Row) -> WorkoutEstimateFeatureRecord:
+    quality_payload = _from_json(row["quality_flags_json"])
+    quality_flags = quality_payload.get("flags", ())
+    if not isinstance(quality_flags, list):
+        quality_flags = []
+    return WorkoutEstimateFeatureRecord(
+        workout_id=row["workout_id"],
+        owner_user_id=row["owner_user_id"],
+        feature_version=row["feature_version"],
+        kind=row["kind"],
+        primary_kind=row["primary_kind"],
+        local_date=row["local_date"],
+        distance_km=row["distance_km"],
+        duration_s=row["duration_s"],
+        pace_s_per_km=row["pace_s_per_km"],
+        ascent_m=row["ascent_m"],
+        descent_m=row["descent_m"],
+        ascent_per_km=row["ascent_per_km"],
+        descent_per_km=row["descent_per_km"],
+        elevation_min_m=row["elevation_min_m"],
+        elevation_max_m=row["elevation_max_m"],
+        flat_share=row["flat_share"],
+        climb_share=row["climb_share"],
+        steep_climb_share=row["steep_climb_share"],
+        descent_share=row["descent_share"],
+        steep_descent_share=row["steep_descent_share"],
+        longest_climb_m=row["longest_climb_m"],
+        longest_descent_m=row["longest_descent_m"],
+        route_signature=row["route_signature"],
+        distance_band=row["distance_band"],
+        ascent_band=row["ascent_band"],
+        point_count=row["point_count"],
+        distance_coverage=row["distance_coverage"],
+        elevation_coverage=row["elevation_coverage"],
+        gap_count=row["gap_count"],
+        quality_flags=tuple(str(flag) for flag in quality_flags),
+        metadata=_from_json(row["metadata_json"]),
+        updated_at=row["updated_at"],
     )
 
 

@@ -221,9 +221,19 @@ def _register_real_app_commands(command_tree: Any, app_context: ApplicationConte
     async def asetukset_sykerajat_command(interaction: DiscordInteraction, zones: str) -> None:
         await handle_interaction(interaction, app_context, discord_module=discord_module)
 
+    debug_level_choices = _app_command_choices(
+        app_commands,
+        level=(
+            ("0", "0"),
+            ("1", "1"),
+            ("2", "2"),
+        ),
+    )
+
     @app_commands.command(name="debug", description=specs["debug"].description)
-    @app_commands.describe(tila="Debug-tila.")
-    async def debug_command(interaction: DiscordInteraction, tila: str = "") -> None:
+    @app_commands.describe(level="Debug-taso: 0 tiivis, 1 välimalli, 2 laajin turvallinen.")
+    @debug_level_choices
+    async def debug_command(interaction: DiscordInteraction, level: str = "0") -> None:
         await handle_interaction(interaction, app_context, discord_module=discord_module)
 
     _add_real_app_commands(command_tree, aimo_command, gpx_group, help_command, treenit_group, settings_group, debug_command)
@@ -246,6 +256,19 @@ def _register_real_app_commands(command_tree: Any, app_context: ApplicationConte
 def _add_real_app_commands(command_tree: Any, *commands: Any, guild: Any | None = None) -> None:
     for command in commands:
         command_tree.add_command(command, guild=guild)
+
+
+def _app_command_choices(app_commands: Any, **choices_by_name: tuple[tuple[str, Any], ...]) -> Callable[[Any], Any]:
+    choices = getattr(app_commands, "choices", None)
+    choice_class = getattr(app_commands, "Choice", None)
+    if choices is None or choice_class is None:
+        return lambda command: command
+    return choices(
+        **{
+            name: [choice_class(name=label, value=value) for label, value in values]
+            for name, values in choices_by_name.items()
+        }
+    )
 
 
 async def handle_message(

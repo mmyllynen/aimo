@@ -14,6 +14,7 @@ from storage.repositories import (
 )
 from storage.files import write_bytes_under
 from storage.unit_of_work import RepositoryBundle
+from workout.estimate_features import upsert_workout_estimate_features
 from workout.gpx import GpxParseError, ParsedGpxWorkout, parse_gpx
 
 
@@ -113,7 +114,7 @@ def ingest_gpx(request: GpxIngestRequest, repositories: RepositoryBundle) -> Gpx
         )
     )
     workout = repositories.workouts.add(_workout_record(request, attachment.attachment_id, parsed, timestamp))
-    _replace_streams(repositories, workout.workout_id, parsed)
+    _replace_streams_and_features(repositories, workout, parsed, updated_at=request.created_at)
     if request.make_active:
         repositories.active_workouts.set(
             user_id=request.owner_user_id,
@@ -134,7 +135,7 @@ def _create_workout_for_attachment(
         raise InvalidGpxError(str(exc)) from exc
 
     workout = repositories.workouts.add(_workout_record(request, attachment_id, parsed, _timestamp(request.created_at)))
-    _replace_streams(repositories, workout.workout_id, parsed)
+    _replace_streams_and_features(repositories, workout, parsed, updated_at=request.created_at)
     if request.make_active:
         repositories.active_workouts.set(
             user_id=request.owner_user_id,
@@ -144,12 +145,20 @@ def _create_workout_for_attachment(
     return GpxIngestResult(status="created", workout=workout)
 
 
-def _replace_streams(repositories: RepositoryBundle, workout_id: str, parsed: ParsedGpxWorkout) -> None:
+def _replace_streams_and_features(
+    repositories: RepositoryBundle,
+    workout: WorkoutRecord,
+    parsed: ParsedGpxWorkout,
+    *,
+    updated_at: datetime,
+) -> None:
+    points = _point_records(workout.workout_id, parsed)
     repositories.workout_streams.replace_for_workout(
-        workout_id,
-        points=_point_records(workout_id, parsed),
-        streams=_stream_records(workout_id, parsed),
+        workout.workout_id,
+        points=points,
+        streams=_stream_records(workout.workout_id, parsed),
     )
+    upsert_workout_estimate_features(repositories, workout, points, updated_at=updated_at)
 
 
 def _refresh_duplicate_workout(
@@ -185,7 +194,7 @@ def _refresh_duplicate_workout(
         metadata=parsed.metadata,
     )
     repositories.workouts.update_derived_fields(refreshed)
-    _replace_streams(repositories, refreshed.workout_id, parsed)
+    _replace_streams_and_features(repositories, refreshed, parsed, updated_at=request.created_at)
     return refreshed
 
 

@@ -127,6 +127,7 @@ class RoutePolyline:
     points: tuple[RoutePoint, ...]
     color: tuple[int, int, int] | None = None
     color_metric: str = ""
+    color_mode: str = "metric"
 
 
 @dataclass(frozen=True)
@@ -172,6 +173,8 @@ class RouteMap:
     color_domain: tuple[float, float] | None = None
     color_tick_format: str = "number"
     color_direction: str = "ascending"
+    color_mode: str = "metric"
+    show_direction: bool = False
     tiles: tuple[RouteMapTile, ...] = ()
     tile_zoom: int | None = None
     tile_size: int = TILE_SIZE

@@ -7,9 +7,11 @@ from core.events import CanonicalEvent, EventKind, EventSource
 from core.i18n import SupportedLanguage, TranslationKey
 from core.routing import WorkflowTarget
 from core.workflows import WorkflowStatus
-from llm.gateway import FakeLLMClient, LLMGateway, LLMOperation
+from llm.gateway import FakeLLMClient, LLMGateway, LLMGatewayError, LLMOperation, LLMRequest, LLMResponse
 from storage.repositories import WorkoutPointRecord, WorkoutRecord, WorkoutStreamRecord
 from storage.unit_of_work import UnitOfWork, open_database
+from workout.estimate_features import backfill_workout_estimate_features
+from weather.service import WeatherFacts, WeatherLocation
 
 
 class WorkoutChatWorkflowTests(unittest.TestCase):
@@ -147,6 +149,166 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
 
         self.assertEqual(route.target, WorkflowTarget.WORKOUT_CHAT)
 
+    def test_route_event_uses_workout_chat_for_route_time_estimate_modifier(self) -> None:
+        route = route_event(_mention("event-1", "paljonko tähän menisi +estimate"))
+
+        self.assertEqual(route.target, WorkflowTarget.WORKOUT_CHAT)
+        self.assertEqual(route.slots["route_time_estimate"], True)
+
+    def test_route_time_estimate_uses_user_history_without_workout_reply_generation(self) -> None:
+        self._seed_workouts()
+        client = _workout_client("Ei käytetä.", selector_type="latest", selector_value="latest")
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "paljonko viimeisimpään reittiin menisi +ennuste"),
+            DispatchContext(
+                UnitOfWork(self.connection),
+                language=SupportedLanguage.FI,
+                llm_gateway=LLMGateway(client),
+            ),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertIn("Arvio tälle reitille", result.messages[0].text)
+        self.assertIn("perustuu 1 tallennettuun vertailutreeniin", result.messages[0].text)
+        self.assertEqual(result.messages[0].metadata["route_time_comparable_count"], 1)
+        self.assertEqual(result.messages[0].metadata["route_time_confidence"], "low")
+        self.assertFalse([request for request in client.requests if request.operation == LLMOperation.WORKOUT_REPLY])
+        with UnitOfWork(self.connection) as repositories:
+            history = repositories.history.list_recent_for_channel("channel-1")
+        self.assertEqual(history[-1].event_type, "route_time_estimate")
+
+    def test_route_time_estimate_can_use_default_workout_without_llm_gateway(self) -> None:
+        self._seed_workouts()
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "paljonko tähän menisi +estimate"),
+            DispatchContext(UnitOfWork(self.connection), language=SupportedLanguage.FI),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertIn("Arvio tälle reitille", result.messages[0].text)
+        self.assertEqual(result.messages[0].metadata["workout_id"], "workout-2")
+
+    def test_freeform_route_time_estimate_uses_intent_and_conversational_reply(self) -> None:
+        self._seed_workouts()
+        client = _route_time_estimate_client("Tähän reittiin menisi arviolta noin 35 minuuttia.")
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "paljonko viimeisimpään reittiin suunnilleen menisi aikaa?"),
+            DispatchContext(
+                UnitOfWork(self.connection),
+                language=SupportedLanguage.FI,
+                llm_gateway=LLMGateway(client),
+            ),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].text, "Tähän reittiin menisi arviolta noin 35 minuuttia.")
+        self.assertTrue(result.messages[0].metadata["route_time_conversational"])
+        self.assertEqual(result.messages[0].metadata["workout_id"], "workout-2")
+        estimate_payload = _request_payload(client, LLMOperation.ROUTE_TIME_ESTIMATE_REPLY)
+        self.assertEqual(estimate_payload["estimate_facts"]["workout_id"], "workout-2")
+        self.assertEqual(estimate_payload["estimate_facts"]["comparable_workout_count"], 1)
+        self.assertNotIn("workout_points", estimate_payload)
+        self.assertNotIn("raw_points", estimate_payload)
+        self.assertFalse([request for request in client.requests if request.operation == LLMOperation.WORKOUT_REPLY])
+
+    def test_route_time_estimate_explanation_uses_previous_metadata_only(self) -> None:
+        self._seed_workouts()
+        with UnitOfWork(self.connection) as repositories:
+            backfill_workout_estimate_features(repositories, owner_user_id="user-1", updated_at="2026-06-13T20:00:00Z")
+        estimate_client = _route_time_estimate_client("Tähän reittiin menisi arviolta noin 35 minuuttia.")
+        self.dispatcher.dispatch(
+            _mention("event-1", "paljonko viimeisimpään reittiin menisi aikaa?"),
+            DispatchContext(UnitOfWork(self.connection), language=SupportedLanguage.FI, llm_gateway=LLMGateway(estimate_client)),
+        )
+        explanation_client = _route_time_explanation_client("Arvio perustui feature_similarity-malliin ja yhteen vertailutreeniin.")
+
+        result = self.dispatcher.dispatch(
+            _mention("event-2", "avaa laskenta tiiviisti"),
+            DispatchContext(UnitOfWork(self.connection), language=SupportedLanguage.FI, llm_gateway=LLMGateway(explanation_client)),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertEqual(result.messages[0].text, "Arvio perustui feature_similarity-malliin ja yhteen vertailutreeniin.")
+        payload = _request_payload(explanation_client, LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_REPLY)
+        facts = payload["explanation_facts"]
+        self.assertEqual(facts["model"], "feature_similarity")
+        self.assertEqual(facts["comparable_count"], 1)
+        self.assertIn("baseline_pace_text", facts)
+        self.assertNotIn("workout_points", payload)
+        self.assertNotIn("raw_points", payload)
+        self.assertFalse([request for request in explanation_client.requests if request.operation == LLMOperation.WORKOUT_REPLY])
+
+    def test_route_time_estimate_with_target_date_applies_weather_adjustment(self) -> None:
+        self._seed_workouts()
+        with UnitOfWork(self.connection) as repositories:
+            backfill_workout_estimate_features(repositories, owner_user_id="user-1", updated_at="2026-06-13T20:00:00Z")
+        client = _route_time_estimate_client(
+            "Sääkorjattu arvio on noin 38 minuuttia.",
+            activity_intent="run",
+            target_date="2026-06-20",
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "arvioi juoksuaika tälle reitille ensi lauantaina"),
+            DispatchContext(
+                UnitOfWork(self.connection),
+                language=SupportedLanguage.FI,
+                llm_gateway=LLMGateway(client),
+                weather_provider=_FakeWeatherProvider(),
+            ),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        weather = result.messages[0].metadata["route_time_weather"]
+        self.assertTrue(weather["available"])
+        self.assertEqual(weather["source"], "forecast")
+        self.assertGreater(weather["adjustment_s"], 0)
+        payload = _request_payload(client, LLMOperation.ROUTE_TIME_ESTIMATE_REPLY)
+        self.assertEqual(payload["estimate_facts"]["weather"]["target_date"], "2026-06-20")
+        self.assertNotIn("raw_points", payload)
+
+    def test_route_time_estimate_reply_llm_failure_uses_deterministic_fallback(self) -> None:
+        self._seed_workouts()
+        with UnitOfWork(self.connection) as repositories:
+            backfill_workout_estimate_features(repositories, owner_user_id="user-1", updated_at="2026-06-13T20:00:00Z")
+        client = _FailingRouteTimeReplyClient(
+            {
+                LLMOperation.INTENT_CLASSIFICATION: _classification(),
+                LLMOperation.PERIOD_REQUEST_INTERPRETATION: _period_none(),
+                LLMOperation.ROUTE_TIME_ESTIMATE_INTENT: _route_time_intent(
+                    True,
+                    activity_intent="run",
+                    target_date="2026-06-20",
+                ),
+                LLMOperation.WORKOUT_REFERENCE_EXTRACTION: {
+                    "selector_type": "latest",
+                    "selector_value": "latest",
+                    "matched_workout_ids": [],
+                    "ambiguity_reason": "",
+                    "requires_clarification": False,
+                    "set_current_workout": False,
+                },
+            }
+        )
+
+        result = self.dispatcher.dispatch(
+            _mention("event-1", "arvioi juoksuaika tälle reitille ensi lauantaina"),
+            DispatchContext(
+                UnitOfWork(self.connection),
+                language=SupportedLanguage.FI,
+                llm_gateway=LLMGateway(client),
+                weather_provider=_FakeWeatherProvider(),
+            ),
+        )
+
+        self.assertEqual(result.status, WorkflowStatus.SUCCESS)
+        self.assertIn("Arvio tälle reitille", result.messages[0].text)
+        self.assertIn("Sääkorjattu arvio", result.messages[0].text)
+        self.assertIn("route_time_reply_llm_unavailable", result.messages[0].metadata["missing_data_notes"])
+
     def _seed_workouts(self, *, avg_hr: float | None = 132) -> None:
         with UnitOfWork(self.connection) as repositories:
             repositories.users.touch(user_id="user-1", seen_at="2026-06-13T09:00:00Z")
@@ -198,8 +360,22 @@ class WorkoutChatWorkflowTests(unittest.TestCase):
             repositories.workout_streams.replace_for_workout(
                 "workout-2",
                 points=(
-                    WorkoutPointRecord(workout_id="workout-2", point_index=0, elapsed_s=0, heart_rate_bpm=120),
-                    WorkoutPointRecord(workout_id="workout-2", point_index=1, elapsed_s=300, heart_rate_bpm=132),
+                    WorkoutPointRecord(
+                        workout_id="workout-2",
+                        point_index=0,
+                        elapsed_s=0,
+                        latitude=60.17,
+                        longitude=24.94,
+                        heart_rate_bpm=120,
+                    ),
+                    WorkoutPointRecord(
+                        workout_id="workout-2",
+                        point_index=1,
+                        elapsed_s=300,
+                        latitude=60.18,
+                        longitude=24.95,
+                        heart_rate_bpm=132,
+                    ),
                 ),
                 streams=(
                     WorkoutStreamRecord(
@@ -228,6 +404,8 @@ def _workout_client(
         {
             LLMOperation.INTENT_CLASSIFICATION: _classification(),
             LLMOperation.PERIOD_REQUEST_INTERPRETATION: _period_none(),
+            LLMOperation.ROUTE_TIME_ESTIMATE_INTENT: _route_time_intent(False),
+            LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_INTENT: _route_time_explanation_intent(False),
             LLMOperation.WORKOUT_REFERENCE_EXTRACTION: {
                 "selector_type": selector_type,
                 "selector_value": selector_value,
@@ -241,6 +419,54 @@ def _workout_client(
                 "claims_used": ["distance_km", "duration_s"],
                 "missing_data_notes": [],
             }
+        }
+    )
+
+
+def _route_time_estimate_client(
+    reply_text: str,
+    *,
+    activity_intent: str = "unknown",
+    target_date: str = "",
+) -> FakeLLMClient:
+    return FakeLLMClient(
+        {
+            LLMOperation.INTENT_CLASSIFICATION: _classification(),
+            LLMOperation.PERIOD_REQUEST_INTERPRETATION: _period_none(),
+            LLMOperation.ROUTE_TIME_ESTIMATE_INTENT: _route_time_intent(
+                True,
+                activity_intent=activity_intent,
+                target_date=target_date,
+            ),
+            LLMOperation.WORKOUT_REFERENCE_EXTRACTION: {
+                "selector_type": "latest",
+                "selector_value": "latest",
+                "matched_workout_ids": [],
+                "ambiguity_reason": "",
+                "requires_clarification": False,
+                "set_current_workout": False,
+            },
+            LLMOperation.ROUTE_TIME_ESTIMATE_REPLY: {
+                "reply_text": reply_text,
+                "claims_used": ["estimate_s", "route_distance_km", "comparable_workout_count"],
+                "missing_data_notes": [],
+            },
+        }
+    )
+
+
+def _route_time_explanation_client(reply_text: str) -> FakeLLMClient:
+    return FakeLLMClient(
+        {
+            LLMOperation.INTENT_CLASSIFICATION: _classification(),
+            LLMOperation.PERIOD_REQUEST_INTERPRETATION: _period_none(),
+            LLMOperation.ROUTE_TIME_ESTIMATE_INTENT: _route_time_intent(False),
+            LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_INTENT: _route_time_explanation_intent(True),
+            LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_REPLY: {
+                "reply_text": reply_text,
+                "claims_used": ["model", "comparable_count", "baseline_pace_text"],
+                "missing_data_notes": [],
+            },
         }
     )
 
@@ -287,6 +513,28 @@ def _period_none() -> dict[str, object]:
     }
 
 
+def _route_time_intent(
+    is_route_time_estimate: bool,
+    *,
+    activity_intent: str = "unknown",
+    target_date: str = "",
+) -> dict[str, object]:
+    return {
+        "is_route_time_estimate": is_route_time_estimate,
+        "activity_intent": activity_intent,
+        "target_date": target_date,
+        "target_time_of_day": "",
+        "reason": "Route time estimate request." if is_route_time_estimate else "Not a route time estimate request.",
+    }
+
+
+def _route_time_explanation_intent(is_explanation_request: bool) -> dict[str, object]:
+    return {
+        "is_explanation_request": is_explanation_request,
+        "reason": "Explain previous estimate." if is_explanation_request else "Not an explanation request.",
+    }
+
+
 def _classification() -> dict[str, object]:
     return {
         "workflow": "workout_chat",
@@ -312,6 +560,34 @@ def _mention(event_id: str, text: str) -> CanonicalEvent:
         user_name="runner",
         text=text,
     )
+
+
+class _FakeWeatherProvider:
+    def get_weather(self, location: WeatherLocation, target_date):
+        return WeatherFacts(
+            target_date=target_date.isoformat(),
+            latitude=location.latitude,
+            longitude=location.longitude,
+            source="forecast",
+            temperature_c=30.0,
+            apparent_temperature_c=33.0,
+            humidity_percent=55.0,
+            wind_speed_m_s=4.0,
+            wind_gust_m_s=7.0,
+            precipitation_mm=0.0,
+            precipitation_probability=10.0,
+            snow_mm=0.0,
+        )
+
+
+class _FailingRouteTimeReplyClient(FakeLLMClient):
+    def complete_json(self, request: LLMRequest) -> LLMResponse:
+        self.requests.append(request)
+        if request.operation == LLMOperation.ROUTE_TIME_ESTIMATE_REPLY:
+            raise LLMGatewayError("OpenAI response status was 'incomplete' (max_output_tokens)")
+        if request.operation not in self.responses:
+            raise LLMGatewayError(f"No fake response configured for {request.operation}")
+        return LLMResponse(payload=self.responses[request.operation])
 
 
 if __name__ == "__main__":

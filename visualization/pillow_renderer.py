@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from functools import lru_cache
 from importlib import resources
 from dataclasses import dataclass
@@ -56,6 +57,26 @@ ELEVATION_OVERLAY_HEIGHT = 220
 ELEVATION_OVERLAY_BOTTOM_MARGIN = 14
 ELEVATION_LABEL_ROWS = 3
 ROUTE_MARKER_RADIUS = 8
+ROUTE_DIRECTION_ARROW_MAX = 24
+ROUTE_DIRECTION_ARROW_MIN_SPACING = 95
+ROUTE_DIRECTION_ARROW_OFFSET = 13
+SUBTITLE_TOKEN_RE = re.compile(r"\{(fa|wind):([^}]+)\}")
+SUBTITLE_FA_ICONS = {
+    "temperature-half": "\uf2c9",
+    "sun": "\uf185",
+    "cloud": "\uf0c2",
+    "cloud-rain": "\uf73d",
+    "snowflake": "\uf2dc",
+    "wind": "\uf72e",
+}
+SUBTITLE_TOKEN_FALLBACKS = {
+    "temperature-half": "T",
+    "sun": "sun",
+    "cloud": "cloud",
+    "cloud-rain": "rain",
+    "snowflake": "snow",
+    "wind": "wind",
+}
 
 
 @dataclass(frozen=True)
@@ -84,6 +105,12 @@ class ElevationMarkerLabel:
     spec: ElevationMarkerSpec
     text: str
     box: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class RouteDirectionArrow:
+    point: tuple[float, float]
+    angle: float
 
 
 @dataclass(frozen=True)
@@ -300,7 +327,8 @@ class PillowVisualizationRenderer:
             route_pixel_points.append((route, pixel_points))
             if len(pixel_points) >= 2:
                 if chart.color_domain is not None and route.color_metric:
-                    draw.line(pixel_points, fill=(255, 255, 255, 190), width=8 * scale, joint="curve")
+                    draw.line(pixel_points, fill=(15, 23, 42, 220), width=10 * scale, joint="curve")
+                    draw.line(pixel_points, fill=(255, 255, 255, 170), width=8 * scale, joint="curve")
                     _draw_colored_route_segments(
                         draw,
                         route,
@@ -308,12 +336,16 @@ class PillowVisualizationRenderer:
                         chart.color_domain,
                         fallback=(100, 116, 139),
                         direction=chart.color_direction,
+                        color_mode=chart.color_mode,
                         scale=scale,
                     )
                 else:
-                    draw.line(pixel_points, fill=color + (255,), width=6 * scale, joint="curve")
-                    draw.line(pixel_points, fill=(255, 255, 255, 160), width=2 * scale, joint="curve")
-                    draw.line(pixel_points, fill=color + (255,), width=3 * scale, joint="curve")
+                    draw.line(pixel_points, fill=(15, 23, 42, 220), width=9 * scale, joint="curve")
+                    draw.line(pixel_points, fill=color + (255,), width=7 * scale, joint="curve")
+                    draw.line(pixel_points, fill=(255, 255, 255, 140), width=2 * scale, joint="curve")
+                    draw.line(pixel_points, fill=color + (255,), width=4 * scale, joint="curve")
+            if chart.show_direction:
+                _draw_route_direction_arrows(draw, pixel_points, scale=scale)
             _draw_marker(draw, pixel_points[0], (22, 163, 74), scale=scale)
             _draw_marker(draw, pixel_points[-1], (220, 38, 38), scale=scale)
         km_label_specs: tuple[MapMarkerLabelSpec, ...] = ()
@@ -359,17 +391,18 @@ def _draw_colored_route_segments(
     *,
     fallback: tuple[int, int, int],
     direction: str,
+    color_mode: str = "metric",
     scale: int,
 ) -> None:
-    line_width = 6 * scale
+    line_width = 7 * scale
     joint_radius = line_width / 2.0
     for index, (current, following) in enumerate(zip(pixel_points, pixel_points[1:], strict=False)):
         first = route.points[index].color_value
         second = route.points[index + 1].color_value
         if first is not None:
-            color = route_metric_color(first, color_domain, direction=direction)
+            color = _route_segment_color(first, color_domain, direction=direction, color_mode=color_mode)
         elif second is not None:
-            color = route_metric_color(second, color_domain, direction=direction)
+            color = _route_segment_color(second, color_domain, direction=direction, color_mode=color_mode)
         else:
             color = fallback
         draw.line((current, following), fill=color + (255,), width=line_width)
@@ -377,9 +410,79 @@ def _draw_colored_route_segments(
         _draw_route_joint(draw, following, joint_radius, color)
 
 
+def _route_segment_color(
+    value: float,
+    color_domain: tuple[float, float],
+    *,
+    direction: str,
+    color_mode: str,
+) -> tuple[int, int, int]:
+    if color_mode == "elevation_grade":
+        return _grade_color(value)
+    return route_metric_color(value, color_domain, direction=direction)
+
+
 def _draw_route_joint(draw: ImageDraw.ImageDraw, point: tuple[float, float], radius: float, color: tuple[int, int, int]) -> None:
     x, y = point
     draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color + (255,))
+
+
+def _draw_route_direction_arrows(draw: ImageDraw.ImageDraw, pixel_points: list[tuple[float, float]], *, scale: int) -> None:
+    arrows = _route_direction_arrows(pixel_points, scale=scale)
+    for arrow in arrows:
+        _draw_route_direction_arrow(draw, arrow, scale=scale)
+
+
+def _route_direction_arrows(pixel_points: list[tuple[float, float]], *, scale: int) -> tuple[RouteDirectionArrow, ...]:
+    if len(pixel_points) < 2:
+        return ()
+    segment_lengths = tuple(math.hypot(next_point[0] - point[0], next_point[1] - point[1]) for point, next_point in zip(pixel_points, pixel_points[1:], strict=False))
+    total_length = sum(segment_lengths)
+    min_spacing = ROUTE_DIRECTION_ARROW_MIN_SPACING * scale
+    if total_length < min_spacing * 1.4:
+        return ()
+    arrow_count = max(1, min(ROUTE_DIRECTION_ARROW_MAX, int(total_length // min_spacing)))
+    spacing = total_length / (arrow_count + 1)
+    targets = tuple(spacing * (index + 1) for index in range(arrow_count))
+    arrows: list[RouteDirectionArrow] = []
+    target_index = 0
+    travelled = 0.0
+    for index, segment_length in enumerate(segment_lengths):
+        if segment_length <= 0:
+            continue
+        current = pixel_points[index]
+        following = pixel_points[index + 1]
+        while target_index < len(targets) and travelled <= targets[target_index] <= travelled + segment_length:
+            ratio = (targets[target_index] - travelled) / segment_length
+            angle = math.atan2(following[1] - current[1], following[0] - current[0])
+            x = current[0] + (following[0] - current[0]) * ratio
+            y = current[1] + (following[1] - current[1]) * ratio
+            offset = ROUTE_DIRECTION_ARROW_OFFSET * scale
+            x += math.sin(angle) * offset
+            y -= math.cos(angle) * offset
+            arrows.append(RouteDirectionArrow(point=(x, y), angle=angle))
+            target_index += 1
+        travelled += segment_length
+    return tuple(arrows)
+
+
+def _draw_route_direction_arrow(draw: ImageDraw.ImageDraw, arrow: RouteDirectionArrow, *, scale: int) -> None:
+    length = 16 * scale
+    head_length = 6 * scale
+    head_spread = 5 * scale
+    stroke = max(2 * scale, 2)
+    x, y = arrow.point
+    ux = math.cos(arrow.angle)
+    uy = math.sin(arrow.angle)
+    nx = -uy
+    ny = ux
+    tail = (x - ux * length * 0.5, y - uy * length * 0.5)
+    tip = (x + ux * length * 0.5, y + uy * length * 0.5)
+    left = (tip[0] - ux * head_length + nx * head_spread, tip[1] - uy * head_length + ny * head_spread)
+    right = (tip[0] - ux * head_length - nx * head_spread, tip[1] - uy * head_length - ny * head_spread)
+    color = (15, 23, 42, 235)
+    draw.line((tail, tip), fill=color, width=stroke)
+    draw.line((left, tip, right), fill=color, width=stroke)
 
 
 def _draw_waypoints(
@@ -760,6 +863,7 @@ def _draw_social_routes(draw: ImageDraw.ImageDraw, chart: SocialImage, width: in
                 chart.color_domain,
                 fallback=route_color,
                 direction=chart.color_direction,
+                color_mode=route.color_mode,
                 width=line_width,
             )
         else:
@@ -791,6 +895,7 @@ def _draw_social_colored_polyline(
     *,
     fallback: tuple[int, int, int],
     direction: str,
+    color_mode: str = "metric",
     width: int,
 ) -> None:
     radius = width / 2.0
@@ -798,9 +903,9 @@ def _draw_social_colored_polyline(
         first = route.points[index].color_value
         second = route.points[index + 1].color_value
         if first is not None:
-            color = route_metric_color(first, color_domain, direction=direction)
+            color = _route_segment_color(first, color_domain, direction=direction, color_mode=color_mode)
         elif second is not None:
-            color = route_metric_color(second, color_domain, direction=direction)
+            color = _route_segment_color(second, color_domain, direction=direction, color_mode=color_mode)
         else:
             color = fallback
         rgba = color + (255,)
@@ -1423,11 +1528,17 @@ def _draw_route_overlays(image: Image.Image, width: int, height: int, chart: Rou
     _dark_panel(panel_draw, (title_left, title_top, title_width, title_top + title_height))
     if chart.routes:
         overlay_width = 392 * scale
-        color_scale_only = chart.color_metric_label and chart.color_domain is not None
-        visible_route_count = 0 if color_scale_only else _visible_route_legend_count(len(chart.routes), height, scale=scale)
-        visible_waypoint_count = _visible_waypoint_count(len(chart.waypoints), height, visible_route_count, scale=scale)
+        color_scale_visible = chart.color_metric_label and chart.color_domain is not None
+        visible_route_count = _visible_route_legend_count(len(chart.routes), height, scale=scale)
+        visible_waypoint_count = _visible_waypoint_count(
+            len(chart.waypoints),
+            height,
+            visible_route_count,
+            color_scale_visible=color_scale_visible,
+            scale=scale,
+        )
         overlay_height = _route_overlay_height(
-            color_scale_only=color_scale_only,
+            color_scale_visible=color_scale_visible,
             visible_route_count=visible_route_count,
             visible_waypoint_count=visible_waypoint_count,
             scale=scale,
@@ -1448,7 +1559,8 @@ def _draw_route_overlays(image: Image.Image, width: int, height: int, chart: Rou
         title_font,
     )
     for index, line in enumerate(subtitle_lines):
-        _draw_text(
+        _draw_route_subtitle_text(
+            image,
             draw,
             title_left + padding,
             title_top + (76 + index * 32) * scale,
@@ -1459,14 +1571,17 @@ def _draw_route_overlays(image: Image.Image, width: int, height: int, chart: Rou
     if not chart.routes:
         return
     overlay_width = 392 * scale
-    color_scale_only = chart.color_metric_label and chart.color_domain is not None
-    visible_route_count = 0 if color_scale_only else _visible_route_legend_count(len(chart.routes), height, scale=scale)
-    visible_waypoint_count = _visible_waypoint_count(len(chart.waypoints), height, visible_route_count, scale=scale)
+    color_scale_visible = chart.color_metric_label and chart.color_domain is not None
+    visible_route_count = _visible_route_legend_count(len(chart.routes), height, scale=scale)
+    visible_waypoint_count = _visible_waypoint_count(
+        len(chart.waypoints),
+        height,
+        visible_route_count,
+        color_scale_visible=color_scale_visible,
+        scale=scale,
+    )
     left = width - overlay_width - 14 * scale
     top = 12 * scale
-    if color_scale_only:
-        _draw_route_color_scale(draw, left + padding, top + 10 * scale, chart, route_text, route_muted_text, scale=scale)
-        return
     y = top + ROUTE_OVERLAY_TOP_PADDING * scale
     if visible_route_count:
         _draw_route_overlay_heading(draw, left + padding, y, chart.legend_title, route_text, scale=scale)
@@ -1492,6 +1607,12 @@ def _draw_route_overlays(image: Image.Image, width: int, height: int, chart: Rou
         muted=route_muted_text,
         scale=scale,
     )
+    if visible_waypoint_count:
+        y += _waypoint_overlay_height(visible_waypoint_count, scale=scale)
+    if color_scale_visible:
+        if visible_route_count or visible_waypoint_count:
+            y += ROUTE_OVERLAY_SECTION_GAP * scale
+        _draw_route_color_scale(draw, left + padding, y, chart, route_text, route_muted_text, scale=scale)
 
 
 def _visible_route_legend_count(route_count: int, height: int, *, scale: int) -> int:
@@ -1501,14 +1622,23 @@ def _visible_route_legend_count(route_count: int, height: int, *, scale: int) ->
     return min(route_count, 20, available_rows)
 
 
-def _visible_waypoint_count(waypoint_count: int, height: int, route_count: int, *, scale: int) -> int:
+def _visible_waypoint_count(
+    waypoint_count: int,
+    height: int,
+    route_count: int,
+    *,
+    color_scale_visible: bool = False,
+    scale: int,
+) -> int:
     if waypoint_count <= 0:
         return 0
+    color_scale_height = _route_color_scale_height(color_scale_visible=color_scale_visible, scale=scale)
     used = (
         ROUTE_OVERLAY_TOP_PADDING * scale
         + (ROUTE_OVERLAY_HEADING_HEIGHT + route_count * ROUTE_OVERLAY_ROW_HEIGHT) * scale
         + (ROUTE_OVERLAY_SECTION_GAP * scale if route_count else 0)
         + ROUTE_OVERLAY_HEADING_HEIGHT * scale
+        + (ROUTE_OVERLAY_SECTION_GAP * scale + color_scale_height if color_scale_height else 0)
         + ROUTE_OVERLAY_BOTTOM_PADDING * scale
     )
     available_rows = max(0, (height - used - 24 * scale) // (ROUTE_OVERLAY_ROW_HEIGHT * scale))
@@ -1523,14 +1653,13 @@ def _waypoint_overlay_height(visible_count: int, *, scale: int) -> int:
 
 def _route_overlay_height(
     *,
-    color_scale_only: bool,
+    color_scale_visible: bool = False,
     visible_route_count: int,
     visible_waypoint_count: int,
     scale: int,
 ) -> int:
-    if color_scale_only:
-        return 86 * scale
-    if visible_route_count <= 0 and visible_waypoint_count <= 0:
+    color_scale_height = _route_color_scale_height(color_scale_visible=color_scale_visible, scale=scale)
+    if visible_route_count <= 0 and visible_waypoint_count <= 0 and color_scale_height <= 0:
         return 0
     height = ROUTE_OVERLAY_TOP_PADDING * scale + ROUTE_OVERLAY_BOTTOM_PADDING * scale
     if visible_route_count:
@@ -1539,6 +1668,10 @@ def _route_overlay_height(
         if visible_route_count:
             height += ROUTE_OVERLAY_SECTION_GAP * scale
         height += _waypoint_overlay_height(visible_waypoint_count, scale=scale)
+    if color_scale_height:
+        if visible_route_count or visible_waypoint_count:
+            height += ROUTE_OVERLAY_SECTION_GAP * scale
+        height += color_scale_height
     return height
 
 
@@ -1611,8 +1744,14 @@ def _draw_waypoint_overlay_marker(
     _draw_text(draw, round(x - text_width / 2), round(y - text_height / 2), fallback, icon_color, font)
 
 
-def _route_color_scale_height(chart: RouteMap, *, scale: int) -> int:
-    return 54 * scale if chart.color_metric_label and chart.color_domain is not None else 0
+def _route_color_scale_height(
+    chart: RouteMap | None = None,
+    *,
+    color_scale_visible: bool | None = None,
+    scale: int,
+) -> int:
+    visible = chart.color_metric_label and chart.color_domain is not None if color_scale_visible is None and chart is not None else bool(color_scale_visible)
+    return 54 * scale if visible else 0
 
 
 def _draw_route_color_scale(
@@ -1635,10 +1774,14 @@ def _draw_route_color_scale(
     for offset in range(bar_width):
         ratio = offset / max(bar_width - 1, 1)
         value = chart.color_domain[0] + (chart.color_domain[1] - chart.color_domain[0]) * ratio
-        color = route_metric_color(value, chart.color_domain, direction=chart.color_direction)
+        color = _route_segment_color(value, chart.color_domain, direction=chart.color_direction, color_mode=chart.color_mode)
         draw.line((left + offset, bar_top, left + offset, bar_top + bar_height), fill=color + (255,), width=1)
-    low = _format_tick(chart.color_domain[0], tick_format=chart.color_tick_format)
-    high = _format_tick(chart.color_domain[1], tick_format=chart.color_tick_format)
+    if chart.color_mode == "elevation_grade":
+        low = _format_grade(chart.color_domain[0])
+        high = _format_grade(chart.color_domain[1])
+    else:
+        low = _format_tick(chart.color_domain[0], tick_format=chart.color_tick_format)
+        high = _format_tick(chart.color_domain[1], tick_format=chart.color_tick_format)
     _draw_text(draw, left, bar_top + 12 * scale, low, muted_color, _font(8 * 2 * scale))
     _draw_text_right(draw, left + bar_width, bar_top + 12 * scale, high, muted_color, _font(8 * 2 * scale))
 
@@ -2334,6 +2477,207 @@ def _ellipsize_to_width(draw: ImageDraw.ImageDraw, text: str, max_width: int, fo
     return text[:low].rstrip() + ellipsis
 
 
+def _route_subtitle_text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
+    width = 0
+    height = _text_size(draw, "Ag", font)[1]
+    fa_font = _route_subtitle_icon_font(font)
+    for kind, value, literal in _route_subtitle_runs(text):
+        if kind == "text":
+            part_width, part_height = _text_size(draw, literal, font)
+        elif kind == "fa":
+            part_width, part_height = _route_subtitle_icon_size(draw, value, font, fa_font)
+        else:
+            part_width, part_height = _route_subtitle_wind_size(draw, value, font, fa_font)
+        width += part_width
+        height = max(height, part_height)
+    return width, height
+
+
+def _route_subtitle_runs(text: str) -> tuple[tuple[str, str, str], ...]:
+    runs: list[tuple[str, str, str]] = []
+    cursor = 0
+    for match in SUBTITLE_TOKEN_RE.finditer(text):
+        if match.start() > cursor:
+            runs.append(("text", "", text[cursor : match.start()]))
+        runs.append((match.group(1), match.group(2).strip(), match.group(0)))
+        cursor = match.end()
+    if cursor < len(text):
+        runs.append(("text", "", text[cursor:]))
+    return tuple(runs)
+
+
+def _route_subtitle_icon_size(
+    draw: ImageDraw.ImageDraw,
+    name: str,
+    fallback_font: ImageFont.ImageFont,
+    fa_font: ImageFont.FreeTypeFont | None,
+) -> tuple[int, int]:
+    if fa_font is None:
+        return _text_size(draw, _route_subtitle_icon_fallback(name), fallback_font)
+    glyph = SUBTITLE_FA_ICONS.get(name, "")
+    if not glyph:
+        return (0, 0)
+    width, height = _text_size(draw, glyph, fa_font)
+    return max(1, width), max(_text_size(draw, "Ag", fallback_font)[1], height)
+
+
+def _route_subtitle_wind_size(
+    draw: ImageDraw.ImageDraw,
+    value: str,
+    fallback_font: ImageFont.ImageFont,
+    fa_font: ImageFont.FreeTypeFont | None,
+) -> tuple[int, int]:
+    if fa_font is None:
+        return _text_size(draw, _route_subtitle_wind_fallback(value), fallback_font)
+    size = getattr(fa_font, "size", 18)
+    return max(8, round(size * 0.9)), max(_text_size(draw, "Ag", fallback_font)[1], round(size * 0.9))
+
+
+def _route_subtitle_icon_font(font: ImageFont.ImageFont) -> ImageFont.FreeTypeFont | None:
+    size = getattr(font, "size", 18)
+    return _waypoint_icon_font(round(size * 0.95))
+
+
+def _route_subtitle_icon_fallback(name: str) -> str:
+    return SUBTITLE_TOKEN_FALLBACKS.get(name, "")
+
+
+def _route_subtitle_wind_fallback(value: str) -> str:
+    try:
+        degrees = float(value)
+    except ValueError:
+        return "wind"
+    arrows = ("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
+    index = int(((degrees % 360.0) + 22.5) // 45.0) % len(arrows)
+    return arrows[index]
+
+
+def _route_subtitle_ellipsize_to_width(draw: ImageDraw.ImageDraw, text: str, max_width: int, font: ImageFont.ImageFont) -> str:
+    if _route_subtitle_text_size(draw, text, font)[0] <= max_width:
+        return text
+    ellipsis = "..."
+    if _text_size(draw, ellipsis, font)[0] > max_width:
+        return ""
+    units = _route_subtitle_units(text)
+    low = 0
+    high = len(units)
+    while low < high:
+        mid = (low + high + 1) // 2
+        candidate = "".join(units[:mid]).rstrip() + ellipsis
+        if _route_subtitle_text_size(draw, candidate, font)[0] <= max_width:
+            low = mid
+        else:
+            high = mid - 1
+    return "".join(units[:low]).rstrip() + ellipsis
+
+
+def _route_subtitle_units(text: str) -> tuple[str, ...]:
+    units: list[str] = []
+    for kind, _value, literal in _route_subtitle_runs(text):
+        if kind == "text":
+            units.extend(literal)
+        else:
+            units.append(literal)
+    return tuple(units)
+
+
+def _draw_route_subtitle_text(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    text: str,
+    color: tuple[int, int, int],
+    font: ImageFont.ImageFont,
+) -> None:
+    cursor = x
+    fa_font = _route_subtitle_icon_font(font)
+    line_height = _text_size(draw, "Ag", font)[1]
+    for kind, value, literal in _route_subtitle_runs(text):
+        if kind == "text":
+            _draw_text(draw, cursor, y, literal, color, font)
+            cursor += _text_size(draw, literal, font)[0]
+        elif kind == "fa":
+            cursor += _draw_route_subtitle_fa_icon(image, draw, cursor, y, value, color, font, fa_font, line_height)
+        elif kind == "wind":
+            cursor += _draw_route_subtitle_wind_icon(image, draw, cursor, y, value, color, font, fa_font, line_height)
+
+
+def _draw_route_subtitle_fa_icon(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    name: str,
+    color: tuple[int, int, int],
+    fallback_font: ImageFont.ImageFont,
+    fa_font: ImageFont.FreeTypeFont | None,
+    line_height: int,
+) -> int:
+    if fa_font is None:
+        fallback = _route_subtitle_icon_fallback(name)
+        _draw_text(draw, x, y, fallback, color, fallback_font)
+        return _text_size(draw, fallback, fallback_font)[0]
+    glyph = SUBTITLE_FA_ICONS.get(name, "")
+    if not glyph:
+        return 0
+    icon_width, icon_height = _text_size(draw, glyph, fa_font)
+    icon_y = y + round((line_height - icon_height) / 2)
+    _draw_text(draw, x, icon_y, glyph, color, fa_font)
+    return icon_width
+
+
+def _draw_route_subtitle_wind_icon(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    value: str,
+    color: tuple[int, int, int],
+    fallback_font: ImageFont.ImageFont,
+    fa_font: ImageFont.FreeTypeFont | None,
+    line_height: int,
+) -> int:
+    if fa_font is None:
+        fallback = _route_subtitle_wind_fallback(value)
+        _draw_text(draw, x, y, fallback, color, fallback_font)
+        return _text_size(draw, fallback, fallback_font)[0]
+    try:
+        degrees = float(value)
+    except ValueError:
+        return _draw_route_subtitle_fa_icon(image, draw, x, y, "wind", color, fallback_font, fa_font, line_height)
+    size = _route_subtitle_wind_size(draw, value, fallback_font, fa_font)[0]
+    _draw_rotated_fa_glyph(image, "\uf062", color, fa_font, x=x, y=y, box_size=size, line_height=line_height, angle_degrees=round(degrees / 45.0) * 45)
+    return size
+
+
+def _draw_rotated_fa_glyph(
+    image: Image.Image,
+    glyph: str,
+    color: tuple[int, int, int],
+    font: ImageFont.FreeTypeFont,
+    *,
+    x: int,
+    y: int,
+    box_size: int,
+    line_height: int,
+    angle_degrees: float,
+) -> None:
+    side = max(box_size * 2, getattr(font, "size", box_size) * 2)
+    layer = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    layer_draw = ImageDraw.Draw(layer, "RGBA")
+    bbox = layer_draw.textbbox((0, 0), glyph, font=font)
+    glyph_width = bbox[2] - bbox[0]
+    glyph_height = bbox[3] - bbox[1]
+    glyph_x = round((side - glyph_width) / 2 - bbox[0])
+    glyph_y = round((side - glyph_height) / 2 - bbox[1])
+    layer_draw.text((glyph_x, glyph_y), glyph, fill=color + (255,), font=font)
+    rotated = layer.rotate(-angle_degrees, resample=Image.Resampling.BICUBIC)
+    paste_x = round(x + box_size / 2 - side / 2)
+    paste_y = round(y + line_height / 2 - side / 2)
+    image.alpha_composite(rotated, (paste_x, paste_y))
+
+
 def _wrap_text(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -2368,17 +2712,17 @@ def _wrap_text(
 def _route_subtitle_lines(draw: ImageDraw.ImageDraw, subtitle: str, max_width: int, font: ImageFont.ImageFont) -> tuple[str, ...]:
     if not subtitle:
         return ()
-    if _text_size(draw, subtitle, font)[0] <= max_width:
+    if _route_subtitle_text_size(draw, subtitle, font)[0] <= max_width:
         return (subtitle,)
     parts = tuple(part.strip() for part in subtitle.split(" - ") if part.strip())
     split_index = _route_subtitle_split_index(parts)
     if split_index is None:
-        return (_ellipsize_to_width(draw, subtitle, max_width, font),)
+        return (_route_subtitle_ellipsize_to_width(draw, subtitle, max_width, font),)
     first = " - ".join(parts[:split_index])
     second = " - ".join(parts[split_index:])
     return (
-        _ellipsize_to_width(draw, first, max_width, font),
-        _ellipsize_to_width(draw, second, max_width, font),
+        _route_subtitle_ellipsize_to_width(draw, first, max_width, font),
+        _route_subtitle_ellipsize_to_width(draw, second, max_width, font),
     )
 
 

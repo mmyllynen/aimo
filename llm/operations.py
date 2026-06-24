@@ -153,6 +153,63 @@ class PeriodAnalysisReply:
 
 
 @dataclass(frozen=True)
+class RouteTimeEstimateIntentInput:
+    user_text: str
+    current_date: str = ""
+    timezone: str = ""
+    compact_routing_context: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RouteTimeEstimateIntent:
+    is_route_time_estimate: bool
+    activity_intent: str = "unknown"
+    target_date: str = ""
+    target_time_of_day: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class RouteTimeEstimateReplyInput:
+    user_text: str
+    estimate_facts: JsonObject
+    bounded_recent_context: tuple[JsonObject, ...] = ()
+
+
+@dataclass(frozen=True)
+class RouteTimeEstimateReply:
+    reply_text: str
+    claims_used: tuple[str, ...]
+    missing_data_notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RouteTimeEstimateExplanationIntentInput:
+    user_text: str
+    compact_routing_context: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RouteTimeEstimateExplanationIntent:
+    is_explanation_request: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class RouteTimeEstimateExplanationReplyInput:
+    user_text: str
+    explanation_facts: JsonObject
+    bounded_recent_context: tuple[JsonObject, ...] = ()
+
+
+@dataclass(frozen=True)
+class RouteTimeEstimateExplanationReply:
+    reply_text: str
+    claims_used: tuple[str, ...]
+    missing_data_notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ChatReplyInput:
     user_text: str
     bounded_recent_context: tuple[JsonObject, ...] = ()
@@ -234,7 +291,8 @@ def classify_intent(gateway: LLMGateway, data: IntentClassificationInput) -> Rou
                 "Use visualization for any request to draw, plot, render, chart, graph, visualize, compare in a chart, "
                 "or change/refine a previous chart. Finnish examples include piirra/piirrä, kuvaaja, graafi, käyrä, "
                 "piirakka, jakauma, sykealuejakauma, and 'sama kuvaaja'. "
-                "Use workout_chat for coaching, analysis, or questions about workout facts without asking for an image/chart. "
+                "Use workout_chat for coaching, analysis, route time estimate questions, or questions about workout facts "
+                "without asking for an image/chart. "
                 "Use workout_management only for deterministic slash-command style management. "
                 "Use chat only for general conversation that does not belong to a specialized workflow. "
                 "A public mention can access stored workouts through visualization and workout_chat workflows; do not route "
@@ -301,8 +359,13 @@ def _workflow_catalog() -> JsonObject:
             ],
         },
         "workout_chat": {
-            "purpose": "Answer coaching or analysis questions about stored workout facts without rendering an image.",
-            "examples": ["miten viimeisin treeni meni", "analyze my latest run"],
+            "purpose": "Answer coaching, route time estimate, or analysis questions about stored workout facts without rendering an image.",
+            "examples": [
+                "miten viimeisin treeni meni",
+                "analyze my latest run",
+                "paljonko tähän reittiin menisi aikaa",
+                "how long would the latest route take",
+            ],
         },
         "workout_management": {
             "purpose": "Slash-command workout listing, showing, deleting, active workout, and HR-zone management.",
@@ -421,6 +484,132 @@ def write_period_analysis_reply(
         )
     )
     return PeriodAnalysisReply(
+        reply_text=payload["reply_text"],
+        claims_used=tuple(payload.get("claims_used", ())),
+        missing_data_notes=tuple(payload.get("missing_data_notes", ())),
+    )
+
+
+def interpret_route_time_estimate_intent(
+    gateway: LLMGateway,
+    data: RouteTimeEstimateIntentInput,
+) -> RouteTimeEstimateIntent:
+    payload = gateway.run(
+        LLMRequest(
+            operation=LLMOperation.ROUTE_TIME_ESTIMATE_INTENT,
+            system_prompt=(
+                "Return JSON for whether the user asks for an estimated completion time for one stored route/workout route. "
+                "Set is_route_time_estimate true for ETA/how long/juoksuaika/paljonko aikaa route questions. "
+                "Set false for completed-workout analysis, charts, workout management, or general training discussion. "
+                "If the user mentions when they plan to do it, resolve target_date as ISO YYYY-MM-DD using current_date/timezone; "
+                "otherwise target_date is empty. activity_intent must be run, walk, hike, bike, or unknown. "
+                "Do not calculate time or the estimate. Keep reason under 12 words."
+            ),
+            user_payload={
+                "user_text": data.user_text,
+                "current_date": data.current_date,
+                "timezone": data.timezone,
+                "compact_routing_context": data.compact_routing_context,
+            },
+            response_schema=_route_time_estimate_intent_schema(),
+            max_tokens=1200,
+        )
+    )
+    return RouteTimeEstimateIntent(
+        is_route_time_estimate=payload["is_route_time_estimate"],
+        activity_intent=payload.get("activity_intent", "unknown"),
+        target_date=payload.get("target_date", ""),
+        target_time_of_day=payload.get("target_time_of_day", ""),
+        reason=payload.get("reason", ""),
+    )
+
+
+def write_route_time_estimate_reply(
+    gateway: LLMGateway,
+    data: RouteTimeEstimateReplyInput,
+    *,
+    language: SupportedLanguage,
+) -> RouteTimeEstimateReply:
+    payload = gateway.run(
+        LLMRequest(
+            operation=LLMOperation.ROUTE_TIME_ESTIMATE_REPLY,
+            system_prompt=(
+                f"Write a concise conversational route time estimate reply in {language.value}. "
+                "Use estimate_facts as ground truth. Do not invent pace, distance, ascent, confidence, uncertainty, "
+                "training history, weather, terrain, stops, or route details. If estimate_facts.weather is present, "
+                "state both the base estimate and weather-adjusted estimate and summarize the weather adjustment. "
+                "Mention uncertainty and important missing data plainly. Do not say this was the actual completed workout "
+                "duration unless estimate_facts says so."
+            ),
+            user_payload={
+                "user_text": data.user_text,
+                "estimate_facts": data.estimate_facts,
+                "bounded_recent_context": list(data.bounded_recent_context),
+            },
+            response_schema=_route_time_estimate_reply_schema(),
+            max_tokens=2200,
+        )
+    )
+    return RouteTimeEstimateReply(
+        reply_text=payload["reply_text"],
+        claims_used=tuple(payload.get("claims_used", ())),
+        missing_data_notes=tuple(payload.get("missing_data_notes", ())),
+    )
+
+
+def interpret_route_time_estimate_explanation_intent(
+    gateway: LLMGateway,
+    data: RouteTimeEstimateExplanationIntentInput,
+) -> RouteTimeEstimateExplanationIntent:
+    payload = gateway.run(
+        LLMRequest(
+            operation=LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_INTENT,
+            system_prompt=(
+                "Interpret whether the user asks to explain, justify, open, debug, or show the reasoning behind a "
+                "previous route time estimate. Return structured JSON only. Use true for requests like 'miksi tuo arvio', "
+                "'avaa laskenta', 'millä perusteella', 'selitä ennuste', or 'why did you estimate that time'. Use false "
+                "for requests to calculate a new estimate, analyze a workout, render a chart, or discuss training generally. "
+                "Do not calculate or invent reasoning; Python retrieves the latest stored estimate metadata."
+            ),
+            user_payload={
+                "user_text": data.user_text,
+                "compact_routing_context": data.compact_routing_context,
+            },
+            response_schema=_route_time_estimate_explanation_intent_schema(),
+            max_tokens=500,
+        )
+    )
+    return RouteTimeEstimateExplanationIntent(
+        is_explanation_request=payload["is_explanation_request"],
+        reason=payload.get("reason", ""),
+    )
+
+
+def write_route_time_estimate_explanation_reply(
+    gateway: LLMGateway,
+    data: RouteTimeEstimateExplanationReplyInput,
+    *,
+    language: SupportedLanguage,
+) -> RouteTimeEstimateExplanationReply:
+    payload = gateway.run(
+        LLMRequest(
+            operation=LLMOperation.ROUTE_TIME_ESTIMATE_EXPLANATION_REPLY,
+            system_prompt=(
+                f"Write a concise explanation of a previous route time estimate in {language.value}. "
+                "Use explanation_facts as ground truth. Do not invent workouts, raw data, hidden variables, weather, terrain, "
+                "training state, or calculations not present in the payload. Explain the model, baseline pace, ascent and "
+                "distance adjustments, weather adjustment, uncertainty source, and limitations only when the fields are present."
+            ),
+            user_payload={
+                "user_text": data.user_text,
+                "explanation_facts": data.explanation_facts,
+                "bounded_recent_context": list(data.bounded_recent_context),
+            },
+            response_schema=_route_time_estimate_explanation_reply_schema(),
+            max_tokens=1800,
+        )
+    )
+    return RouteTimeEstimateExplanationReply(
         reply_text=payload["reply_text"],
         claims_used=tuple(payload.get("claims_used", ())),
         missing_data_notes=tuple(payload.get("missing_data_notes", ())),
@@ -643,6 +832,51 @@ def _period_request_schema() -> JsonObject:
 
 
 def _period_analysis_reply_schema() -> JsonObject:
+    return {
+        "required": ["reply_text", "claims_used", "missing_data_notes"],
+        "properties": {
+            "reply_text": {"type": "string"},
+            "claims_used": {"type": "array", "items": {"type": "string"}},
+            "missing_data_notes": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
+def _route_time_estimate_intent_schema() -> JsonObject:
+    return {
+        "required": ["is_route_time_estimate", "activity_intent", "target_date", "target_time_of_day", "reason"],
+        "properties": {
+            "is_route_time_estimate": {"type": "boolean"},
+            "activity_intent": {"type": "string", "enum": ["run", "walk", "hike", "bike", "unknown"]},
+            "target_date": {"type": "string"},
+            "target_time_of_day": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+    }
+
+
+def _route_time_estimate_reply_schema() -> JsonObject:
+    return {
+        "required": ["reply_text", "claims_used", "missing_data_notes"],
+        "properties": {
+            "reply_text": {"type": "string"},
+            "claims_used": {"type": "array", "items": {"type": "string"}},
+            "missing_data_notes": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
+def _route_time_estimate_explanation_intent_schema() -> JsonObject:
+    return {
+        "required": ["is_explanation_request", "reason"],
+        "properties": {
+            "is_explanation_request": {"type": "boolean"},
+            "reason": {"type": "string"},
+        },
+    }
+
+
+def _route_time_estimate_explanation_reply_schema() -> JsonObject:
     return {
         "required": ["reply_text", "claims_used", "missing_data_notes"],
         "properties": {

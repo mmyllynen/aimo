@@ -54,6 +54,9 @@ def migrate(connection: sqlite3.Connection, migrations_path: str | Path = DEFAUL
     newly_applied: list[int] = []
     for migration in migrations:
         if migration.version in applied:
+            if Path(migrations_path).is_file():
+                with transaction(connection):
+                    connection.executescript(_read_migration(migration))
             continue
         script = _read_migration(migration)
         with transaction(connection):

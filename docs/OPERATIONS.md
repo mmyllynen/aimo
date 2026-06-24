@@ -12,11 +12,17 @@ Important sections:
 - `[discord]`: token, allowed guild ids, optional allowed channel ids
 - `[openai]`: API key/model/timeout/token budget
 - `[storage]`: SQLite database, raw GPX root, artifact root
+- `[public_artifacts]`: optional nginx-served download directory for rendered files that exceed Discord upload limits
 - `[admin]`: Discord admin user ids
 - `[limits]`: attachment limits
 - `[history]`: retention policy
 - `[debug]`: debug enablement
 - `[maps]`: tile provider settings
+- `[weather]`: route-time weather forecast provider settings
+
+The overlay-animation renderer can write animated GIFs with Pillow and video overlays with `ffmpeg`. The encoder may come from a system `ffmpeg` binary or from the Python venv package `imageio-ffmpeg`; production preflight checks that one of them is available.
+
+If `[public_artifacts] path` and `base_url` are configured, overlay-animation files larger than `max_discord_attachment_bytes` are written to that path and the bot replies with download links instead of Discord attachments. Public overlay filenames are descriptive for video editors and include workout slug, date, distance range, and overlay type. Re-rendering the same public artifact path overwrites the previous file. The public directory should be served by nginx and pruned externally according to `retention_hours`; production currently uses a 24h cron cleanup.
 
 Production startup must require Discord token, allowed guild ids, and OpenAI key. Local checks may run without secrets. Direct messages are rejected by runtime policy even if older config files contain an `allow_direct_messages` field.
 
@@ -28,11 +34,12 @@ Startup sequence:
 2. Initialize logging.
 3. Open SQLite and apply migrations.
 4. Ensure raw GPX and artifact directories exist.
-5. Build repositories and application context.
-6. Build optional LLM gateway.
-7. Build Discord runtime.
-8. Register/sync slash commands.
-9. Start Discord client.
+5. Ensure the optional public artifact directory exists if configured.
+6. Build repositories and application context.
+7. Build optional LLM gateway.
+8. Build Discord runtime.
+9. Register/sync slash commands.
+10. Start Discord client.
 
 Startup should fail fast on invalid config, missing production secrets, invalid migrations, or missing `discord.py` in production mode.
 
@@ -42,11 +49,13 @@ Default local checks:
 
 ```bash
 python3 -m unittest
-python3 -m py_compile aimo.py adapters/*.py adapters/discord/*.py app/*.py core/*.py llm/*.py storage/*.py tests/*.py visualization/*.py workflows/*.py workout/*.py
+python3 -m py_compile aimo.py adapters/*.py adapters/discord/*.py app/*.py core/*.py llm/*.py storage/*.py tests/*.py visualization/*.py workflows/*.py workout/*.py weather/*.py
 python3 aimo.py --check --config aimo.conf.example
 python3 aimo.py --check-services --config aimo.conf.example
 git diff --check
 ```
+
+Route-time estimates may use `[weather] provider = open_meteo` for dated natural-language requests. If the provider is disabled, unavailable, or the requested date is outside the forecast window, the workflow falls back to deterministic seasonal climatology and records that limitation in estimate metadata.
 
 Production-oriented checks:
 
@@ -63,7 +72,7 @@ Logs should include startup/shutdown, Discord lifecycle, command sync results, e
 
 Logs and traces must not include Discord tokens, OpenAI keys, raw GPX content, full point arrays, full unbounded model payloads, or secrets.
 
-Every dispatched event creates a bounded debug trace. `/debug` exports requester/admin-authorized traces with redaction and JSON attachment behavior for large outputs.
+Every dispatched event creates a bounded debug trace. `/debug level` exports requester/admin-authorized traces with redaction as ephemeral JSON text, chunked across multiple messages when needed. Mention plustägit `+debug0`, `+debug1`, and `+debug2` export the current mention trace to the channel. Level 2 is the broadest safe export and still redacts or summarizes secrets, raw GPX, image bytes, full point arrays, and unbounded model payloads.
 
 ## Retention
 
@@ -75,6 +84,8 @@ Recommended policy:
 - rendered artifacts: prune by age/count unless explicitly retained
 
 Retention jobs for debug traces, rendered artifacts, and old channel history are backlog items.
+
+Overlay-animation files are rendered artifacts and should follow the same artifact retention policy. Do not commit generated samples such as `artifacts/sample-overlay.gif`.
 
 ## Backups
 
@@ -131,6 +142,7 @@ Minimum required fields:
 | `history_events` | `history_id`, `channel_id`, `role`, `event_type`, `created_at` |
 | `attachments` | `attachment_id`, `owner_user_id`, `filename`, `sha256`, `raw_path`, `created_at` |
 | `workouts` | `workout_id`, `owner_user_id`, `title`, `kind`, `created_at` |
+| `workout_estimate_features` | `workout_id`, `owner_user_id`, `feature_version`, `updated_at` |
 | `active_workouts` | `user_id`, `workout_id`, `updated_at` |
 
 Run import:

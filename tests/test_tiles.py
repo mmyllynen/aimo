@@ -75,6 +75,18 @@ class TileTests(unittest.TestCase):
             self.assertEqual(opener.requests[0].headers["User-agent"], DEFAULT_USER_AGENT)
             self.assertIn('"expires_at"', tile_cache_path(coord, config).with_suffix(".json").read_text(encoding="utf-8"))
 
+    def test_fetch_tiles_applies_minimum_ttl_floor(self) -> None:
+        now = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            opener = FakeOpener(FakeResponse(b"png", headers={"cache-control": "max-age=60"}))
+            config = TileFetchConfig(cache_root=Path(tmpdir))
+            coord = TileCoord(z=1, x=1, y=0)
+
+            fetch_tiles((coord,), config, opener=opener, now=now)
+
+            metadata = tile_cache_path(coord, config).with_suffix(".json").read_text(encoding="utf-8")
+            self.assertIn("Tue, 23 Jun 2026 12:00:00 GMT", metadata)
+
     def test_fetch_tiles_reads_fresh_cache_without_network(self) -> None:
         now = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
         with tempfile.TemporaryDirectory() as tmpdir:

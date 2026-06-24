@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+import re
 from time import perf_counter
 from typing import Any, Callable
 from uuid import uuid4
 
 from app.policy import AdminPolicy
-from app.redaction import redact_payload
-from core.config import MapsConfig
+from app.redaction import RedactionPolicy, redact_payload
+from core.config import MapsConfig, PublicArtifactsConfig
 from core.events import CanonicalEvent, EventKind
 from core.errors import AppError, ErrorCategory
 from core.i18n import DEFAULT_LANGUAGE, LocalizedText, SupportedLanguage, TranslationKey
@@ -20,7 +21,7 @@ from llm.operations import IntentClassificationInput, classify_intent
 from storage.repositories import DebugTraceEventRecord, HistoryEventRecord
 from storage.unit_of_work import RepositoryBundle, UnitOfWork
 from workflows.chat import ChatWorkflow
-from workflows.debug import DebugWorkflow
+from workflows.debug import DebugWorkflow, debug_level_from_text, debug_messages_for_trace, strip_debug_modifiers
 from workflows.gpx_ingest import GpxIngestWorkflow
 from workflows.help import HelpWorkflow
 from workflows.noop import NoopWorkflow
@@ -28,6 +29,7 @@ from workflows.settings import SettingsWorkflow
 from workflows.visualization import VisualizationWorkflow
 from workflows.workout_chat import WorkoutChatWorkflow
 from workflows.workout_management import WorkoutManagementWorkflow
+from weather.service import WeatherProvider
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,9 @@ class DispatchContext:
     max_attachment_size_bytes: int = 25 * 1024 * 1024
     raw_gpx_path: Path | None = None
     artifact_path: Path | None = None
+    public_artifacts: PublicArtifactsConfig = PublicArtifactsConfig()
     maps_config: MapsConfig = MapsConfig()
+    weather_provider: WeatherProvider | None = None
     status_callback: Callable[[str], None] | None = None
     trace_keep_limit: int = 1000
 
@@ -69,42 +73,55 @@ class Dispatcher:
         self.settings_workflow = settings_workflow or SettingsWorkflow()
 
     def dispatch(self, event: CanonicalEvent, context: DispatchContext) -> WorkflowResult:
+        debug_level = _debug_level_for_event(event)
+        workflow_event = _event_without_debug_modifiers(event) if debug_level is not None else event
         with context.unit_of_work as repositories:
-            existing_user = repositories.users.get(event.user_id)
+            existing_user = repositories.users.get(workflow_event.user_id)
             user_metadata, first_interaction_payload = _user_metadata_for_event(
                 existing_user.metadata if existing_user is not None else {},
-                event,
+                workflow_event,
             )
             repositories.users.touch(
-                user_id=event.user_id,
-                discord_user_name=event.user_name,
-                discord_display_name=str(event.metadata.get("discord_display_name", "")),
-                seen_at=event.created_at,
-                source=event.source.value,
+                user_id=workflow_event.user_id,
+                discord_user_name=workflow_event.user_name,
+                discord_display_name=str(workflow_event.metadata.get("discord_display_name", "")),
+                seen_at=workflow_event.created_at,
+                source=workflow_event.source.value,
                 metadata=user_metadata,
             )
             repositories.channels.upsert(
-                channel_id=event.channel_id,
-                guild_id=event.guild_id,
+                channel_id=workflow_event.channel_id,
+                guild_id=workflow_event.guild_id,
             )
             repositories.history.add(_history_record(event))
 
             try:
-                route = route_event(event, llm_gateway=context.llm_gateway)
+                route = route_event(workflow_event, llm_gateway=context.llm_gateway)
             except LLMGatewayError:
-                return _routing_model_unavailable_result(event, repositories, context)
-            trace_id = _trace_id(event)
+                result = _routing_model_unavailable_result(workflow_event, repositories, context)
+                if debug_level is not None:
+                    trace = repositories.debug_traces.latest_for_user(workflow_event.user_id)
+                    debug_messages = debug_messages_for_trace(
+                        repositories,
+                        trace,
+                        level=debug_level,
+                        ephemeral=False,
+                    )
+                    result = _with_messages(result, (*result.messages, *debug_messages))
+                return result
+            trace_id = _trace_id(workflow_event)
             repositories.debug_traces.create(
                 trace_id=trace_id,
-                source_event_id=event.event_id,
+                source_event_id=workflow_event.event_id,
                 workflow=route.target.value,
                 status="started",
-                started_at=event.created_at,
+                started_at=workflow_event.created_at,
                 payload={
-                    "user_id": event.user_id,
-                    "channel_id": event.channel_id,
-                    "guild_id": event.guild_id,
+                    "user_id": workflow_event.user_id,
+                    "channel_id": workflow_event.channel_id,
+                    "guild_id": workflow_event.guild_id,
                     "route_confidence": route.confidence.value,
+                    "debug_level_requested": debug_level,
                 },
             )
             _add_trace_event(
@@ -114,13 +131,14 @@ class Dispatcher:
                 level=TraceLevel.INFO,
                 message="Inbound canonical event accepted.",
                 payload={
-                    "event_kind": event.kind.value,
-                    "source": event.source.value,
-                    "text_chars": len(event.text),
-                    "attachment_count": len(event.attachments),
-                    "metadata_keys": sorted(str(key) for key in event.metadata.keys()),
+                    "event_kind": workflow_event.kind.value,
+                    "source": workflow_event.source.value,
+                    "text_chars": len(workflow_event.text),
+                    "attachment_count": len(workflow_event.attachments),
+                    "metadata_keys": sorted(str(key) for key in workflow_event.metadata.keys()),
+                    "debug_level_requested": debug_level,
                 },
-                created_at=event.created_at.isoformat(),
+                created_at=workflow_event.created_at.isoformat(),
             )
             _add_trace_event(
                 repositories.debug_traces,
@@ -132,7 +150,7 @@ class Dispatcher:
                     "operations": ("users.touch", "channels.upsert", "history.add"),
                     "history_id": event.event_id,
                 },
-                created_at=event.created_at.isoformat(),
+                created_at=workflow_event.created_at.isoformat(),
             )
             _add_trace_event(
                 repositories.debug_traces,
@@ -145,14 +163,14 @@ class Dispatcher:
                     "confidence": route.confidence.value,
                     "slots": route.slots,
                 },
-                created_at=event.created_at.isoformat(),
+                created_at=workflow_event.created_at.isoformat(),
             )
-            llm_gateway = _trace_llm_gateway(context.llm_gateway, repositories.debug_traces, trace_id, event)
+            llm_gateway = _trace_llm_gateway(context.llm_gateway, repositories.debug_traces, trace_id, workflow_event)
             workflow_repositories = _trace_repository_bundle(
                 repositories,
                 debug_traces=repositories.debug_traces,
                 trace_id=trace_id,
-                created_at=event.created_at.isoformat(),
+                created_at=workflow_event.created_at.isoformat(),
             )
 
             _add_trace_event(
@@ -162,25 +180,25 @@ class Dispatcher:
                 level=TraceLevel.INFO,
                 message="Workflow started.",
                 payload={"workflow": route.target.value},
-                created_at=event.created_at.isoformat(),
+                created_at=workflow_event.created_at.isoformat(),
             )
             if route.target == WorkflowTarget.HELP:
-                result = self.help_workflow.handle(event, route)
+                result = self.help_workflow.handle(workflow_event, route)
             elif route.target == WorkflowTarget.DEBUG:
                 result = self.debug_workflow.handle(
-                    event,
+                    workflow_event,
                     route,
                     workflow_repositories,
                     admin_policy=context.admin_policy,
                     current_trace_id=trace_id,
                 )
             elif route.target == WorkflowTarget.WORKOUT_MANAGEMENT:
-                result = self.workout_management_workflow.handle(event, route, workflow_repositories)
+                result = self.workout_management_workflow.handle(workflow_event, route, workflow_repositories)
             elif route.target == WorkflowTarget.SETTINGS:
-                result = self.settings_workflow.handle(event, route, workflow_repositories)
+                result = self.settings_workflow.handle(workflow_event, route, workflow_repositories)
             elif route.target == WorkflowTarget.GPX_INGEST:
                 result = self.gpx_ingest_workflow.handle(
-                    event,
+                    workflow_event,
                     route,
                     workflow_repositories,
                     max_attachment_size_bytes=context.max_attachment_size_bytes,
@@ -191,32 +209,35 @@ class Dispatcher:
                 if context.status_callback is not None:
                     context.status_callback("visualization_started")
                 result = self.visualization_workflow.handle(
-                    event,
+                    workflow_event,
                     route,
                     workflow_repositories,
                     gateway=llm_gateway,
                     language=context.language,
                     artifact_root=context.artifact_path,
+                    public_artifacts=context.public_artifacts,
                     maps_config=context.maps_config,
+                    weather_provider=context.weather_provider,
                 )
             elif route.target == WorkflowTarget.WORKOUT_CHAT:
                 result = self.workout_chat_workflow.handle(
-                    event,
+                    workflow_event,
                     route,
                     workflow_repositories,
                     gateway=llm_gateway,
                     language=context.language,
+                    weather_provider=context.weather_provider,
                 )
             elif route.target == WorkflowTarget.CHAT:
                 result = self.chat_workflow.handle(
-                    event,
+                    workflow_event,
                     route,
                     workflow_repositories,
                     gateway=llm_gateway,
                     language=context.language,
                 )
             else:
-                result = self.noop_workflow.handle(event, route)
+                result = self.noop_workflow.handle(workflow_event, route)
             if first_interaction_payload is not None:
                 result = _with_state_update(
                     result,
@@ -239,10 +260,10 @@ class Dispatcher:
                     "status": result.status.value,
                     "error_category": result.error.category.value if result.error is not None else None,
                 },
-                created_at=event.created_at.isoformat(),
+                created_at=workflow_event.created_at.isoformat(),
             )
             if route.target == WorkflowTarget.VISUALIZATION:
-                _add_render_trace_event(repositories.debug_traces, trace_id, result, event)
+                _add_render_trace_event(repositories.debug_traces, trace_id, result, workflow_event)
             _add_trace_event(
                 repositories.debug_traces,
                 trace_id=trace_id,
@@ -250,13 +271,22 @@ class Dispatcher:
                 level=TraceLevel.INFO,
                 message="Outbound response prepared.",
                 payload=_outbound_payload(result),
-                created_at=event.created_at.isoformat(),
+                created_at=workflow_event.created_at.isoformat(),
             )
             repositories.debug_traces.finish(
                 trace_id,
                 status=result.status.value,
-                finished_at=event.created_at,
+                finished_at=workflow_event.created_at,
             )
+            if debug_level is not None:
+                trace = repositories.debug_traces.get(trace_id)
+                debug_messages = debug_messages_for_trace(
+                    workflow_repositories,
+                    trace,
+                    level=debug_level,
+                    ephemeral=False,
+                )
+                result = _with_messages(result, (*result.messages, *debug_messages))
             _add_trace_event(
                 repositories.debug_traces,
                 trace_id=trace_id,
@@ -268,7 +298,7 @@ class Dispatcher:
                     "state_update_count": len(result.state_updates),
                     "has_error": result.error is not None,
                 },
-                created_at=event.created_at.isoformat(),
+                created_at=workflow_event.created_at.isoformat(),
             )
             repositories.debug_traces.prune_to_limit(keep=context.trace_keep_limit)
             return result
@@ -284,7 +314,7 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
 
     command_name = str(event.metadata.get("command_name", "")).lower()
     text = event.text.strip().lower()
-    if command_name == "debug" or text in {"/debug", "debug"}:
+    if command_name == "debug":
         return RouteDecision(
             target=WorkflowTarget.DEBUG,
             confidence=RouteConfidence.HIGH,
@@ -332,6 +362,20 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
                 "attachment_ids": [attachment.attachment_id for attachment in event.attachments],
             },
             reason="Explicit GPX ingest command.",
+        )
+    if _has_route_time_estimate_modifier(text):
+        return RouteDecision(
+            target=WorkflowTarget.WORKOUT_CHAT,
+            confidence=RouteConfidence.HIGH,
+            slots={"route_time_estimate": True},
+            reason="Explicit route time estimate modifier.",
+        )
+    if _has_animation_overlay_modifier(text):
+        return RouteDecision(
+            target=WorkflowTarget.VISUALIZATION,
+            confidence=RouteConfidence.HIGH,
+            slots={"animation_overlay": True},
+            reason="Explicit animation overlay modifier.",
         )
     if event.kind == EventKind.MENTION and event.attachments and _has_gpx_attachment(event):
         return RouteDecision(
@@ -398,6 +442,17 @@ def route_event(event: CanonicalEvent, *, llm_gateway: LLMGateway | None = None)
     )
 
 
+def _has_route_time_estimate_modifier(text: str) -> bool:
+    return any(
+        modifier in {"estimate", "ennuste", "aikaennuste", "time_estimate"}
+        for modifier in re.findall(r"(?<!\w)\+([\w-]+)", text.lower().replace("-", "_"))
+    )
+
+
+def _has_animation_overlay_modifier(text: str) -> bool:
+    return re.search(r"(?<!\w)overlay\s*=\s*[^\s;]+", text, flags=re.IGNORECASE) is not None
+
+
 def _user_metadata_for_event(
     existing_metadata: dict[str, Any],
     event: CanonicalEvent,
@@ -443,6 +498,26 @@ def _with_state_update(result: WorkflowResult, update: StateUpdate) -> WorkflowR
         trace_events=result.trace_events,
         error=result.error,
     )
+
+
+def _with_messages(result: WorkflowResult, messages: tuple[OutgoingMessage, ...]) -> WorkflowResult:
+    return WorkflowResult(
+        status=result.status,
+        messages=messages,
+        state_updates=result.state_updates,
+        trace_events=result.trace_events,
+        error=result.error,
+    )
+
+
+def _debug_level_for_event(event: CanonicalEvent) -> int | None:
+    if event.kind != EventKind.MENTION:
+        return None
+    return debug_level_from_text(event.text)
+
+
+def _event_without_debug_modifiers(event: CanonicalEvent) -> CanonicalEvent:
+    return replace(event, text=strip_debug_modifiers(event.text))
 
 
 def _routing_model_unavailable_result(
@@ -591,6 +666,7 @@ def _add_trace_event(
     message: str,
     payload: dict[str, object] | None = None,
     created_at: str,
+    redaction_policy: RedactionPolicy | None = None,
 ) -> None:
     debug_traces.add_event(
         DebugTraceEventRecord(
@@ -599,7 +675,7 @@ def _add_trace_event(
             stage=stage.value,
             level=level.value,
             message=message,
-            payload=redact_payload(payload or {}),
+            payload=redact_payload(payload or {}, redaction_policy or RedactionPolicy()),
             created_at=created_at,
         )
     )
@@ -676,8 +752,14 @@ def _trace_llm_gateway(
                 "response_keys": list(call.response_keys),
                 "error_type": call.error_type,
                 "error_message": call.error_message,
+                "llm_payloads": {
+                    "system_prompt": call.system_prompt,
+                    "user_payload": call.user_payload or {},
+                    "response_payload": call.response_payload or {},
+                },
             },
             created_at=event.created_at.isoformat(),
+            redaction_policy=RedactionPolicy(max_string_length=1200, max_sequence_items=80, max_mapping_items=120, max_depth=8),
         )
 
     return LLMGateway(gateway.client, observer=observe)
@@ -713,6 +795,13 @@ def _trace_repository_bundle(
         active_workouts=_RepositoryTraceProxy(
             "active_workouts",
             repositories.active_workouts,
+            debug_traces,
+            trace_id,
+            created_at,
+        ),
+        workout_estimate_features=_RepositoryTraceProxy(
+            "workout_estimate_features",
+            repositories.workout_estimate_features,
             debug_traces,
             trace_id,
             created_at,

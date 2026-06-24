@@ -49,6 +49,11 @@ class ConfigRuntimeTests(unittest.TestCase):
                         "database_path = data/test.sqlite3",
                         "artifact_path = out/artifacts",
                         "raw_gpx_path = out/gpx",
+                        "[public_artifacts]",
+                        "path = public/aimo",
+                        "base_url = https://example.test/aimo",
+                        "max_discord_attachment_bytes = 12345",
+                        "retention_hours = 12",
                         "[admin]",
                         "user_ids = 111, 222",
                         "[limits]",
@@ -80,6 +85,10 @@ class ConfigRuntimeTests(unittest.TestCase):
         self.assertEqual(config.openai.max_tokens, 123)
         self.assertEqual(config.openai.timeout_s, 45.5)
         self.assertEqual(config.storage.database_path, Path("data/test.sqlite3"))
+        self.assertEqual(config.public_artifacts.path, Path("public/aimo"))
+        self.assertEqual(config.public_artifacts.base_url, "https://example.test/aimo")
+        self.assertEqual(config.public_artifacts.max_discord_attachment_bytes, 12345)
+        self.assertEqual(config.public_artifacts.retention_hours, 12)
         self.assertEqual(config.admin.user_ids, frozenset({"111", "222"}))
         self.assertEqual(config.limits.max_attachment_size_bytes, 4096)
         self.assertEqual(config.history.retention_days, 30)
@@ -126,6 +135,14 @@ class ConfigRuntimeTests(unittest.TestCase):
             path.write_text("[discord]\nallowed_guild_ids = not-a-snowflake\n", encoding="utf-8")
 
             with self.assertRaisesRegex(ConfigError, "discord.allowed_guild_ids"):
+                load_app_config(path)
+
+    def test_public_artifacts_requires_path_and_base_url_together(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "aimo.conf"
+            path.write_text("[public_artifacts]\npath = public/aimo\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "public_artifacts.path"):
                 load_app_config(path)
 
     def test_runtime_builds_translator_from_config(self) -> None:

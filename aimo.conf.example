@@ -25,6 +25,14 @@ database_path = data/aimo.sqlite3
 artifact_path = artifacts
 raw_gpx_path = data/raw_gpx
 
+[public_artifacts]
+# Optional public delivery path for rendered files that are too large for Discord attachments.
+# The directory should be served by nginx and pruned externally, for example after 24h.
+path =
+base_url =
+max_discord_attachment_bytes = 8388608
+retention_hours = 24
+
 [admin]
 # Comma-separated Discord user ids.
 user_ids =
@@ -45,3 +53,9 @@ provider = osm
 maptiler_api_key =
 maptiler_map_id = streets-v4
 timeout_s = 10
+
+[weather]
+# open_meteo = live forecast for dated route-time estimates. none disables live weather and uses seasonal fallback.
+enabled = true
+provider = open_meteo
+timeout_s = 8
